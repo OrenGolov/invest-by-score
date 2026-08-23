@@ -24,6 +24,8 @@ testable from the start.
 - [`docs/features-and-models.md`](docs/features-and-models.md): feature engineering, model families, and calibration
 - [`docs/validation.md`](docs/validation.md): backtesting, paper trading, monitoring, and release gates
 - [`docs/roadmap.md`](docs/roadmap.md): incremental implementation plan and definition of done
+- [`docs/sprint-2.md`](docs/sprint-2.md): Sprint 2 deliverables and approval checklist
+- [`db/migrations/001_initial_schema.sql`](db/migrations/001_initial_schema.sql): schema-only TimescaleDB migration
 
 ## Non-Negotiable Rules
 
