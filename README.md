@@ -1,2 +1,48 @@
 ﻿# Investment Project
-Long-term portfolio and earnings season analysis system.
+
+Point-in-time stock scoring and long-term portfolio analysis platform.
+
+The platform is designed as a governed multi-agent system. It produces an
+explainable ticker score for a requested timestamp, learns from forecast
+outcomes, and remains in analysis or paper-trading mode until strict evidence
+and risk criteria are met. A score is not a promise of return and is not
+financial advice.
+
+## Current Status
+
+The repository currently contains the first data foundation in
+[`fetch_data.py`](fetch_data.py): Yahoo Finance OHLCV retrieval with local
+Parquet caching. The system design is documented before implementation so that
+data lineage, point-in-time correctness, agent contracts, and veto rules are
+testable from the start.
+
+## Design Documents
+
+- [`docs/architecture.md`](docs/architecture.md): system boundaries, data flow, and timestamp policy
+- [`docs/data-model.md`](docs/data-model.md): database schema, lineage, quality, and source reliability
+- [`docs/agents.md`](docs/agents.md): ten agent responsibilities, contracts, ensemble, and veto logic
+- [`docs/features-and-models.md`](docs/features-and-models.md): feature engineering, model families, and calibration
+- [`docs/validation.md`](docs/validation.md): backtesting, paper trading, monitoring, and release gates
+- [`docs/roadmap.md`](docs/roadmap.md): incremental implementation plan and definition of done
+
+## Non-Negotiable Rules
+
+1. Point-in-time data only: a prediction may use information available by its
+	requested timestamp, including publication and exchange timestamps.
+2. No single model or agent may create a trade decision.
+3. Risk Management and Performance Auditor can veto any proposed trade.
+4. High uncertainty, contradictory evidence, stale data, or abnormal market
+	conditions produces `NO_TRADE` or `ANALYSIS_ONLY`.
+5. Real-capital execution is disabled until the validation gates in
+	[`docs/validation.md`](docs/validation.md) are passed and explicitly
+	approved.
+
+## Existing Data Collector
+
+```powershell
+python fetch_data.py
+```
+
+The current collector is a prototype input adapter, not a production-grade
+real-time or execution service. Provider licensing, rate limits, timestamps,
+corporate actions, and source outages must be handled before deployment.
