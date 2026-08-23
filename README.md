@@ -46,3 +46,23 @@ python fetch_data.py
 The current collector is a prototype input adapter, not a production-grade
 real-time or execution service. Provider licensing, rate limits, timestamps,
 corporate actions, and source outages must be handled before deployment.
+
+## Open on Another PC
+
+Clone the repository and recreate the virtual environment locally. The local
+`venv/`, `__pycache__/`, and generated `data/` cache are intentionally not
+stored in GitHub.
+
+```powershell
+git clone https://github.com/OrenGolov/investment-project.git
+cd investment-project
+py -m venv venv
+venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+python fetch_data.py
+```
+
+The last command downloads fresh market data and recreates the local `data/`
+cache. If PowerShell blocks activation, run the project with
+`venv\Scripts\python.exe` directly or adjust the local execution policy.
