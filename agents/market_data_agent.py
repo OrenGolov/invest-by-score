@@ -115,6 +115,7 @@ def fetch_market_snapshot(ticker: str, as_of: str, timestamp: str | None = None)
     elif abs(price_vs_ma_50) < 0.02 and abs(price_vs_ma_200) < 0.02:
         market_regime = "neutral"
 
+    timestamp_valid = all(ts <= target for ts in history.index)
     return {
         "ticker": ticker.upper(),
         "as_of": target.strftime("%Y-%m-%d %H:%M:%S"),
@@ -124,6 +125,18 @@ def fetch_market_snapshot(ticker: str, as_of: str, timestamp: str | None = None)
         "source": "Yahoo Finance",
         "source_type": "public_market_feed",
         "source_confidence": 0.8,
+        "source_contract": {
+            "provider": "Yahoo Finance",
+            "source_type": "market_data",
+            "source_id": "yahoo_finance_chart",
+            "source_confidence": 0.8,
+            "source_timestamp": history.index[-1].strftime("%Y-%m-%d %H:%M:%S"),
+            "as_of": target.strftime("%Y-%m-%d %H:%M:%S"),
+            "status": "live_provider",
+            "timestamp_valid": bool(timestamp_valid),
+            "source_timestamp_must_be_at_or_before_as_of": True,
+            "policy": "Future-dated bars are removed before technical indicators are calculated."
+        },
         "last_valid_bar": history.index[-1].strftime("%Y-%m-%d %H:%M:%S"),
         "first_valid_bar": history.index[0].strftime("%Y-%m-%d %H:%M:%S"),
         "bars_available": bars_available,

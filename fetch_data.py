@@ -220,6 +220,30 @@ def _coerce_float(value) -> float | None:
         return None
 
 
+def _build_source_contract(
+    provider: str,
+    source_type: str,
+    source_id: str,
+    source_confidence: float,
+    source_timestamp: str | None,
+    as_of: str,
+    source_status: str,
+    timestamp_valid: bool,
+) -> dict:
+    return {
+        "provider": provider,
+        "source_type": source_type,
+        "source_id": source_id,
+        "source_confidence": round(float(source_confidence), 4),
+        "source_timestamp": source_timestamp,
+        "as_of": as_of,
+        "status": source_status,
+        "timestamp_valid": bool(timestamp_valid),
+        "source_timestamp_must_be_at_or_before_as_of": True,
+        "policy": "Future-dated source values are rejected before they are used in any score."
+    }
+
+
 def fetch_fundamental_snapshot(
     ticker: str,
     as_of: str,
@@ -288,6 +312,7 @@ def fetch_fundamental_snapshot(
             "enterprise_value": _coerce_float(payload.get("EnterpriseValue")),
         }
 
+        timestamp_valid = regular_market_ts is None or regular_market_ts <= pd.Timestamp(as_of) + pd.Timedelta(minutes=5)
         snapshot = {
             "ticker": ticker.upper(),
             "as_of": target.strftime("%Y-%m-%d %H:%M:%S"),
@@ -296,7 +321,7 @@ def fetch_fundamental_snapshot(
             "source_confidence": 0.9,
             "as_of_source_timestamp": regular_market_ts.strftime("%Y-%m-%d %H:%M:%S") if regular_market_ts is not None else None,
             "point_in_time_policy": "Fundamental values are considered point-in-time only when the source timestamp is <= as_of; any future-dated payload is rejected.",
-            "point_in_time_valid": regular_market_ts is None or regular_market_ts <= pd.Timestamp(as_of) + pd.Timedelta(minutes=5),
+            "point_in_time_valid": timestamp_valid,
             "latest_close": round(float(_coerce_float(payload.get("50DayMovingAverage")) or 0.0), 4),
             "valuation_metrics": {name: round(float(value), 4) if isinstance(value, (int, float)) else value for name, value in valuation_metrics.items()},
             "calendar_events": {
@@ -305,6 +330,16 @@ def fetch_fundamental_snapshot(
                 "dividend_date": payload.get("DividendDate"),
             },
             "source_status": "live_provider",
+            "source_contract": _build_source_contract(
+                provider="Alpha Vantage",
+                source_type="fundamentals",
+                source_id="alpha_vantage_overview",
+                source_confidence=0.9,
+                source_timestamp=regular_market_ts.strftime("%Y-%m-%d %H:%M:%S") if regular_market_ts is not None else None,
+                as_of=target.strftime("%Y-%m-%d %H:%M:%S"),
+                source_status="live_provider",
+                timestamp_valid=timestamp_valid,
+            ),
         }
         if use_cache:
             CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -344,6 +379,16 @@ def fetch_fundamental_snapshot(
             "dividend_date": None,
         },
         "source_status": "provider_key_required",
+        "source_contract": _build_source_contract(
+            provider="Alpha Vantage",
+            source_type="fundamentals",
+            source_id="alpha_vantage_overview",
+            source_confidence=0.0,
+            source_timestamp=None,
+            as_of=target.strftime("%Y-%m-%d %H:%M:%S"),
+            source_status="provider_key_required",
+            timestamp_valid=True,
+        ),
     }
     if use_cache:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
