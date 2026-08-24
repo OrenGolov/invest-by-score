@@ -1,5 +1,13 @@
 ﻿# Investment Project
 
+## Sprint 4 Local App
+
+Open the local web app here:
+
+http://127.0.0.1:8000
+
+This page accepts a ticker, uses today as the default date, and shows the JSON output directly below the form.
+
 Point-in-time stock scoring and long-term portfolio analysis platform.
 
 The platform is designed as a governed multi-agent system. It produces an
