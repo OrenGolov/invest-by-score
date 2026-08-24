@@ -171,6 +171,61 @@
     .full-width {
       grid-column: 1 / -1;
     }
+    .health-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 14px;
+      margin-top: 12px;
+    }
+    .health-card {
+      background: rgba(255,255,255,0.02);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px;
+    }
+    .health-card .metric {
+      font-size: 1.5rem;
+      font-weight: 700;
+      margin: 10px 0;
+    }
+    .chart-shell {
+      background: rgba(255,255,255,0.02);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px;
+      margin-top: 12px;
+    }
+    .chart-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(120px, 1fr));
+      gap: 8px;
+      margin-top: 12px;
+    }
+    .mini-stat {
+      background: rgba(255,255,255,0.02);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 10px;
+      font-size: 0.9rem;
+    }
+    th, td {
+      text-align: left;
+      padding: 10px 8px;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+      vertical-align: top;
+    }
+    th {
+      color: var(--muted);
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      font-size: 0.72rem;
+    }
     @media (max-width: 900px) {
       .summary-grid, .layout {
         grid-template-columns: 1fr 1fr;
@@ -425,10 +480,165 @@
               <strong>Cross-validation:</strong> ${escapeHtml(decision.source_reliability?.cross_validation || 'N/A')}
             </div>
           </div>
+
+          <div class="panel full-width">
+            <h2>Price & Moving Average Snapshot</h2>
+            <div id="chart-panel" class="chart-shell"></div>
+          </div>
+
+          <div class="panel full-width">
+            <h2>Provider Health</h2>
+            <div id="provider-health-panel" class="health-grid"></div>
+          </div>
+
+          <div class="panel full-width">
+            <h2>Decision Audit Trail</h2>
+            <div id="audit-events-panel"></div>
+          </div>
         </div>
       `;
 
       output.innerHTML = summary;
+      loadProviderHealth();
+      loadAuditEvents();
+    }
+
+    function renderChartSeries(data) {
+      const panel = document.getElementById('chart-panel');
+      if (!panel) return;
+      const series = Array.isArray(data?.chart_series) ? data.chart_series : [];
+      if (!series.length) {
+        panel.innerHTML = '<div class="muted">No chart history available.</div>';
+        return;
+      }
+
+      const width = 760;
+      const height = 220;
+      const padding = 20;
+      const closes = series.map((point) => Number(point.close || 0));
+      const ma50 = series.map((point) => Number(point.ma_50 || 0));
+      const ma100 = series.map((point) => Number(point.ma_100 || 0));
+      const ma200 = series.map((point) => Number(point.ma_200 || 0));
+      const minY = Math.min(...closes, ...ma50, ...ma100, ...ma200) * 0.98;
+      const maxY = Math.max(...closes, ...ma50, ...ma100, ...ma200) * 1.02;
+      const xStep = series.length > 1 ? (width - padding * 2) / (series.length - 1) : 0;
+
+      const toPath = (values, offset = 0) => values.map((value, index) => {
+        const x = padding + index * xStep;
+        const y = height - padding - ((value - minY) / (maxY - minY || 1)) * (height - padding * 2);
+        return `${index === 0 ? 'M' : 'L'} ${x} ${y + offset}`;
+      }).join(' ');
+
+      const closePath = toPath(closes);
+      const ma50Path = toPath(ma50, 0);
+      const ma100Path = toPath(ma100, 0);
+      const ma200Path = toPath(ma200, 0);
+
+      panel.innerHTML = `
+        <svg viewBox="0 0 ${width} ${height}" width="100%" height="220" style="display:block;border-radius:8px;background:rgba(255,255,255,0.01)">
+          <path d="${ma200Path}" stroke="#7a8ba8" stroke-width="1.2" fill="none" stroke-dasharray="4 4" />
+          <path d="${ma100Path}" stroke="#7ce3c3" stroke-width="1.5" fill="none" />
+          <path d="${ma50Path}" stroke="#5aa8ff" stroke-width="2" fill="none" />
+          <path d="${closePath}" stroke="#ffbf69" stroke-width="2.2" fill="none" />
+        </svg>
+        <div class="chart-grid">
+          <div class="mini-stat"><div class="muted">Close</div><div class="strong">${Number(data?.close ?? series.at(-1)?.close ?? 0).toFixed(2)}</div></div>
+          <div class="mini-stat"><div class="muted">50d MA</div><div class="strong">${Number(data?.moving_averages?.['50d'] ?? series.at(-1)?.ma_50 ?? 0).toFixed(2)}</div></div>
+          <div class="mini-stat"><div class="muted">200d MA</div><div class="strong">${Number(data?.moving_averages?.['200d'] ?? series.at(-1)?.ma_200 ?? 0).toFixed(2)}</div></div>
+        </div>
+      `;
+    }
+
+    function renderProviderHealth(data) {
+      const entries = Object.entries(data || {});
+      const panel = document.getElementById('provider-health-panel');
+      if (!panel) return;
+      if (!entries.length) {
+        panel.innerHTML = '<div class="muted">No provider-health data available.</div>';
+        return;
+      }
+      panel.innerHTML = entries.map(([key, value]) => {
+        const healthScore = Number(value?.health_score ?? 0) * 100;
+        const status = value?.status || 'unknown';
+        const provider = value?.provider || key;
+        return `
+          <div class="health-card">
+            <div class="label">${escapeHtml(key)}</div>
+            <div class="metric">${healthScore.toFixed(0)}%</div>
+            <div class="muted">Provider: ${escapeHtml(provider)}</div>
+            <div class="muted">Status: ${escapeHtml(status)}</div>
+            <div class="muted">Fallback rank: ${escapeHtml(String(value?.fallback_rank ?? 'n/a'))}</div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function renderAuditEvents(events) {
+      const panel = document.getElementById('audit-events-panel');
+      if (!panel) return;
+      if (!events || !events.length) {
+        panel.innerHTML = '<div class="muted">No persisted audit events yet.</div>';
+        return;
+      }
+      panel.innerHTML = `
+        <table>
+          <thead>
+            <tr>
+              <th>Ticker</th>
+              <th>As of</th>
+              <th>Action</th>
+              <th>Score</th>
+              <th>Replay</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${events.slice().reverse().map((event) => `
+              <tr>
+                <td>${escapeHtml(event.ticker || 'N/A')}</td>
+                <td>${escapeHtml(event.as_of || 'N/A')}</td>
+                <td>${escapeHtml(event.action || 'N/A')}</td>
+                <td>${Number(event.score ?? 0).toFixed(2)}</td>
+                <td>${escapeHtml((event.replay_hash || '').slice(0, 12) || 'N/A')}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      `;
+    }
+
+    async function loadChart() {
+      try {
+        const ticker = (tickerInput.value || 'MSFT').trim();
+        const dateValue = dateInput.value || new Date().toISOString().slice(0, 10);
+        const response = await fetch(`/api/chart?ticker=${encodeURIComponent(ticker)}&date=${encodeURIComponent(dateValue)}`);
+        const payload = await response.json();
+        renderChartSeries(payload?.data || {});
+      } catch (error) {
+        const panel = document.getElementById('chart-panel');
+        if (panel) panel.innerHTML = '<div class="muted">Chart data unavailable.</div>';
+      }
+    }
+
+    async function loadProviderHealth() {
+      try {
+        const response = await fetch('/api/provider-health');
+        const payload = await response.json();
+        renderProviderHealth(payload?.data || {});
+      } catch (error) {
+        const panel = document.getElementById('provider-health-panel');
+        if (panel) panel.innerHTML = '<div class="muted">Provider-health unavailable.</div>';
+      }
+    }
+
+    async function loadAuditEvents() {
+      try {
+        const response = await fetch('/api/audit-events?limit=10');
+        const payload = await response.json();
+        renderAuditEvents(payload?.data || []);
+      } catch (error) {
+        const panel = document.getElementById('audit-events-panel');
+        if (panel) panel.innerHTML = '<div class="muted">Audit view unavailable.</div>';
+      }
     }
 
     async function loadScore() {
@@ -448,6 +658,7 @@
 
         status.textContent = 'Result below';
         render(data);
+        await loadChart();
       } catch (error) {
         output.innerHTML = `<div class="panel"><h2>Error</h2><div class="muted">${escapeHtml(error.message || 'Request failed')}</div></div>`;
         status.textContent = 'Error';
@@ -463,6 +674,9 @@
       if (event.key === 'Enter') loadScore();
     });
 
+    loadChart();
+    loadProviderHealth();
+    loadAuditEvents();
     loadScore();
   </script>
 </body>
