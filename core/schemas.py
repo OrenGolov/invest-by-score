@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import List
+from typing import Any, List
 
 
 @dataclass
@@ -12,6 +12,35 @@ class MarketSnapshot:
     recent_returns: List[float] = field(default_factory=list)
     trend: str = "neutral"
     volatility: float = 0.0
+
+
+@dataclass
+class VetoRecord:
+    agent: str
+    status: str
+    reason: str
+    severity: str = "warning"
+    details: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class NoTradeDecision:
+    ticker: str
+    as_of: str
+    mode: str = "NO_TRADE"
+    action: str = "NO_TRADE"
+    reason: str = ""
+    veto_reasons: list[str] = field(default_factory=list)
+    replay_hash: str = ""
+    snapshot_hash: str = ""
+    evidence: list[dict[str, str]] = field(default_factory=list)
+    agent_outputs: list[dict[str, Any]] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 @dataclass

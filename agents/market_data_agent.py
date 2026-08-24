@@ -35,7 +35,10 @@ def fetch_market_snapshot(ticker: str, as_of: str, timestamp: str | None = None)
     else:
         period = "10y"
 
-    history = fetch_price_history(ticker, period=period, interval="1d")
+    try:
+        history = fetch_price_history(ticker, period=period, interval="1d")
+    except Exception as exc:
+        raise ValueError(f"No market data available for {ticker} on or before {target}.") from exc
     history = history.sort_index()
     future_bars_excluded = int((history.index > target).sum())
     history = history[history.index <= target].copy()

@@ -6,7 +6,8 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from core.score_engine import build_score
+from core.agent_contracts import NoTradeDecision
+from core.orchestrator import orchestrate_score
 
 ROOT = Path(__file__).resolve().parent
 HTML_PATH = ROOT / "index.html"
@@ -21,11 +22,29 @@ class AppHandler(SimpleHTTPRequestHandler):
             ticker = (params.get("ticker", ["MSFT"])[0] or "MSFT").strip().upper()
             as_of = params.get("date", [date.today().isoformat()])[0] or date.today().isoformat()
             try:
-                result = build_score(ticker, as_of)
-                payload = result.to_dict()
+                result = orchestrate_score(ticker, as_of)
+                payload = {
+                    "ok": True,
+                    "mode": result.mode,
+                    "decision_type": result.decision_type,
+                    "data": result.to_dict(),
+                }
+                if result.mode == "NO_TRADE":
+                    payload["data"] = NoTradeDecision(
+                        ticker=result.ticker,
+                        as_of=result.as_of,
+                        mode=result.mode,
+                        action=result.action,
+                        reason="; ".join(result.veto_reasons) if result.veto_reasons else "insufficient evidence",
+                        veto_reasons=result.veto_reasons,
+                        replay_hash=result.replay_hash,
+                        snapshot_hash=result.snapshot_hash,
+                        evidence=[{"source_record_id": source_id, "reason": "vetoed"} for source_id in result.source_record_ids],
+                        agent_outputs=result.agent_outputs,
+                    ).to_dict()
                 self._send_json(200, payload)
             except Exception as exc:  # pragma: no cover - runtime validation path
-                self._send_json(400, {"error": str(exc)})
+                self._send_json(400, {"ok": False, "error": str(exc)})
             return
 
         if parsed.path in ("/", "/index.html"):

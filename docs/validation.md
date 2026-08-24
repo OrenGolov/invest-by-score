@@ -30,6 +30,18 @@ advance the window, and test the final frozen model on untouched data. No
 future labels, revised values, or later source reliability weights may enter a
 prior fold.
 
+## Source Reliability and Hard Gates
+
+The governance layer enforces a fail-closed quality model.
+
+- A source is invalid if its timestamp is after the requested `as_of`.
+- A source is invalid if freshness or completeness falls below the domain floor.
+- A source cannot be used for a decision if confidence is below the required threshold.
+- Missing, stale, or contradictory critical sources force `ANALYSIS_ONLY` or `NO_TRADE`.
+
+The system records source failures with the reason, the source ID, the timestamp violation,
+and the applied fallback or rejection outcome. This is not a soft warning: it is a decision gate.
+
 ## Paper-Trading Gate
 
 Live capital remains disabled until all are true:

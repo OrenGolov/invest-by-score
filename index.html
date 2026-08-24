@@ -275,21 +275,32 @@
     }
 
     function render(data) {
-      const score = Number(data.score ?? 0);
-      const currentScore = Number(data.current_time_score ?? data.score ?? 0);
-      const longTermScore = Number(data.long_term_score ?? data.score ?? 0);
-      const confidence = Number(data.confidence ?? 0) * 100;
-      const primaryAction = data.recommended_actions?.primary || data.action || 'ANALYSIS_ONLY';
+      const decision = data?.data || data;
+      const score = Number(decision.score ?? 0);
+      const currentScore = Number(decision.current_time_score ?? decision.score ?? 0);
+      const longTermScore = Number(decision.long_term_score ?? decision.score ?? 0);
+      const confidence = Number(decision.confidence ?? 0) * 100;
+      const primaryAction = decision.recommended_actions?.primary || decision.action || 'ANALYSIS_ONLY';
       const scoreClass = score >= 7 ? 'score-good' : score >= 4 ? 'score-warn' : 'score-bad';
       const currentClass = currentScore >= 7 ? 'score-good' : currentScore >= 4 ? 'score-warn' : 'score-bad';
       const longTermClass = longTermScore >= 7 ? 'score-good' : longTermScore >= 4 ? 'score-warn' : 'score-bad';
+      const vetoReasons = Array.isArray(decision.veto_reasons) ? decision.veto_reasons : [];
 
       const summary = `
+        <div class="panel full-width">
+          <h2>Decision State</h2>
+          <div class="metric-row"><span class="muted">Mode</span><span class="strong">${escapeHtml(decision.mode || 'ANALYSIS_ONLY')}</span></div>
+          <div class="metric-row"><span class="muted">Action</span><span class="strong">${escapeHtml(decision.action || primaryAction)}</span></div>
+          <div class="metric-row"><span class="muted">Decision type</span><span class="strong">${escapeHtml(decision.decision_type || 'score')}</span></div>
+          <div class="metric-row"><span class="muted">Replay hash</span><span class="strong">${escapeHtml(decision.replay_hash || 'N/A')}</span></div>
+          <div style="margin-top: 12px;"><strong>Veto reasons:</strong> ${vetoReasons.length ? renderList(vetoReasons) : '<span class="muted">None</span>'}</div>
+        </div>
+
         <div class="summary-grid">
           <div class="card">
             <div class="label">Ticker</div>
-            <div class="value">${escapeHtml(data.ticker || 'N/A')}</div>
-            <div class="sub">${escapeHtml(data.as_of || 'N/A')}</div>
+            <div class="value">${escapeHtml(decision.ticker || 'N/A')}</div>
+            <div class="sub">${escapeHtml(decision.as_of || 'N/A')}</div>
           </div>
           <div class="card">
             <div class="label">Current</div>
@@ -317,9 +328,9 @@
           <div class="panel">
             <h2>Recommended Actions</h2>
             <div class="recommendation-list">
-              ${renderRecommendationOptions(data.recommended_actions?.options || [])}
+              ${renderRecommendationOptions(decision.recommended_actions?.options || [])}
             </div>
-            <div class="muted" style="margin-top: 16px;"><strong>Re-evaluation date:</strong> ${escapeHtml(data.recommended_actions?.re_evaluation_date || 'TBD')}</div>
+            <div class="muted" style="margin-top: 16px;"><strong>Re-evaluation date:</strong> ${escapeHtml(decision.recommended_actions?.re_evaluation_date || 'TBD')}</div>
           </div>
 
           <div class="panel">
@@ -355,22 +366,22 @@
             <h2>Insights</h2>
             <div>
               <div><strong>Bullish signals:</strong></div>
-              ${renderList(data.insights?.bullish_signals || [], 'None listed.')}
+              ${renderList(decision.insights?.bullish_signals || [], 'None listed.')}
             </div>
             <div style="margin-top: 14px;">
               <div><strong>Bearish signals:</strong></div>
-              ${renderList(data.insights?.bearish_signals || [], 'None listed.')}
+              ${renderList(decision.insights?.bearish_signals || [], 'None listed.')}
             </div>
             <div style="margin-top: 14px;">
               <div><strong>Opportunities:</strong></div>
-              ${renderList(data.insights?.opportunities || [], 'None listed.')}
+              ${renderList(decision.insights?.opportunities || [], 'None listed.')}
             </div>
             <div style="margin-top: 14px;">
               <div><strong>Risks:</strong></div>
-              ${renderList(data.insights?.risks || [], 'None listed.')}
+              ${renderList(decision.insights?.risks || [], 'None listed.')}
             </div>
-            <div style="margin-top: 14px;"><strong>Trend:</strong> ${escapeHtml(data.insights?.trend_analysis || 'N/A')}</div>
-            <div style="margin-top: 8px;"><strong>Sentiment:</strong> ${escapeHtml(data.insights?.sentiment_analysis || 'N/A')}</div>
+            <div style="margin-top: 14px;"><strong>Trend:</strong> ${escapeHtml(decision.insights?.trend_analysis || 'N/A')}</div>
+            <div style="margin-top: 8px;"><strong>Sentiment:</strong> ${escapeHtml(decision.insights?.sentiment_analysis || 'N/A')}</div>
           </div>
 
           <div class="panel full-width">
@@ -408,10 +419,10 @@
           <div class="panel full-width">
             <h2>Source Reliability</h2>
             <div class="source-list">
-              ${renderSourceList(data.source_reliability?.sources || [])}
+              ${renderSourceList(decision.source_reliability?.sources || [])}
             </div>
             <div style="margin-top: 14px;">
-              <strong>Cross-validation:</strong> ${escapeHtml(data.source_reliability?.cross_validation || 'N/A')}
+              <strong>Cross-validation:</strong> ${escapeHtml(decision.source_reliability?.cross_validation || 'N/A')}
             </div>
           </div>
         </div>
