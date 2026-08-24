@@ -261,6 +261,38 @@ def _quality_adjusted_confidence(domain: str, provider_status: str, timestamp_va
     return max(0.0, min(1.0, round(base, 4)))
 
 
+def resolve_fundamental_provider(ticker: str, as_of: str, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> dict:
+    """Resolve the active fundamental provider and record the explicit fallback path."""
+    api_key = os.getenv("ALPHAVANTAGE_API_KEY")
+    if api_key:
+        return {
+            "provider": "Alpha Vantage",
+            "source_type": "fundamentals",
+            "source_id": "alpha_vantage_overview",
+            "status": "live_provider",
+            "fallback_rank": 1,
+            "fallbacks": ["Alpha Vantage"],
+            "source_confidence": 0.9,
+            "selection_reason": "API key configured; provider selected for live fundamental coverage.",
+            "ticker": ticker.upper(),
+            "as_of": as_of,
+        }
+
+    registry = _source_registry_for("fundamentals")
+    return {
+        "provider": "manual_fallback_contract",
+        "source_type": "fundamentals",
+        "source_id": "manual_fallback_contract",
+        "status": "provider_key_required",
+        "fallback_rank": 0,
+        "fallbacks": [registry["provider"]],
+        "source_confidence": 0.0,
+        "selection_reason": "No ALPHAVANTAGE_API_KEY configured; the app remains analysis-only until a trusted provider is available.",
+        "ticker": ticker.upper(),
+        "as_of": as_of,
+    }
+
+
 def _build_source_contract(
     provider: str,
     source_type: str,
@@ -302,6 +334,7 @@ def fetch_fundamental_snapshot(
     """
     target = pd.Timestamp(as_of)
     cache_path = CACHE_DIR / f"{ticker.upper()}_fundamentals_{target.date()}.json"
+    provider_resolution = resolve_fundamental_provider(ticker, as_of, timeout)
     if use_cache and not isinstance(urllib.request.urlopen, Mock) and cache_path.exists():
         age = timedelta(seconds=time.time() - cache_path.stat().st_mtime)
         if age <= cache_ttl:
@@ -387,6 +420,7 @@ def fetch_fundamental_snapshot(
                 source_status="live_provider",
                 timestamp_valid=timestamp_valid,
             ),
+            "provider_resolution": provider_resolution,
         }
         if use_cache:
             CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -438,6 +472,7 @@ def fetch_fundamental_snapshot(
             source_status="provider_key_required",
             timestamp_valid=True,
         ),
+        "provider_resolution": provider_resolution,
     }
     if use_cache:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
