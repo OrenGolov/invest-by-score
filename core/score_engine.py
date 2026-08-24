@@ -370,6 +370,24 @@ def _build_feature_metadata(snapshot: dict) -> dict:
     }
 
 
+def _build_governance(snapshot: dict, score: float) -> dict:
+    quality_score = float(snapshot.get("data_quality", {}).get("score", 0.0))
+    source_confidence = float(snapshot.get("source_confidence", 0.0))
+    action_allowed = bool(score >= 5.5 and quality_score >= 60.0 and source_confidence >= 0.7)
+
+    return {
+        "risk_gate_passed": bool(action_allowed),
+        "evidence_status": "sufficient" if action_allowed else "insufficient",
+        "minimum_quality_score": 60.0,
+        "quality_score": round(quality_score, 2),
+        "minimum_source_confidence": 0.7,
+        "source_confidence": round(source_confidence, 2),
+        "score_threshold": 5.5,
+        "mode": "ANALYSIS_ONLY" if not action_allowed else "PAPER_TRADING_READY",
+        "governance_note": "Scores are only actionable when evidence quality, source confidence, and minimum score thresholds are all satisfied.",
+    }
+
+
 def build_score(ticker: str, as_of: str, timestamp: str | None = None) -> ScoreResult:
     """Build a current-time and long-term score for a ticker at a given point-in-time."""
     snapshot = fetch_market_snapshot(ticker, as_of, timestamp)
@@ -429,6 +447,7 @@ def build_score(ticker: str, as_of: str, timestamp: str | None = None) -> ScoreR
     source_reliability = _build_source_reliability()
     technical_features = _build_technical_features(snapshot)
     feature_metadata = _build_feature_metadata(snapshot)
+    governance = _build_governance(snapshot, capped_score)
 
     return ScoreResult(
         ticker=snapshot["ticker"],
@@ -454,4 +473,5 @@ def build_score(ticker: str, as_of: str, timestamp: str | None = None) -> ScoreR
         source_reliability=source_reliability,
         technical_features=technical_features,
         feature_metadata=feature_metadata,
+        governance=governance,
     )

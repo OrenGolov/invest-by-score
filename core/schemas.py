@@ -39,6 +39,7 @@ class ScoreResult:
     source_reliability: dict[str, object] = field(default_factory=dict)
     technical_features: dict[str, object] = field(default_factory=dict)
     feature_metadata: dict[str, object] = field(default_factory=dict)
+    governance: dict[str, object] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
