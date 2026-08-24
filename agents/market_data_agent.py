@@ -118,6 +118,21 @@ def fetch_market_snapshot(ticker: str, as_of: str, timestamp: str | None = None)
     elif abs(price_vs_ma_50) < 0.02 and abs(price_vs_ma_200) < 0.02:
         market_regime = "neutral"
 
+    chart_series = []
+    close_series = history["Close"].astype(float)
+    ma50_series = close_series.rolling(window=50, min_periods=1).mean()
+    ma100_series = close_series.rolling(window=100, min_periods=1).mean()
+    ma200_series = close_series.rolling(window=200, min_periods=1).mean()
+    for index, ts in enumerate(history.index):
+        chart_series.append({
+            "date": ts.strftime("%Y-%m-%d"),
+            "close": round(float(close_series.iloc[index]), 2),
+            "ma_50": round(float(ma50_series.iloc[index]), 2),
+            "ma_100": round(float(ma100_series.iloc[index]), 2),
+            "ma_200": round(float(ma200_series.iloc[index]), 2),
+            "volume": int(history["Volume"].iloc[index]),
+        })
+
     timestamp_valid = all(ts <= target for ts in history.index)
     return {
         "ticker": ticker.upper(),
@@ -169,6 +184,7 @@ def fetch_market_snapshot(ticker: str, as_of: str, timestamp: str | None = None)
         },
         "rsi": round(float(rsi), 2),
         "volatility": round(float(volatility), 4),
+        "chart_series": chart_series,
         "data_quality_score": round(float(max(0.0, min(100.0, quality_score))), 2),
         "quality_flags": quality_flags,
         "market_regime": market_regime,

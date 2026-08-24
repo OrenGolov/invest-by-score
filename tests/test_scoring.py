@@ -62,6 +62,14 @@ class ScoringEngineTests(unittest.TestCase):
         self.assertIn("bullish_signals", payload["insights"])
         self.assertIn("weighted_contributions", payload["scoring_breakdown"])
 
+    def test_current_and_long_term_scores_diverge_by_regime(self):
+        per_ticker = {ticker: build_score(ticker, "2024-01-02") for ticker in ["MSFT", "AAPL", "NVDA", "TSLA", "META"]}
+        current_values = {ticker: result.current_time_score for ticker, result in per_ticker.items()}
+        long_values = {ticker: result.long_term_score for ticker, result in per_ticker.items()}
+        self.assertGreater(len(set(round(value, 2) for value in current_values.values())), 1)
+        self.assertGreater(len(set(round(value, 2) for value in long_values.values())), 1)
+        self.assertTrue(any(abs(result.current_time_score - result.long_term_score) > 0.05 for result in per_ticker.values()))
+
     def test_market_snapshot_reports_point_in_time_and_quality(self):
         snapshot = fetch_market_snapshot("MSFT", "2024-01-02")
         self.assertEqual(snapshot["as_of"], "2024-01-02 00:00:00")
@@ -69,6 +77,9 @@ class ScoringEngineTests(unittest.TestCase):
         self.assertIn("future_bars_excluded", snapshot)
         self.assertIn("data_quality", snapshot)
         self.assertIn("score", snapshot["data_quality"])
+        self.assertIn("chart_series", snapshot)
+        self.assertTrue(snapshot["chart_series"])
+        self.assertIn("ma_50", snapshot["chart_series"][0])
         self.assertIsInstance(snapshot["data_quality"]["flags"], list)
         self.assertIsInstance(snapshot["future_bars_excluded"], int)
 

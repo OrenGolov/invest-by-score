@@ -173,44 +173,38 @@ def _score_current_time(snapshot: dict) -> float:
     rsi = float(snapshot.get("rsi", 50.0))
     volatility = float(snapshot.get("volatility", 0.0))
     volume_ratio = float(snapshot.get("volume_ratio_20d", 1.0))
-    moving_averages = snapshot.get("moving_averages", {})
-    ma_50 = float(moving_averages.get("50d", 0.0))
-    ma_100 = float(moving_averages.get("100d", 0.0))
-    ma_200 = float(moving_averages.get("200d", 0.0))
-
     price_vs_ma_50 = float(snapshot.get("price_vs_ma_50", 0.0))
     price_vs_ma_100 = float(snapshot.get("price_vs_ma_100", 0.0))
+    ma_50 = float(snapshot.get("moving_averages", {}).get("50d", 0.0))
+    ma_100 = float(snapshot.get("moving_averages", {}).get("100d", 0.0))
+    ma_200 = float(snapshot.get("moving_averages", {}).get("200d", 0.0))
 
-    score = 5.0
-    score += max(-2.0, min(2.0, change_1d * 40.0))
-    score += max(-1.5, min(1.5, change_5d * 25.0))
-    score += max(-1.5, min(1.5, change_20d * 15.0))
-    score += max(-1.5, min(1.5, trend_vs_20d_mean * 18.0))
-    score += max(-1.5, min(1.5, price_vs_ma_50 * 35.0))
-    score += max(-1.5, min(1.5, price_vs_ma_100 * 22.0))
-    score += max(-1.5, min(1.5, ((rsi - 50.0) / 50.0) * 2.0))
-    score += max(-1.0, min(1.0, (volume_ratio - 1.0) * 2.5))
-    score -= min(1.5, volatility * 25.0)
+    score = 4.0
+    score += max(-1.7, min(1.7, change_1d * 42.0))
+    score += max(-1.4, min(1.4, change_5d * 18.0))
+    score += max(-1.3, min(1.3, change_20d * 12.0))
+    score += max(-1.4, min(1.4, trend_vs_20d_mean * 18.0))
+    score += max(-1.8, min(1.8, price_vs_ma_50 * 30.0))
+    score += max(-1.2, min(1.2, price_vs_ma_100 * 18.0))
+    score += max(-1.2, min(1.2, ((rsi - 50.0) / 35.0)))
+    score += max(-1.0, min(1.0, (volume_ratio - 1.0) * 2.8))
+    if ma_50 and ma_100:
+        score += max(-1.1, min(1.1, ((ma_50 - ma_100) / ma_100) * 22.0))
+    score -= min(1.5, volatility * 28.0)
 
-    news_signal = 0.0
-    if rsi > 55:
-        news_signal += 0.8
-    elif rsi < 45:
-        news_signal -= 0.8
-    if change_1d > 0:
-        news_signal += 0.5
-    elif change_1d < 0:
-        news_signal -= 0.5
+    if rsi > 60:
+        score += 0.4
+    elif rsi < 40:
+        score -= 0.4
+    if volume_ratio > 1.1:
+        score += 0.3
+    elif volume_ratio < 0.9:
+        score -= 0.3
     if price_vs_ma_50 > 0 and price_vs_ma_100 > 0:
-        news_signal += 0.7
+        score += 0.5
     elif price_vs_ma_50 < 0 and price_vs_ma_100 < 0:
-        news_signal -= 0.7
-    if volume_ratio > 1.0:
-        news_signal += 0.5
-    elif volume_ratio < 0.8:
-        news_signal -= 0.5
+        score -= 0.5
 
-    score += max(-1.5, min(1.5, news_signal * 0.8))
     if close <= 0:
         score = 0.0
     return round(max(0.0, min(MAX_SCORE, score)), 2)
@@ -218,25 +212,31 @@ def _score_current_time(snapshot: dict) -> float:
 
 def _score_long_term(snapshot: dict) -> float:
     close = float(snapshot.get("close", 0.0))
-    change_20d = float(snapshot.get("change_20d", 0.0))
-    trend_vs_20d_mean = float(snapshot.get("trend_vs_20d_mean", 0.0))
     volatility = float(snapshot.get("volatility", 0.0))
+    trend_vs_20d_mean = float(snapshot.get("trend_vs_20d_mean", 0.0))
+    change_20d = float(snapshot.get("change_20d", 0.0))
+    price_vs_ma_150 = float(snapshot.get("price_vs_ma_150", 0.0))
+    price_vs_ma_200 = float(snapshot.get("price_vs_ma_200", 0.0))
     moving_averages = snapshot.get("moving_averages", {})
     ma_50 = float(moving_averages.get("50d", 0.0))
     ma_100 = float(moving_averages.get("100d", 0.0))
     ma_150 = float(moving_averages.get("150d", 0.0))
     ma_200 = float(moving_averages.get("200d", 0.0))
-    price_vs_ma_150 = float(snapshot.get("price_vs_ma_150", 0.0))
-    price_vs_ma_200 = float(snapshot.get("price_vs_ma_200", 0.0))
 
-    score = 5.0
-    score += max(-2.0, min(2.0, price_vs_ma_150 * 30.0))
-    score += max(-2.0, min(2.0, price_vs_ma_200 * 28.0))
-    score += max(-1.5, min(1.5, ((ma_50 - ma_200) / ma_200) * 40.0)) if ma_200 else 0.0
-    score += max(-1.0, min(1.0, ((ma_100 - ma_150) / ma_150) * 20.0)) if ma_150 else 0.0
-    score += max(-1.0, min(1.0, change_20d * 10.0))
-    score += max(-1.0, min(1.0, trend_vs_20d_mean * 12.0))
-    score -= min(1.5, volatility * 20.0)
+    score = 4.0
+    score += max(-2.0, min(2.0, price_vs_ma_150 * 26.0))
+    score += max(-2.2, min(2.2, price_vs_ma_200 * 30.0))
+    if ma_200:
+        score += max(-1.8, min(1.8, ((ma_50 - ma_200) / ma_200) * 40.0))
+    if ma_150:
+        score += max(-1.4, min(1.4, ((ma_100 - ma_150) / ma_150) * 22.0))
+    score += max(-1.0, min(1.0, change_20d * 8.0))
+    score += max(-1.0, min(1.0, trend_vs_20d_mean * 10.0))
+    if ma_50 and ma_200:
+        score += max(-1.2, min(1.2, ((ma_50 - ma_200) / ma_200) * 12.0))
+    if ma_100 and ma_200:
+        score += max(-1.0, min(1.0, ((ma_100 - ma_200) / ma_200) * 10.0))
+    score -= min(1.8, volatility * 22.0)
 
     if close <= 0:
         score = 0.0

@@ -6,6 +6,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from agents.market_data_agent import fetch_market_snapshot
 from core.agent_contracts import NoTradeDecision
 from core.audit_store import get_audit_events, get_decision_by_replay_hash
 from core.orchestrator import orchestrate_score
@@ -47,6 +48,24 @@ class AppHandler(SimpleHTTPRequestHandler):
                 self._send_json(200, payload)
             except Exception as exc:  # pragma: no cover - runtime validation path
                 self._send_json(400, {"ok": False, "error": str(exc)})
+            return
+
+        if parsed.path == "/api/chart":
+            params = parse_qs(parsed.query)
+            ticker = (params.get("ticker", ["MSFT"])[0] or "MSFT").strip().upper()
+            as_of = params.get("date", [date.today().isoformat()])[0] or date.today().isoformat()
+            snapshot = fetch_market_snapshot(ticker, as_of)
+            self._send_json(200, {
+                "ok": True,
+                "data": {
+                    "ticker": snapshot["ticker"],
+                    "as_of": snapshot["as_of"],
+                    "moving_averages": snapshot.get("moving_averages", {}),
+                    "chart_series": snapshot.get("chart_series", []),
+                    "close": snapshot.get("close"),
+                    "volume": snapshot.get("volume"),
+                },
+            })
             return
 
         if parsed.path == "/api/provider-health":
