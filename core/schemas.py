@@ -41,6 +41,8 @@ class ScoreResult:
     feature_metadata: dict[str, object] = field(default_factory=dict)
     governance: dict[str, object] = field(default_factory=dict)
     evidence_ledger: dict[str, object] = field(default_factory=dict)
+    fundamental_score: float = 0.0
+    fundamental_features: dict[str, object] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
