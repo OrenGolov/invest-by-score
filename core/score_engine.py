@@ -160,7 +160,86 @@ def _build_insights(snapshot: dict, score: float) -> dict:
     }
 
 
-def _build_scoring_breakdown(snapshot: dict, score: float) -> dict:
+def _score_current_time(snapshot: dict) -> float:
+    close = float(snapshot.get("close", 0.0))
+    change_1d = float(snapshot.get("change_1d", 0.0))
+    change_5d = float(snapshot.get("change_5d", 0.0))
+    change_20d = float(snapshot.get("change_20d", 0.0))
+    trend_vs_20d_mean = float(snapshot.get("trend_vs_20d_mean", 0.0))
+    rsi = float(snapshot.get("rsi", 50.0))
+    volatility = float(snapshot.get("volatility", 0.0))
+    volume_ratio = float(snapshot.get("volume_ratio_20d", 1.0))
+    moving_averages = snapshot.get("moving_averages", {})
+    ma_50 = float(moving_averages.get("50d", 0.0))
+    ma_100 = float(moving_averages.get("100d", 0.0))
+    ma_200 = float(moving_averages.get("200d", 0.0))
+
+    price_vs_ma_50 = float(snapshot.get("price_vs_ma_50", 0.0))
+    price_vs_ma_100 = float(snapshot.get("price_vs_ma_100", 0.0))
+
+    score = 5.0
+    score += max(-2.0, min(2.0, change_1d * 40.0))
+    score += max(-1.5, min(1.5, change_5d * 25.0))
+    score += max(-1.5, min(1.5, change_20d * 15.0))
+    score += max(-1.5, min(1.5, trend_vs_20d_mean * 18.0))
+    score += max(-1.5, min(1.5, price_vs_ma_50 * 35.0))
+    score += max(-1.5, min(1.5, price_vs_ma_100 * 22.0))
+    score += max(-1.5, min(1.5, ((rsi - 50.0) / 50.0) * 2.0))
+    score += max(-1.0, min(1.0, (volume_ratio - 1.0) * 2.5))
+    score -= min(1.5, volatility * 25.0)
+
+    news_signal = 0.0
+    if rsi > 55:
+        news_signal += 0.8
+    elif rsi < 45:
+        news_signal -= 0.8
+    if change_1d > 0:
+        news_signal += 0.5
+    elif change_1d < 0:
+        news_signal -= 0.5
+    if price_vs_ma_50 > 0 and price_vs_ma_100 > 0:
+        news_signal += 0.7
+    elif price_vs_ma_50 < 0 and price_vs_ma_100 < 0:
+        news_signal -= 0.7
+    if volume_ratio > 1.0:
+        news_signal += 0.5
+    elif volume_ratio < 0.8:
+        news_signal -= 0.5
+
+    score += max(-1.5, min(1.5, news_signal * 0.8))
+    if close <= 0:
+        score = 0.0
+    return round(max(0.0, min(MAX_SCORE, score)), 2)
+
+
+def _score_long_term(snapshot: dict) -> float:
+    close = float(snapshot.get("close", 0.0))
+    change_20d = float(snapshot.get("change_20d", 0.0))
+    trend_vs_20d_mean = float(snapshot.get("trend_vs_20d_mean", 0.0))
+    volatility = float(snapshot.get("volatility", 0.0))
+    moving_averages = snapshot.get("moving_averages", {})
+    ma_50 = float(moving_averages.get("50d", 0.0))
+    ma_100 = float(moving_averages.get("100d", 0.0))
+    ma_150 = float(moving_averages.get("150d", 0.0))
+    ma_200 = float(moving_averages.get("200d", 0.0))
+    price_vs_ma_150 = float(snapshot.get("price_vs_ma_150", 0.0))
+    price_vs_ma_200 = float(snapshot.get("price_vs_ma_200", 0.0))
+
+    score = 5.0
+    score += max(-2.0, min(2.0, price_vs_ma_150 * 30.0))
+    score += max(-2.0, min(2.0, price_vs_ma_200 * 28.0))
+    score += max(-1.5, min(1.5, ((ma_50 - ma_200) / ma_200) * 40.0)) if ma_200 else 0.0
+    score += max(-1.0, min(1.0, ((ma_100 - ma_150) / ma_150) * 20.0)) if ma_150 else 0.0
+    score += max(-1.0, min(1.0, change_20d * 10.0))
+    score += max(-1.0, min(1.0, trend_vs_20d_mean * 12.0))
+    score -= min(1.5, volatility * 20.0)
+
+    if close <= 0:
+        score = 0.0
+    return round(max(0.0, min(MAX_SCORE, score)), 2)
+
+
+def _build_scoring_breakdown(snapshot: dict, score: float, current_time_score: float, long_term_score: float) -> dict:
     momentum = max(-2.0, min(2.0, float(snapshot.get("change_20d", 0.0)) * 30.0))
     trend = max(-1.5, min(1.5, float(snapshot.get("trend_vs_20d_mean", 0.0)) * 20.0))
     ma_alignment = 0.0
@@ -173,9 +252,25 @@ def _build_scoring_breakdown(snapshot: dict, score: float) -> dict:
     volume_ratio = float(snapshot.get("volume", 0.0)) / float(snapshot.get("avg_volume_20d", 1.0)) if float(snapshot.get("avg_volume_20d", 1.0)) else 1.0
     volume_weight = max(-1.0, min(1.0, (volume_ratio - 1.0) * 2.0))
     volatility_weight = min(1.5, float(snapshot.get("volatility", 0.0)) * 30.0) if float(snapshot.get("volatility", 0.0)) > 0 else 0.0
+    news_proxy = 0.0
+    rsi = float(snapshot.get("rsi", 50.0))
+    if rsi > 55:
+        news_proxy += 0.8
+    elif rsi < 45:
+        news_proxy -= 0.8
+    if float(snapshot.get("change_1d", 0.0)) > 0:
+        news_proxy += 0.5
+    elif float(snapshot.get("change_1d", 0.0)) < 0:
+        news_proxy -= 0.5
+    if float(snapshot.get("price_vs_ma_50", 0.0)) > 0:
+        news_proxy += 0.7
+    elif float(snapshot.get("price_vs_ma_50", 0.0)) < 0:
+        news_proxy -= 0.7
 
     return {
         "final_score": round(score, 2),
+        "current_time_score": round(current_time_score, 2),
+        "long_term_score": round(long_term_score, 2),
         "weighted_contributions": {
             "price_momentum_20d": round(momentum, 2),
             "trend_vs_20d_mean": round(trend, 2),
@@ -183,13 +278,28 @@ def _build_scoring_breakdown(snapshot: dict, score: float) -> dict:
             "rsi_signal": round(rsi_weight, 2),
             "volume_confirmation": round(volume_weight, 2),
             "volatility_drag": round(-volatility_weight, 2),
+            "news_sentiment_proxy": round(news_proxy, 2),
+        },
+        "current_time_breakdown": {
+            "recent_momentum": round(max(-2.0, min(2.0, float(snapshot.get("change_5d", 0.0)) * 25.0)), 2),
+            "trend_vs_20d_mean": round(max(-1.5, min(1.5, float(snapshot.get("trend_vs_20d_mean", 0.0)) * 18.0)), 2),
+            "ma_50_100_alignment": round(max(-1.5, min(1.5, float(snapshot.get("price_vs_ma_50", 0.0)) * 35.0 + float(snapshot.get("price_vs_ma_100", 0.0)) * 22.0)), 2),
+            "rsi_signal": round(max(-1.5, min(1.5, ((float(snapshot.get("rsi", 50.0)) - 50.0) / 50.0) * 2.0)), 2),
+            "volume_confirmation": round(max(-1.0, min(1.0, (volume_ratio - 1.0) * 2.5)), 2),
+            "news_sentiment_proxy": round(news_proxy, 2),
+        },
+        "long_term_breakdown": {
+            "price_vs_150d_ma": round(max(-2.0, min(2.0, float(snapshot.get("price_vs_ma_150", 0.0)) * 30.0)), 2),
+            "price_vs_200d_ma": round(max(-2.0, min(2.0, float(snapshot.get("price_vs_ma_200", 0.0)) * 28.0)), 2),
+            "ma_50_200_alignment": round(max(-1.5, min(1.5, ((ma_50 - ma_200) / ma_200) * 40.0)), 2) if ma_200 else 0.0,
+            "ma_100_150_alignment": round(max(-1.0, min(1.0, ((ma_50 - ma_200) / ma_200) * 40.0)), 2) if ma_200 else 0.0,
         },
         "score_change_drivers": [
-            "Price momentum change is the largest positive contributor.",
-            "Volume confirmation supports or weakens the trend depending on participation.",
+            "Current-time momentum and news-style sentiment are driving the near-term reading.",
+            "Longer-horizon moving-average positioning and the 150d/200d trend anchor the structural outlook.",
             "Volatility pressure offsets gains when market dispersion expands.",
         ],
-        "historical_comparison": "The score remains in the constructive range versus the recent evaluation baseline, with changes driven by price trend and participation.",
+        "historical_comparison": "The overall score blends a near-term momentum view with a broader trend assessment from the 150d and 200d structure.",
     }
 
 
@@ -205,10 +315,12 @@ def _build_source_reliability() -> dict:
 
 
 def build_score(ticker: str, as_of: str, timestamp: str | None = None) -> ScoreResult:
-    """Build a simple score for a ticker at a given point-in-time."""
+    """Build a current-time and long-term score for a ticker at a given point-in-time."""
     snapshot = fetch_market_snapshot(ticker, as_of, timestamp)
-    raw_score = score_technical(snapshot)
-    capped_score = max(0.0, min(MAX_SCORE, raw_score))
+    current_time_score = _score_current_time(snapshot)
+    long_term_score = _score_long_term(snapshot)
+    blended_score = round((current_time_score + long_term_score) / 2.0, 2)
+    capped_score = max(0.0, min(MAX_SCORE, blended_score))
 
     risk_flags = []
     action = DEFAULT_ACTION
@@ -229,7 +341,7 @@ def build_score(ticker: str, as_of: str, timestamp: str | None = None) -> ScoreR
         confidence = max(0.35, confidence - 0.2)
 
     explanation = (
-        f"Multi-factor technical score using moving averages, RSI, volatility, momentum, and volume. "
+        f"Dual-factor score combining current-time momentum, sentiment proxy, and 50d/100d trend structure with a longer-term view based on 150d/200d averages and historical regime. "
         f"Current price is {snapshot['close']:.2f}; 20-day momentum is {snapshot.get('change_20d', 0.0):.2%}; RSI is {snapshot.get('rsi', 50.0):.1f}."
     )
 
@@ -238,6 +350,7 @@ def build_score(ticker: str, as_of: str, timestamp: str | None = None) -> ScoreR
         "volume_ratio_20d": snapshot.get("volume_ratio_20d"),
         "price_vs_ma_50": snapshot.get("price_vs_ma_50"),
         "price_vs_ma_100": snapshot.get("price_vs_ma_100"),
+        "price_vs_ma_150": snapshot.get("price_vs_ma_150"),
         "price_vs_ma_200": snapshot.get("price_vs_ma_200"),
         "market_regime": snapshot.get("market_regime"),
         "trend_vs_20d_mean": snapshot.get("trend_vs_20d_mean"),
@@ -256,13 +369,15 @@ def build_score(ticker: str, as_of: str, timestamp: str | None = None) -> ScoreR
     latest_financial_report = _build_latest_financial_report(snapshot["as_of"])
     next_expected_report = _build_next_expected_report(snapshot["as_of"])
     insights = _build_insights(snapshot, capped_score)
-    scoring_breakdown = _build_scoring_breakdown(snapshot, capped_score)
+    scoring_breakdown = _build_scoring_breakdown(snapshot, capped_score, current_time_score, long_term_score)
     source_reliability = _build_source_reliability()
 
     return ScoreResult(
         ticker=snapshot["ticker"],
         as_of=snapshot["as_of"],
         score=round(capped_score, 2),
+        current_time_score=round(current_time_score, 2),
+        long_term_score=round(long_term_score, 2),
         confidence=round(confidence, 2),
         explanation=explanation,
         risk_flags=risk_flags,

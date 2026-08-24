@@ -6,90 +6,185 @@
   <title>Investment Score</title>
   <style>
     :root {
-      --bg: #0f172a;
-      --panel: #111827;
-      --panel-alt: #1f2937;
-      --text: #e5e7eb;
-      --muted: #94a3b8;
-      --accent: #60a5fa;
-      --border: #334155;
-      --success: #34d399;
-      --danger: #f87171;
+      --bg: #071827;
+      --bg-deep: #020b14;
+      --panel: #0f1f2d;
+      --panel-alt: #122738;
+      --panel-soft: #18314a;
+      --text: #eaf4ff;
+      --muted: #9bb0c7;
+      --accent: #5aa8ff;
+      --accent-2: #7ce3c3;
+      --warning: #ffbf69;
+      --danger: #ff7a7a;
+      --border: rgba(124, 158, 196, 0.22);
+      --shadow: rgba(0, 0, 0, 0.3);
     }
 
     * { box-sizing: border-box; }
     body {
       margin: 0;
       font-family: Arial, sans-serif;
-      background: var(--bg);
+      background: linear-gradient(180deg, var(--bg) 0%, var(--bg-deep) 100%);
       color: var(--text);
       min-height: 100vh;
-      display: flex;
-      align-items: center;
-      justify-content: center;
       padding: 24px;
     }
     .container {
-      width: min(760px, 100%);
-      background: var(--panel);
+      width: min(1200px, 100%);
+      margin: 0 auto;
+      background: rgba(15, 31, 45, 0.9);
       border: 1px solid var(--border);
-      border-radius: 12px;
+      border-radius: 16px;
+      box-shadow: 0 18px 40px var(--shadow);
       padding: 24px;
-      box-shadow: 0 10px 25px rgba(0,0,0,0.25);
     }
     h1 {
-      margin-top: 0;
-      margin-bottom: 20px;
-      font-size: 1.8rem;
+      margin: 0 0 20px;
+      font-size: clamp(1.8rem, 2vw, 2.5rem);
     }
     .controls {
       display: grid;
-      grid-template-columns: 1fr 1fr auto;
-      gap: 12px;
-      margin-bottom: 20px;
+      grid-template-columns: 1.2fr 1.2fr auto;
+      gap: 14px;
+      margin-bottom: 18px;
     }
     label {
       display: block;
-      font-size: 0.85rem;
-      color: var(--muted);
       margin-bottom: 8px;
+      font-size: 0.8rem;
+      color: var(--muted);
     }
     input, button {
       width: 100%;
-      padding: 12px;
-      border-radius: 8px;
+      height: 46px;
+      border-radius: 10px;
       border: 1px solid var(--border);
       background: var(--panel-alt);
       color: var(--text);
       font-size: 1rem;
+      padding: 0 12px;
     }
     button {
       cursor: pointer;
-      background: var(--accent);
+      background: linear-gradient(135deg, var(--accent), #3d7af5);
       border: none;
-      color: #0f172a;
+      color: white;
       font-weight: 700;
+      transition: transform 0.15s ease;
     }
-    .output {
-      background: #020817;
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 16px;
-      min-height: 120px;
-      white-space: pre-wrap;
-      font-family: Consolas, monospace;
-      color: var(--success);
-      overflow: auto;
-    }
+    button:hover { transform: translateY(-1px); }
     .status {
+      margin: 8px 0 14px;
       color: var(--muted);
       font-size: 0.9rem;
-      margin-bottom: 12px;
     }
-    @media (max-width: 640px) {
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(160px, 1fr));
+      gap: 16px;
+      margin: 18px 0 24px;
+    }
+    .card {
+      background: linear-gradient(180deg, var(--panel-alt), var(--panel));
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px;
+      min-height: 110px;
+    }
+    .card .label {
+      font-size: 0.78rem;
+      color: var(--muted);
+      margin-bottom: 8px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+    .card .value {
+      font-size: clamp(1.2rem, 2vw, 2rem);
+      font-weight: 700;
+    }
+    .card .sub {
+      font-size: 0.82rem;
+      color: var(--muted);
+      margin-top: 6px;
+    }
+    .score-good { color: var(--accent-2); }
+    .score-warn { color: var(--warning); }
+    .score-bad { color: var(--danger); }
+    .layout {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(300px, 1fr));
+      gap: 20px;
+      margin-top: 20px;
+    }
+    .panel {
+      background: rgba(12, 25, 38, 0.9);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 18px;
+    }
+    .panel h2 {
+      margin: 0 0 14px;
+      font-size: 1.1rem;
+    }
+    .recommendation-list,
+    .list,
+    .source-list {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .recommendation-item,
+    .source-item,
+    .insight-item {
+      background: rgba(255,255,255,0.02);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px 12px;
+    }
+    .tag {
+      display: inline-block;
+      border-radius: 999px;
+      padding: 5px 10px;
+      font-size: 0.72rem;
+      font-weight: 700;
+      background: rgba(95, 168, 255, 0.12);
+      color: var(--accent);
+      margin-right: 8px;
+      vertical-align: middle;
+    }
+    .strong { font-weight: 700; }
+    ul {
+      margin: 0;
+      padding-left: 18px;
+    }
+    li { margin: 8px 0; color: var(--text); }
+    .muted { color: var(--muted); }
+    .metric-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 8px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+    }
+    .metric-row:last-child { border-bottom: none; }
+    .full-width {
+      grid-column: 1 / -1;
+    }
+    @media (max-width: 900px) {
+      .summary-grid, .layout {
+        grid-template-columns: 1fr 1fr;
+      }
       .controls {
         grid-template-columns: 1fr;
       }
+    }
+    @media (max-width: 640px) {
+      .summary-grid, .layout {
+        grid-template-columns: 1fr;
+      }
+      body { padding: 14px; }
+      .container { padding: 18px; }
     }
   </style>
 </head>
@@ -113,7 +208,8 @@
     </div>
 
     <div class="status" id="status">Default date is today.</div>
-    <div class="output" id="output">Waiting for input...</div>
+
+    <div id="output"></div>
   </div>
 
   <script>
@@ -130,11 +226,205 @@
       dateInput.value = value;
     }
 
+    function escapeHtml(value) {
+      return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    }
+
+    function renderList(items, fallback = 'None') {
+      if (!items || !items.length) return `<div class="muted">${fallback}</div>`;
+      return '<ul>' + items.map(item => `<li>${escapeHtml(item)}</li>`).join('') + '</ul>';
+    }
+
+    function renderMetricRows(obj) {
+      if (!obj || typeof obj !== 'object') return '<div class="muted">No metrics available.</div>';
+      return Object.entries(obj).map(([key, value]) => `
+        <div class="metric-row">
+          <span class="muted">${escapeHtml(key.replace(/_/g, ' '))}</span>
+          <span class="strong">${escapeHtml(String(value))}</span>
+        </div>
+      `).join('');
+    }
+
+    function renderRecommendationOptions(options = []) {
+      if (!options.length) return '<div class="muted">No recommendation options available.</div>';
+      return options.map(option => `
+        <div class="recommendation-item">
+          <div>
+            <span class="tag">${option.status ? 'Selected' : 'Option'}</span>
+            <span class="strong">${escapeHtml(option.label)}</span>
+          </div>
+          <div class="muted" style="margin-top: 8px;">Confidence: ${Number(option.confidence_pct ?? 0).toFixed(1)}%</div>
+        </div>
+      `).join('');
+    }
+
+    function renderSourceList(sources = []) {
+      if (!sources.length) return '<div class="muted">No source metadata available.</div>';
+      return sources.map(source => `
+        <div class="source-item">
+          <div><span class="strong">${escapeHtml(source.name)}</span></div>
+          <div class="muted">Reliability: ${(Number(source.reliability_score ?? 0) * 100).toFixed(0)}%</div>
+          <div class="muted">${escapeHtml(source.coverage ?? '')}</div>
+        </div>
+      `).join('');
+    }
+
+    function render(data) {
+      const score = Number(data.score ?? 0);
+      const currentScore = Number(data.current_time_score ?? data.score ?? 0);
+      const longTermScore = Number(data.long_term_score ?? data.score ?? 0);
+      const confidence = Number(data.confidence ?? 0) * 100;
+      const primaryAction = data.recommended_actions?.primary || data.action || 'ANALYSIS_ONLY';
+      const scoreClass = score >= 7 ? 'score-good' : score >= 4 ? 'score-warn' : 'score-bad';
+      const currentClass = currentScore >= 7 ? 'score-good' : currentScore >= 4 ? 'score-warn' : 'score-bad';
+      const longTermClass = longTermScore >= 7 ? 'score-good' : longTermScore >= 4 ? 'score-warn' : 'score-bad';
+
+      const summary = `
+        <div class="summary-grid">
+          <div class="card">
+            <div class="label">Ticker</div>
+            <div class="value">${escapeHtml(data.ticker || 'N/A')}</div>
+            <div class="sub">${escapeHtml(data.as_of || 'N/A')}</div>
+          </div>
+          <div class="card">
+            <div class="label">Current</div>
+            <div class="value ${currentClass}">${Number(currentScore).toFixed(2)}/10</div>
+            <div class="sub">Short-term / news-driven</div>
+          </div>
+          <div class="card">
+            <div class="label">Long term</div>
+            <div class="value ${longTermClass}">${Number(longTermScore).toFixed(2)}/10</div>
+            <div class="sub">150d / 200d trend</div>
+          </div>
+          <div class="card">
+            <div class="label">Final</div>
+            <div class="value ${scoreClass}">${Number(score).toFixed(2)}/10</div>
+            <div class="sub">Blended score</div>
+          </div>
+          <div class="card">
+            <div class="label">Confidence</div>
+            <div class="value">${confidence.toFixed(0)}%</div>
+            <div class="sub">Model confidence</div>
+          </div>
+        </div>
+
+        <div class="layout">
+          <div class="panel">
+            <h2>Recommended Actions</h2>
+            <div class="recommendation-list">
+              ${renderRecommendationOptions(data.recommended_actions?.options || [])}
+            </div>
+            <div class="muted" style="margin-top: 16px;"><strong>Re-evaluation date:</strong> ${escapeHtml(data.recommended_actions?.re_evaluation_date || 'TBD')}</div>
+          </div>
+
+          <div class="panel">
+            <h2>Latest Financial Report</h2>
+            <div class="muted"><strong>Publication date:</strong> ${escapeHtml(data.latest_financial_report?.publication_date || 'N/A')}</div>
+            <div class="list" style="margin-top: 12px;">
+              ${renderList(data.latest_financial_report?.key_highlights || [], 'No highlights available.')}
+            </div>
+            <div style="margin-top: 14px;">
+              <div><strong>Deviation:</strong> ${escapeHtml(data.latest_financial_report?.deviations_from_expectations || 'N/A')}</div>
+              <div style="margin-top: 8px;"><strong>Market reaction:</strong> ${escapeHtml(data.latest_financial_report?.market_reaction_summary || 'N/A')}</div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <h2>Next Expected Report</h2>
+            <div class="muted"><strong>Next report:</strong> ${escapeHtml(data.next_expected_report?.publication_date || 'N/A')}</div>
+            <div style="margin-top: 12px;">
+              <div><strong>Consensus:</strong></div>
+              ${renderMetricRows(data.next_expected_report?.expected_consensus || {})}
+            </div>
+            <div style="margin-top: 14px;">
+              <div><strong>Potential catalysts:</strong></div>
+              ${renderList(data.next_expected_report?.potential_catalysts || [], 'None listed.')}
+            </div>
+            <div style="margin-top: 14px;">
+              <div><strong>Risks:</strong></div>
+              ${renderList(data.next_expected_report?.risks || [], 'None listed.')}
+            </div>
+          </div>
+
+          <div class="panel">
+            <h2>Insights</h2>
+            <div>
+              <div><strong>Bullish signals:</strong></div>
+              ${renderList(data.insights?.bullish_signals || [], 'None listed.')}
+            </div>
+            <div style="margin-top: 14px;">
+              <div><strong>Bearish signals:</strong></div>
+              ${renderList(data.insights?.bearish_signals || [], 'None listed.')}
+            </div>
+            <div style="margin-top: 14px;">
+              <div><strong>Opportunities:</strong></div>
+              ${renderList(data.insights?.opportunities || [], 'None listed.')}
+            </div>
+            <div style="margin-top: 14px;">
+              <div><strong>Risks:</strong></div>
+              ${renderList(data.insights?.risks || [], 'None listed.')}
+            </div>
+            <div style="margin-top: 14px;"><strong>Trend:</strong> ${escapeHtml(data.insights?.trend_analysis || 'N/A')}</div>
+            <div style="margin-top: 8px;"><strong>Sentiment:</strong> ${escapeHtml(data.insights?.sentiment_analysis || 'N/A')}</div>
+          </div>
+
+          <div class="panel full-width">
+            <h2>Scoring & Weighting Explanation</h2>
+            <div class="metric-row">
+              <span class="muted">Current-time score</span>
+              <span class="strong">${Number(data.current_time_score ?? currentScore).toFixed(2)}/10</span>
+            </div>
+            <div class="metric-row">
+              <span class="muted">Long-term score</span>
+              <span class="strong">${Number(data.long_term_score ?? longTermScore).toFixed(2)}/10</span>
+            </div>
+            <div class="metric-row">
+              <span class="muted">Final score</span>
+              <span class="strong">${Number(data.scoring_breakdown?.final_score ?? score).toFixed(2)}/10</span>
+            </div>
+            ${renderMetricRows(data.scoring_breakdown?.weighted_contributions || {})}
+            <div style="margin-top: 14px;">
+              <div><strong>Current-time breakdown:</strong></div>
+              ${renderMetricRows(data.scoring_breakdown?.current_time_breakdown || {})}
+            </div>
+            <div style="margin-top: 14px;">
+              <div><strong>Long-term breakdown:</strong></div>
+              ${renderMetricRows(data.scoring_breakdown?.long_term_breakdown || {})}
+            </div>
+            <div style="margin-top: 14px;">
+              <div><strong>Score drivers:</strong></div>
+              ${renderList(data.scoring_breakdown?.score_change_drivers || [], 'No drivers listed.')}
+            </div>
+            <div style="margin-top: 14px;">
+              <div><strong>Historical comparison:</strong> ${escapeHtml(data.scoring_breakdown?.historical_comparison || 'N/A')}</div>
+            </div>
+          </div>
+
+          <div class="panel full-width">
+            <h2>Source Reliability</h2>
+            <div class="source-list">
+              ${renderSourceList(data.source_reliability?.sources || [])}
+            </div>
+            <div style="margin-top: 14px;">
+              <strong>Cross-validation:</strong> ${escapeHtml(data.source_reliability?.cross_validation || 'N/A')}
+            </div>
+          </div>
+        </div>
+      `;
+
+      output.innerHTML = summary;
+    }
+
     async function loadScore() {
       const ticker = (tickerInput.value || 'MSFT').trim();
       const dateValue = dateInput.value || new Date().toISOString().slice(0, 10);
       status.textContent = `Requesting ${ticker} for ${dateValue}...`;
-      output.textContent = 'Loading...';
+      output.innerHTML = '<div class="muted">Loading...</div>';
 
       try {
         const params = new URLSearchParams({ ticker, date: dateValue });
@@ -145,10 +435,10 @@
           throw new Error(data.error || 'Request failed');
         }
 
-        output.textContent = JSON.stringify(data, null, 2);
         status.textContent = 'Result below';
+        render(data);
       } catch (error) {
-        output.textContent = JSON.stringify({ error: error.message }, null, 2);
+        output.innerHTML = `<div class="panel"><h2>Error</h2><div class="muted">${escapeHtml(error.message || 'Request failed')}</div></div>`;
         status.textContent = 'Error';
       }
     }
@@ -161,6 +451,8 @@
     dateInput.addEventListener('keydown', (event) => {
       if (event.key === 'Enter') loadScore();
     });
+
+    loadScore();
   </script>
 </body>
 </html>
