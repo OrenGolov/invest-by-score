@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Investment Score</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --panel: #111827;
+      --panel-alt: #1f2937;
+      --text: #e5e7eb;
+      --muted: #94a3b8;
+      --accent: #60a5fa;
+      --border: #334155;
+      --success: #34d399;
+      --danger: #f87171;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    .container {
+      width: min(760px, 100%);
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 24px;
+      box-shadow: 0 10px 25px rgba(0,0,0,0.25);
+    }
+    h1 {
+      margin-top: 0;
+      margin-bottom: 20px;
+      font-size: 1.8rem;
+    }
+    .controls {
+      display: grid;
+      grid-template-columns: 1fr 1fr auto;
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+    label {
+      display: block;
+      font-size: 0.85rem;
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
+    input, button {
+      width: 100%;
+      padding: 12px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--panel-alt);
+      color: var(--text);
+      font-size: 1rem;
+    }
+    button {
+      cursor: pointer;
+      background: var(--accent);
+      border: none;
+      color: #0f172a;
+      font-weight: 700;
+    }
+    .output {
+      background: #020817;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px;
+      min-height: 120px;
+      white-space: pre-wrap;
+      font-family: Consolas, monospace;
+      color: var(--success);
+      overflow: auto;
+    }
+    .status {
+      color: var(--muted);
+      font-size: 0.9rem;
+      margin-bottom: 12px;
+    }
+    @media (max-width: 640px) {
+      .controls {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Investment Score</h1>
+
+    <div class="controls">
+      <div>
+        <label for="ticker">Ticker</label>
+        <input id="ticker" type="text" value="MSFT" />
+      </div>
+      <div>
+        <label for="date">Date</label>
+        <input id="date" type="date" />
+      </div>
+      <div>
+        <label>&nbsp;</label>
+        <button id="submit">Get score</button>
+      </div>
+    </div>
+
+    <div class="status" id="status">Default date is today.</div>
+    <div class="output" id="output">Waiting for input...</div>
+  </div>
+
+  <script>
+    const tickerInput = document.getElementById('ticker');
+    const dateInput = document.getElementById('date');
+    const output = document.getElementById('output');
+    const status = document.getElementById('status');
+    const submitBtn = document.getElementById('submit');
+
+    function setToday() {
+      const d = new Date();
+      const pad = (n) => String(n).padStart(2, '0');
+      const value = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+      dateInput.value = value;
+    }
+
+    async function loadScore() {
+      const ticker = (tickerInput.value || 'MSFT').trim();
+      const dateValue = dateInput.value || new Date().toISOString().slice(0, 10);
+      status.textContent = `Requesting ${ticker} for ${dateValue}...`;
+      output.textContent = 'Loading...';
+
+      try {
+        const params = new URLSearchParams({ ticker, date: dateValue });
+        const response = await fetch(`/api/score?${params.toString()}`);
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.error || 'Request failed');
+        }
+
+        output.textContent = JSON.stringify(data, null, 2);
+        status.textContent = 'Result below';
+      } catch (error) {
+        output.textContent = JSON.stringify({ error: error.message }, null, 2);
+        status.textContent = 'Error';
+      }
+    }
+
+    setToday();
+    submitBtn.addEventListener('click', loadScore);
+    tickerInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') loadScore();
+    });
+    dateInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') loadScore();
+    });
+  </script>
+</body>
+</html>

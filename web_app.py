@@ -1,0 +1,55 @@
+from __future__ import annotations
+
+import json
+from datetime import date
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+from core.score_engine import build_score
+
+ROOT = Path(__file__).resolve().parent
+HTML_PATH = ROOT / "index.html"
+
+
+class AppHandler(SimpleHTTPRequestHandler):
+    def do_GET(self) -> None:
+        parsed = urlparse(self.path)
+
+        if parsed.path == "/api/score":
+            params = parse_qs(parsed.query)
+            ticker = (params.get("ticker", ["MSFT"])[0] or "MSFT").strip().upper()
+            as_of = params.get("date", [date.today().isoformat()])[0] or date.today().isoformat()
+            try:
+                result = build_score(ticker, as_of)
+                payload = result.to_dict()
+                self._send_json(200, payload)
+            except Exception as exc:  # pragma: no cover - runtime validation path
+                self._send_json(400, {"error": str(exc)})
+            return
+
+        if parsed.path in ("/", "/index.html"):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(HTML_PATH.read_bytes())
+            return
+
+        super().do_GET()
+
+    def _send_json(self, status_code: int, payload: dict) -> None:
+        body = json.dumps(payload, indent=2).encode("utf-8")
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format: str, *args) -> None:
+        return
+
+
+if __name__ == "__main__":
+    server = ThreadingHTTPServer(("127.0.0.1", 8000), AppHandler)
+    print("Serving local website at http://127.0.0.1:8000")
+    server.serve_forever()
