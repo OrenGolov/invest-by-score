@@ -29,6 +29,12 @@ class ScoreResult:
     market_context: dict[str, float | str | dict | list] = field(default_factory=dict)
     data_quality: dict[str, float | int | list[str]] = field(default_factory=dict)
     source_metadata: dict[str, str | float | dict | list] = field(default_factory=dict)
+    recommended_actions: dict[str, object] = field(default_factory=dict)
+    latest_financial_report: dict[str, object] = field(default_factory=dict)
+    next_expected_report: dict[str, object] = field(default_factory=dict)
+    insights: dict[str, object] = field(default_factory=dict)
+    scoring_breakdown: dict[str, float | str | dict | list] = field(default_factory=dict)
+    source_reliability: dict[str, object] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
