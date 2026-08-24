@@ -40,6 +40,7 @@ class ScoreResult:
     technical_features: dict[str, object] = field(default_factory=dict)
     feature_metadata: dict[str, object] = field(default_factory=dict)
     governance: dict[str, object] = field(default_factory=dict)
+    evidence_ledger: dict[str, object] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
