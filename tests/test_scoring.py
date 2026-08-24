@@ -5,6 +5,8 @@ import unittest
 import pandas as pd
 
 from agents.market_data_agent import fetch_market_snapshot
+from core.agent_contracts import AgentContract, OrchestrationDecision
+from core.orchestrator import orchestrate_score
 from core.score_engine import build_score
 from fetch_data import fetch_fundamental_snapshot
 
@@ -80,6 +82,18 @@ class ScoringEngineTests(unittest.TestCase):
         self.assertIn("as_of", snapshot)
         self.assertIn("source_status", snapshot)
         self.assertTrue(snapshot["point_in_time_valid"])
+
+    def test_sprint5_orchestration_contracts_are_typed_and_replayable(self):
+        result = orchestrate_score("MSFT", "2024-01-02")
+        self.assertIsInstance(result, OrchestrationDecision)
+        self.assertEqual(result.ticker, "MSFT")
+        self.assertEqual(result.as_of, "2024-01-02 00:00:00")
+        self.assertIn("analysis_only", result.mode.lower())
+        self.assertGreaterEqual(len(result.agent_outputs), 3)
+        self.assertTrue(all(isinstance(agent, AgentContract) for agent in result.agent_outputs))
+        self.assertTrue(all(agent.input_hash for agent in result.agent_outputs))
+        self.assertIn("market_data", result.agent_outputs[0].agent)
+        self.assertIn("status", result.agent_outputs[0].payload)
 
 
 if __name__ == "__main__":
