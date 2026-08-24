@@ -1,34 +1,25 @@
 from __future__ import annotations
 
-from core.config import MAX_SCORE, MIN_SCORE
-from core.schemas import MarketSnapshot
+from core.config import MAX_SCORE
 
 
-def score_technical(snapshot: MarketSnapshot) -> dict:
-    recent_returns = snapshot.recent_returns
-    if not recent_returns:
-        score = 5.0
-        explanation = "Insufficient trend data; neutral technical stance."
-        return {"score": score, "confidence": 0.4, "explanation": explanation}
+def score_technical(snapshot: dict) -> float:
+    """Compute a simple technical score from price momentum and volume behavior."""
+    change_1d = float(snapshot.get("change_1d", 0.0))
+    change_5d = float(snapshot.get("change_5d", 0.0))
+    change_20d = float(snapshot.get("change_20d", 0.0))
+    trend_vs_20d_mean = float(snapshot.get("trend_vs_20d_mean", 0.0))
+    volume = float(snapshot.get("volume", 0.0))
+    avg_volume_20d = float(snapshot.get("avg_volume_20d", 1.0))
 
-    avg_return = sum(recent_returns) / len(recent_returns)
-    trend_bias = 1.0 if snapshot.trend == "bullish" else -1.0 if snapshot.trend == "bearish" else 0.0
-    raw = 5.0 + (avg_return * 100) * 1.5 + trend_bias * 1.5
+    score = 5.0
+    score += max(-2.0, min(2.0, change_20d * 30.0))
+    score += max(-2.0, min(2.0, change_5d * 25.0))
+    score += max(-1.5, min(1.5, change_1d * 20.0))
+    score += max(-1.5, min(1.5, trend_vs_20d_mean * 20.0))
 
-    if raw < MIN_SCORE:
-        raw = MIN_SCORE
-    if raw > MAX_SCORE:
-        raw = MAX_SCORE
+    volume_ratio = volume / avg_volume_20d if avg_volume_20d else 1.0
+    score += max(-1.0, min(1.0, (volume_ratio - 1.0) * 2.0))
 
-    confidence = min(0.95, max(0.45, 0.5 + abs(avg_return) * 8))
-    explanation = (
-        f"Trend is {snapshot.trend}. "
-        f"Recent 5-day average return is {avg_return:.2%}. "
-        f"Latest close is {snapshot.latest_close:.2f}."
-    )
-
-    return {
-        "score": round(raw, 2),
-        "confidence": round(confidence, 2),
-        "explanation": explanation,
-    }
+    score = max(0.0, min(MAX_SCORE, score))
+    return round(score, 2)

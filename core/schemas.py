@@ -1,4 +1,6 @@
-from dataclasses import dataclass, field
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass, field
 from typing import List
 
 
@@ -19,5 +21,8 @@ class ScoreResult:
     score: float
     confidence: float
     explanation: str
-    risk_flags: List[str] = field(default_factory=list)
+    risk_flags: list[str] = field(default_factory=list)
     action: str = "ANALYSIS_ONLY"
+
+    def to_dict(self) -> dict:
+        return asdict(self)
