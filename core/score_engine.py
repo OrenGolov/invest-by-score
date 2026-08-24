@@ -314,6 +314,62 @@ def _build_source_reliability() -> dict:
     }
 
 
+def _build_technical_features(snapshot: dict) -> dict:
+    ma_50 = float(snapshot.get("moving_averages", {}).get("50d", 0.0))
+    ma_100 = float(snapshot.get("moving_averages", {}).get("100d", 0.0))
+    ma_150 = float(snapshot.get("moving_averages", {}).get("150d", 0.0))
+    ma_200 = float(snapshot.get("moving_averages", {}).get("200d", 0.0))
+    rsi = float(snapshot.get("rsi", 50.0))
+    change_20d = float(snapshot.get("change_20d", 0.0))
+    volume_ratio = float(snapshot.get("volume_ratio_20d", 1.0))
+    volatility = float(snapshot.get("volatility", 0.0))
+
+    if ma_50 > ma_200 and ma_100 > ma_200:
+        trend_regime = "bullish"
+    elif ma_50 < ma_200 and ma_100 < ma_200:
+        trend_regime = "bearish"
+    else:
+        trend_regime = "mixed"
+
+    if rsi >= 70:
+        momentum_regime = "overbought"
+    elif rsi <= 30:
+        momentum_regime = "oversold"
+    elif rsi >= 55:
+        momentum_regime = "constructive"
+    else:
+        momentum_regime = "neutral"
+
+    return {
+        "trend_regime": trend_regime,
+        "momentum_regime": momentum_regime,
+        "price_vs_50d_ma": round(float(snapshot.get("price_vs_ma_50", 0.0)), 4),
+        "price_vs_100d_ma": round(float(snapshot.get("price_vs_ma_100", 0.0)), 4),
+        "price_vs_150d_ma": round(float(snapshot.get("price_vs_ma_150", 0.0)), 4),
+        "price_vs_200d_ma": round(float(snapshot.get("price_vs_ma_200", 0.0)), 4),
+        "relative_strength": round(float(rsi), 2),
+        "volume_confirmation": round(float(volume_ratio), 4),
+        "volatility_regime": "elevated" if volatility > 0.02 else "normal",
+        "short_term_bias": "positive" if change_20d > 0 else "negative" if change_20d < 0 else "flat",
+        "long_term_bias": "positive" if ma_50 > ma_200 else "negative" if ma_50 < ma_200 else "flat",
+    }
+
+
+def _build_feature_metadata(snapshot: dict) -> dict:
+    return {
+        "feature_family": "technical",
+        "feature_version": "v1.0",
+        "as_of": snapshot.get("as_of"),
+        "source": snapshot.get("source"),
+        "features": [
+            {"name": "trend_regime", "owner_agent": "Market Data Agent", "lookback_window": "50d/100d/200d", "calculation": "moving_average_alignment"},
+            {"name": "relative_strength", "owner_agent": "Technical Agent", "lookback_window": "14d RSI", "calculation": "rsi"},
+            {"name": "volume_confirmation", "owner_agent": "Market Data Agent", "lookback_window": "20d volume average", "calculation": "volume_ratio_20d"},
+            {"name": "volatility_regime", "owner_agent": "Market Data Agent", "lookback_window": "30d realized volatility", "calculation": "volatility"},
+        ],
+    }
+
+
 def build_score(ticker: str, as_of: str, timestamp: str | None = None) -> ScoreResult:
     """Build a current-time and long-term score for a ticker at a given point-in-time."""
     snapshot = fetch_market_snapshot(ticker, as_of, timestamp)
@@ -371,6 +427,8 @@ def build_score(ticker: str, as_of: str, timestamp: str | None = None) -> ScoreR
     insights = _build_insights(snapshot, capped_score)
     scoring_breakdown = _build_scoring_breakdown(snapshot, capped_score, current_time_score, long_term_score)
     source_reliability = _build_source_reliability()
+    technical_features = _build_technical_features(snapshot)
+    feature_metadata = _build_feature_metadata(snapshot)
 
     return ScoreResult(
         ticker=snapshot["ticker"],
@@ -394,4 +452,6 @@ def build_score(ticker: str, as_of: str, timestamp: str | None = None) -> ScoreR
         insights=insights,
         scoring_breakdown=scoring_breakdown,
         source_reliability=source_reliability,
+        technical_features=technical_features,
+        feature_metadata=feature_metadata,
     )
