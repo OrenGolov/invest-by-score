@@ -7,7 +7,7 @@ import pandas as pd
 
 from agents.market_data_agent import fetch_market_snapshot
 from core.agent_contracts import AgentContract, OrchestrationDecision
-from core.audit_store import get_audit_events, get_decision_by_replay_hash, persist_decision_audit
+from core.audit_store import get_audit_events, get_decision_by_replay_hash, get_decision_by_ticker_and_as_of, persist_decision_audit
 from core.orchestrator import orchestrate_score
 from core.score_engine import build_score
 from fetch_data import fetch_fundamental_snapshot, get_provider_health_matrix, resolve_fundamental_provider
@@ -190,6 +190,21 @@ class ScoringEngineTests(unittest.TestCase):
         self.assertIn("event_id", event)
         self.assertTrue(get_audit_events(limit=5))
         self.assertIn("replay_hash", get_decision_by_replay_hash("replay-lookup-test")[0])
+
+    def test_replay_lookup_by_ticker_and_as_of(self):
+        persist_decision_audit({
+            "ticker": "AAPL",
+            "as_of": "2024-01-03 00:00:00",
+            "mode": "ANALYSIS_ONLY",
+            "action": "ANALYSIS_ONLY",
+            "score": 7.1,
+            "confidence": 0.8,
+            "replay_hash": "replay-lookup-by-key",
+            "source_quality": {"effective_confidence": 0.77},
+        })
+        matches = get_decision_by_ticker_and_as_of("aapl", "2024-01-03 00:00:00")
+        self.assertTrue(matches)
+        self.assertEqual(matches[0]["ticker"], "AAPL")
 
 
 if __name__ == "__main__":
