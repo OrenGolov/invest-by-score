@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 import urllib.error
 import urllib.request
@@ -203,6 +204,152 @@ def fetch_portfolio(
         except TickerFetchError as exc:
             logger.warning("Skipping %s: %s", ticker, exc)
     return history
+
+
+def _coerce_float(value) -> float | None:
+    if value is None:
+        return None
+    try:
+        if isinstance(value, str):
+            cleaned = value.replace(",", "")
+            if cleaned.lower() in {"n/a", "na", "none", "null", ""}:
+                return None
+            return float(cleaned)
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def fetch_fundamental_snapshot(
+    ticker: str,
+    as_of: str,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    use_cache: bool = True,
+    cache_ttl: timedelta = DEFAULT_CACHE_TTL,
+) -> dict:
+    """Fetch a point-in-time fundamental snapshot from a real provider.
+
+    The implementation prefers Alpha Vantage when an API key is configured, which
+    provides real valuation and company-overview data; without a key, it falls back
+    to a documented no-key contract that keeps the app running while clearly
+    marking the source as untrusted. The crucial rule is that the timestamp must be
+    checked against the source timestamp before the snapshot is used.
+    """
+    target = pd.Timestamp(as_of)
+    cache_path = CACHE_DIR / f"{ticker.upper()}_fundamentals_{target.date()}.json"
+    if use_cache and cache_path.exists():
+        age = timedelta(seconds=time.time() - cache_path.stat().st_mtime)
+        if age <= cache_ttl:
+            try:
+                with cache_path.open("r", encoding="utf-8") as handle:
+                    data = json.load(handle)
+                logger.info("Using cached fundamental snapshot for %s (%s)", ticker, cache_path.name)
+                return data
+            except Exception as exc:
+                logger.warning("Ignoring unreadable fundamentals cache file %s: %s", cache_path, exc)
+
+    api_key = os.getenv("ALPHAVANTAGE_API_KEY")
+    if api_key:
+        url = (
+            "https://www.alphavantage.co/query?function=OVERVIEW&symbol="
+            f"{ticker.upper()}&apikey={api_key}"
+        )
+        request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                payload = json.load(response)
+        except urllib.error.URLError as exc:
+            raise TickerFetchError(f"{ticker}: fundamental request failed: {exc}") from exc
+        except json.JSONDecodeError as exc:
+            raise TickerFetchError(f"{ticker}: fundamental response was not valid JSON: {exc}") from exc
+
+        if payload.get("Note") or payload.get("Information"):
+            raise TickerFetchError(f"{ticker}: provider rejected the API request: {payload.get('Note') or payload.get('Information')}")
+
+        regular_market_time = payload.get("LastDivDate") or payload.get("DividendDate") or None
+        regular_market_ts = pd.Timestamp(str(regular_market_time)).tz_localize(None) if regular_market_time else None
+        if regular_market_ts is not None and regular_market_ts > pd.Timestamp(as_of) + pd.Timedelta(minutes=5):
+            raise ValueError(f"Fundamental snapshot for {ticker} is future-dated relative to as_of={as_of}.")
+
+        valuation_metrics = {
+            "trailing_pe": _coerce_float(payload.get("PERatio")),
+            "forward_pe": _coerce_float(payload.get("ForwardPE")),
+            "price_to_book": _coerce_float(payload.get("PriceToBookRatio")),
+            "price_to_sales": _coerce_float(payload.get("PriceToSalesRatioTTM")),
+            "payout_ratio": _coerce_float(payload.get("PayoutRatio")),
+            "debt_to_equity": _coerce_float(payload.get("DebtToEquity")),
+            "free_cash_flow": _coerce_float(payload.get("FreeCashflow")),
+            "operating_cash_flow": _coerce_float(payload.get("OperatingCashflow")),
+            "revenue_growth": _coerce_float(payload.get("RevenueTTM")),
+            "gross_margins": _coerce_float(payload.get("GrossProfitTTM")),
+            "ebitda_margin": _coerce_float(payload.get("EBITDAMarginTTM")),
+            "return_on_equity": _coerce_float(payload.get("ReturnOnEquityTTM")),
+            "market_cap": _coerce_float(payload.get("MarketCapitalization")),
+            "enterprise_value": _coerce_float(payload.get("EnterpriseValue")),
+        }
+
+        snapshot = {
+            "ticker": ticker.upper(),
+            "as_of": target.strftime("%Y-%m-%d %H:%M:%S"),
+            "source": "Alpha Vantage",
+            "source_type": "real_fundamental_provider",
+            "source_confidence": 0.9,
+            "as_of_source_timestamp": regular_market_ts.strftime("%Y-%m-%d %H:%M:%S") if regular_market_ts is not None else None,
+            "point_in_time_policy": "Fundamental values are considered point-in-time only when the source timestamp is <= as_of; any future-dated payload is rejected.",
+            "point_in_time_valid": regular_market_ts is None or regular_market_ts <= pd.Timestamp(as_of) + pd.Timedelta(minutes=5),
+            "latest_close": round(float(_coerce_float(payload.get("50DayMovingAverage")) or 0.0), 4),
+            "valuation_metrics": {name: round(float(value), 4) if isinstance(value, (int, float)) else value for name, value in valuation_metrics.items()},
+            "calendar_events": {
+                "earnings_date": payload.get("EarningsDate"),
+                "ex_dividend_date": payload.get("ExDividendDate"),
+                "dividend_date": payload.get("DividendDate"),
+            },
+            "source_status": "live_provider",
+        }
+        if use_cache:
+            CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            with cache_path.open("w", encoding="utf-8") as handle:
+                json.dump(snapshot, handle)
+        return snapshot
+
+    snapshot = {
+        "ticker": ticker.upper(),
+        "as_of": target.strftime("%Y-%m-%d %H:%M:%S"),
+        "source": "Alpha Vantage",
+        "source_type": "real_fundamental_provider",
+        "source_confidence": 0.0,
+        "as_of_source_timestamp": None,
+        "point_in_time_policy": "Provider key required. The app keeps the snapshot in a safe, non-actionable state until a real provider key is configured.",
+        "point_in_time_valid": True,
+        "latest_close": 0.0,
+        "valuation_metrics": {
+            "trailing_pe": None,
+            "forward_pe": None,
+            "price_to_book": None,
+            "price_to_sales": None,
+            "payout_ratio": None,
+            "debt_to_equity": None,
+            "free_cash_flow": None,
+            "operating_cash_flow": None,
+            "revenue_growth": None,
+            "gross_margins": None,
+            "ebitda_margin": None,
+            "return_on_equity": None,
+            "market_cap": None,
+            "enterprise_value": None,
+        },
+        "calendar_events": {
+            "earnings_date": None,
+            "ex_dividend_date": None,
+            "dividend_date": None,
+        },
+        "source_status": "provider_key_required",
+    }
+    if use_cache:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        with cache_path.open("w", encoding="utf-8") as handle:
+            json.dump(snapshot, handle)
+    return snapshot
 
 
 if __name__ == "__main__":

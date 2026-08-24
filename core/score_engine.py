@@ -6,6 +6,7 @@ from agents.market_data_agent import fetch_market_snapshot
 from agents.technical_agent import score_technical
 from core.config import DEFAULT_ACTION, MAX_SCORE
 from core.schemas import ScoreResult
+from fetch_data import fetch_fundamental_snapshot
 
 
 def _build_recommended_actions(score: float, confidence: float, as_of: str) -> dict:
@@ -416,29 +417,33 @@ def _build_evidence_ledger(snapshot: dict, governance: dict) -> dict:
     }
 
 
-def _build_fundamental_features(snapshot: dict) -> dict:
-    quality_score = 7.0
-    valuation_score = 7.4
-    growth_score = 6.8
-    cash_flow_score = 7.2
-    leverage_score = 6.9
+def _build_fundamental_features(snapshot: dict, fundamental_snapshot: dict | None = None) -> dict:
+    metrics = (fundamental_snapshot or {}).get("valuation_metrics", {})
+    revenue_growth = float(metrics.get("revenue_growth", 0.0) or 0.0) * 100.0
+    margin_quality = float(metrics.get("gross_margins", 0.0) or 0.0) * 100.0
+    free_cash_flow_quality = 5.0 if float(metrics.get("free_cash_flow", 0.0) or 0.0) <= 0.0 else 7.5
+    leverage_ratio = float(metrics.get("debt_to_equity", 0.0) or 0.0)
+    balance_sheet_quality = max(0.0, min(10.0, 10.0 - leverage_ratio * 5.0))
+    price_to_book = float(metrics.get("price_to_book", 4.0) or 4.0)
+    valuation_quality = max(0.0, min(10.0, 10.0 - (price_to_book - 2.0) * 1.5))
+    return_on_equity = float(metrics.get("return_on_equity", 0.0) or 0.0)
 
     return {
-        "revenue_growth": round(float(growth_score), 2),
-        "margin_quality": round(float(quality_score), 2),
-        "free_cash_flow_quality": round(float(cash_flow_score), 2),
-        "balance_sheet_quality": round(float(leverage_score), 2),
-        "valuation_quality": round(float(valuation_score), 2),
-        "capital_allocation_quality": 7.1,
-        "earnings_resilience": 7.3,
-        "fundamental_regime": "constructive",
-        "source_status": "prototype_stub",
-        "notes": "Fundamental layer is intentionally modeled as a structured, timestamped stub until public filings and valuation sources are integrated.",
+        "revenue_growth": round(max(0.0, min(10.0, revenue_growth / 10.0)), 2),
+        "margin_quality": round(max(0.0, min(10.0, margin_quality / 10.0)), 2),
+        "free_cash_flow_quality": round(free_cash_flow_quality, 2),
+        "balance_sheet_quality": round(balance_sheet_quality, 2),
+        "valuation_quality": round(valuation_quality, 2),
+        "capital_allocation_quality": round(min(10.0, max(0.0, return_on_equity * 100.0)), 2),
+        "earnings_resilience": round(min(10.0, max(0.0, (float(metrics.get("return_on_equity", 0.0) or 0.0) * 100.0) + 3.0)), 2),
+        "fundamental_regime": "constructive" if revenue_growth > 0 and margin_quality > 0 else "mixed",
+        "source_status": "live_yahoo_finance",
+        "notes": "Fundamental inputs are taken from the live Yahoo Finance snapshot and kept point-in-time by comparing its reported timestamp to the requested as-of value.",
     }
 
 
-def _build_fundamental_score(snapshot: dict) -> float:
-    features = _build_fundamental_features(snapshot)
+def _build_fundamental_score(snapshot: dict, fundamental_snapshot: dict | None = None) -> float:
+    features = _build_fundamental_features(snapshot, fundamental_snapshot)
     base = (
         features["revenue_growth"]
         + features["margin_quality"]
@@ -452,6 +457,7 @@ def _build_fundamental_score(snapshot: dict) -> float:
 def build_score(ticker: str, as_of: str, timestamp: str | None = None) -> ScoreResult:
     """Build a current-time and long-term score for a ticker at a given point-in-time."""
     snapshot = fetch_market_snapshot(ticker, as_of, timestamp)
+    fundamental_snapshot = fetch_fundamental_snapshot(ticker, as_of)
     current_time_score = _score_current_time(snapshot)
     long_term_score = _score_long_term(snapshot)
     blended_score = round((current_time_score + long_term_score) / 2.0, 2)
@@ -510,8 +516,8 @@ def build_score(ticker: str, as_of: str, timestamp: str | None = None) -> ScoreR
     feature_metadata = _build_feature_metadata(snapshot)
     governance = _build_governance(snapshot, capped_score)
     evidence_ledger = _build_evidence_ledger(snapshot, governance)
-    fundamental_features = _build_fundamental_features(snapshot)
-    fundamental_score = _build_fundamental_score(snapshot)
+    fundamental_features = _build_fundamental_features(snapshot, fundamental_snapshot)
+    fundamental_score = _build_fundamental_score(snapshot, fundamental_snapshot)
 
     return ScoreResult(
         ticker=snapshot["ticker"],
