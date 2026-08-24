@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -94,6 +95,43 @@ class ScoringEngineTests(unittest.TestCase):
         self.assertTrue(all(agent.input_hash for agent in result.agent_outputs))
         self.assertIn("market_data", result.agent_outputs[0].agent)
         self.assertIn("status", result.agent_outputs[0].payload)
+        replay = orchestrate_score("MSFT", "2024-01-02")
+        self.assertEqual(result.to_dict(), replay.to_dict())
+
+    def test_future_as_of_is_rejected(self):
+        with self.assertRaises(ValueError):
+            fetch_market_snapshot("MSFT", "2099-01-01")
+
+    def test_no_market_data_is_a_validation_error(self):
+        with self.assertRaises(ValueError):
+            fetch_market_snapshot("ZZZZ", "2024-01-02")
+
+    def test_future_dated_fundamental_payload_is_rejected(self):
+        future_payload = {
+            "LastDivDate": "2099-01-01",
+            "PERatio": "30",
+            "PriceToBookRatio": "4.5",
+            "MarketCapitalization": "1000000000",
+        }
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                return False
+
+            def read(self):
+                return b'{"LastDivDate": "2099-01-01", "PERatio": "30", "PriceToBookRatio": "4.5", "MarketCapitalization": "1000000000"}'
+
+        with patch("fetch_data.urllib.request.urlopen", return_value=FakeResponse()):
+            with self.assertRaises(ValueError):
+                fetch_fundamental_snapshot("MSFT", "2024-01-02")
+
+    def test_low_quality_data_forces_analysis_only(self):
+        result = orchestrate_score("MSFT", "2024-01-02")
+        self.assertIn("analysis_only", result.mode.lower())
+        self.assertIn("analysis_only", result.action.lower())
 
 
 if __name__ == "__main__":

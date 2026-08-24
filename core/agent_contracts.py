@@ -18,6 +18,36 @@ class AgentContract:
     input_hash: str = ""
     warnings: list[str] = field(default_factory=list)
     payload: dict[str, Any] = field(default_factory=dict)
+    source_record_id: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class VetoRecord:
+    agent: str
+    status: str
+    reason: str
+    severity: str = "warning"
+    details: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class NoTradeDecision:
+    ticker: str
+    as_of: str
+    mode: str = "NO_TRADE"
+    action: str = "NO_TRADE"
+    reason: str = ""
+    veto_reasons: list[str] = field(default_factory=list)
+    replay_hash: str = ""
+    snapshot_hash: str = ""
+    evidence: list[dict[str, str]] = field(default_factory=list)
+    agent_outputs: list[AgentContract] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -33,6 +63,11 @@ class OrchestrationDecision:
     confidence: float
     agent_outputs: list[AgentContract] = field(default_factory=list)
     summary: str = ""
+    veto_reasons: list[str] = field(default_factory=list)
+    replay_hash: str = ""
+    snapshot_hash: str = ""
+    decision_type: str = "score"
+    source_record_ids: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

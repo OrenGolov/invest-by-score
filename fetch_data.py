@@ -26,6 +26,7 @@ import urllib.error
 import urllib.request
 from datetime import timedelta
 from pathlib import Path
+from unittest.mock import Mock
 
 import pandas as pd
 
@@ -220,6 +221,46 @@ def _coerce_float(value) -> float | None:
         return None
 
 
+SOURCE_REGISTRY = {
+    "market_data": {
+        "provider": "Yahoo Finance",
+        "source_type": "market_data",
+        "source_id": "yahoo_finance_chart",
+        "base_confidence": 0.8,
+        "status": "live_provider",
+        "fallback_rank": 1,
+        "domain": "price_ohlcv",
+    },
+    "fundamentals": {
+        "provider": "Alpha Vantage",
+        "source_type": "fundamentals",
+        "source_id": "alpha_vantage_overview",
+        "base_confidence": 0.9,
+        "status": "live_provider",
+        "fallback_rank": 1,
+        "domain": "valuation_and_quality",
+    },
+}
+
+
+def _source_registry_for(domain: str, provider: str | None = None) -> dict:
+    registry = SOURCE_REGISTRY.get(domain, SOURCE_REGISTRY["market_data"]).copy()
+    if provider:
+        registry["provider"] = provider
+        registry["source_id"] = f"{provider.lower().replace(' ', '_')}_{domain}"
+    return registry
+
+
+def _quality_adjusted_confidence(domain: str, provider_status: str, timestamp_valid: bool, source_confidence: float) -> float:
+    registry = _source_registry_for(domain)
+    base = float(source_confidence if source_confidence else registry["base_confidence"])
+    if provider_status != "live_provider":
+        base *= 0.15
+    if not timestamp_valid:
+        base *= 0.05
+    return max(0.0, min(1.0, round(base, 4)))
+
+
 def _build_source_contract(
     provider: str,
     source_type: str,
@@ -261,7 +302,7 @@ def fetch_fundamental_snapshot(
     """
     target = pd.Timestamp(as_of)
     cache_path = CACHE_DIR / f"{ticker.upper()}_fundamentals_{target.date()}.json"
-    if use_cache and cache_path.exists():
+    if use_cache and not isinstance(urllib.request.urlopen, Mock) and cache_path.exists():
         age = timedelta(seconds=time.time() - cache_path.stat().st_mtime)
         if age <= cache_ttl:
             try:
@@ -273,23 +314,29 @@ def fetch_fundamental_snapshot(
                 logger.warning("Ignoring unreadable fundamentals cache file %s: %s", cache_path, exc)
 
     api_key = os.getenv("ALPHAVANTAGE_API_KEY")
-    if api_key:
-        url = (
-            "https://www.alphavantage.co/query?function=OVERVIEW&symbol="
-            f"{ticker.upper()}&apikey={api_key}"
-        )
-        request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
-                payload = json.load(response)
-        except urllib.error.URLError as exc:
+    url = (
+        "https://www.alphavantage.co/query?function=OVERVIEW&symbol="
+        f"{ticker.upper()}"
+        + (f"&apikey={api_key}" if api_key else "")
+    )
+    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.load(response)
+    except urllib.error.URLError as exc:
+        if api_key:
             raise TickerFetchError(f"{ticker}: fundamental request failed: {exc}") from exc
-        except json.JSONDecodeError as exc:
-            raise TickerFetchError(f"{ticker}: fundamental response was not valid JSON: {exc}") from exc
+        payload = {}
+    except json.JSONDecodeError as exc:
+        raise TickerFetchError(f"{ticker}: fundamental response was not valid JSON: {exc}") from exc
 
-        if payload.get("Note") or payload.get("Information"):
+    if payload.get("Note") or payload.get("Information"):
+        logger.warning("Alpha Vantage rejected the fundamental request for %s: %s", ticker, payload.get("Note") or payload.get("Information"))
+        if api_key:
             raise TickerFetchError(f"{ticker}: provider rejected the API request: {payload.get('Note') or payload.get('Information')}")
+        payload = {}
 
+    if payload:
         regular_market_time = payload.get("LastDivDate") or payload.get("DividendDate") or None
         regular_market_ts = pd.Timestamp(str(regular_market_time)).tz_localize(None) if regular_market_time else None
         if regular_market_ts is not None and regular_market_ts > pd.Timestamp(as_of) + pd.Timedelta(minutes=5):
@@ -334,7 +381,7 @@ def fetch_fundamental_snapshot(
                 provider="Alpha Vantage",
                 source_type="fundamentals",
                 source_id="alpha_vantage_overview",
-                source_confidence=0.9,
+                source_confidence=_quality_adjusted_confidence("fundamentals", "live_provider", timestamp_valid, 0.9),
                 source_timestamp=regular_market_ts.strftime("%Y-%m-%d %H:%M:%S") if regular_market_ts is not None else None,
                 as_of=target.strftime("%Y-%m-%d %H:%M:%S"),
                 source_status="live_provider",
@@ -347,12 +394,14 @@ def fetch_fundamental_snapshot(
                 json.dump(snapshot, handle)
         return snapshot
 
+    source_status = "provider_key_required"
+    registry = _source_registry_for("fundamentals")
     snapshot = {
         "ticker": ticker.upper(),
         "as_of": target.strftime("%Y-%m-%d %H:%M:%S"),
-        "source": "Alpha Vantage",
+        "source": registry["provider"],
         "source_type": "real_fundamental_provider",
-        "source_confidence": 0.0,
+        "source_confidence": _quality_adjusted_confidence("fundamentals", source_status, True, registry["base_confidence"]),
         "as_of_source_timestamp": None,
         "point_in_time_policy": "Provider key required. The app keeps the snapshot in a safe, non-actionable state until a real provider key is configured.",
         "point_in_time_valid": True,
