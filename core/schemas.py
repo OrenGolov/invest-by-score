@@ -23,6 +23,12 @@ class ScoreResult:
     explanation: str
     risk_flags: list[str] = field(default_factory=list)
     action: str = "ANALYSIS_ONLY"
+    moving_averages: dict[str, float] = field(default_factory=dict)
+    rsi: float | None = None
+    volatility: float | None = None
+    market_context: dict[str, float | str | dict | list] = field(default_factory=dict)
+    data_quality: dict[str, float | int | list[str]] = field(default_factory=dict)
+    source_metadata: dict[str, str | float | dict | list] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
