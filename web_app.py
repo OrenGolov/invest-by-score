@@ -63,7 +63,14 @@ class AppHandler(SimpleHTTPRequestHandler):
             return
 
         if parsed.path.startswith("/api/replay"):
-            replay_hash = parsed.query.split("=", 1)[1] if "=" in parsed.query else ""
+            params = parse_qs(parsed.query)
+            replay_hash = (params.get("hash", [params.get("replay_hash", [""])[0]])[0] or "").strip()
+            ticker = (params.get("ticker", [""])[0] or "").strip().upper()
+            as_of = (params.get("date", [params.get("as_of", [""])[0]])[0] or "").strip()
+            if ticker and as_of:
+                from core.audit_store import get_decision_by_ticker_and_as_of
+                self._send_json(200, {"ok": True, "data": get_decision_by_ticker_and_as_of(ticker, as_of)})
+                return
             self._send_json(200, {"ok": True, "data": get_decision_by_replay_hash(replay_hash)})
             return
 

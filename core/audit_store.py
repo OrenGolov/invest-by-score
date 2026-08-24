@@ -66,3 +66,13 @@ def get_audit_events(limit: int | None = None) -> list[dict[str, Any]]:
 def get_decision_by_replay_hash(replay_hash: str) -> list[dict[str, Any]]:
     """Look up a persisted score decision by deterministic replay hash."""
     return [event for event in _read_audit_events() if event.get("replay_hash") == replay_hash]
+
+
+def get_decision_by_ticker_and_as_of(ticker: str, as_of: str) -> list[dict[str, Any]]:
+    """Look up a persisted score decision by exact ticker and timestamp key."""
+    target_ticker = str(ticker).upper()
+    target_as_of = str(as_of)
+    return [
+        event for event in _read_audit_events()
+        if str(event.get("ticker", "")).upper() == target_ticker and str(event.get("as_of", "")) == target_as_of
+    ]
