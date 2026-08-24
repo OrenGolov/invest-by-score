@@ -19,8 +19,10 @@ class ScoreResult:
     ticker: str
     as_of: str
     score: float
-    confidence: float
-    explanation: str
+    current_time_score: float = 0.0
+    long_term_score: float = 0.0
+    confidence: float = 0.0
+    explanation: str = ""
     risk_flags: list[str] = field(default_factory=list)
     action: str = "ANALYSIS_ONLY"
     moving_averages: dict[str, float] = field(default_factory=dict)

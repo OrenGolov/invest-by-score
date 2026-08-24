@@ -37,6 +37,7 @@ def fetch_market_snapshot(ticker: str, as_of: str, timestamp: str | None = None)
 
     history = fetch_price_history(ticker, period=period, interval="1d")
     history = history.sort_index()
+    future_bars_excluded = int((history.index > target).sum())
     history = history[history.index <= target].copy()
 
     if history.empty:
@@ -84,6 +85,9 @@ def fetch_market_snapshot(ticker: str, as_of: str, timestamp: str | None = None)
     quality_flags: list[str] = []
     quality_score = 100.0
 
+    if future_bars_excluded > 0:
+        quality_score -= min(25.0, future_bars_excluded * 0.5)
+        quality_flags.append("future_bars_excluded")
     if bars_available < 30:
         quality_score -= 15.0
         quality_flags.append("limited_history")
@@ -114,6 +118,9 @@ def fetch_market_snapshot(ticker: str, as_of: str, timestamp: str | None = None)
     return {
         "ticker": ticker.upper(),
         "as_of": target.strftime("%Y-%m-%d %H:%M:%S"),
+        "point_in_time_cutoff": target.strftime("%Y-%m-%d %H:%M:%S"),
+        "future_bars_excluded": int(future_bars_excluded),
+        "point_in_time_policy": "Only bars with timestamp <= as_of are eligible for scoring; all future bars are excluded before indicators are calculated.",
         "source": "Yahoo Finance",
         "source_type": "public_market_feed",
         "source_confidence": 0.8,
@@ -155,5 +162,8 @@ def fetch_market_snapshot(ticker: str, as_of: str, timestamp: str | None = None)
             "bars_available": bars_available,
             "gaps_detected": gaps_detected,
             "missing_data": int(history["Close"].isna().sum()),
+            "future_bars_excluded": int(future_bars_excluded),
+            "point_in_time_cutoff": target.strftime("%Y-%m-%d %H:%M:%S"),
+            "point_in_time_policy": "Only bars with timestamp <= as_of are eligible for scoring; all future bars are excluded before indicators are calculated.",
         },
     }

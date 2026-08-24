@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 
+from agents.market_data_agent import fetch_market_snapshot
 from core.score_engine import build_score
 
 
@@ -26,6 +27,10 @@ class ScoringEngineTests(unittest.TestCase):
         self.assertIn("insights", payload)
         self.assertIn("scoring_breakdown", payload)
         self.assertIn("source_reliability", payload)
+        self.assertIn("current_time_score", payload)
+        self.assertIn("long_term_score", payload)
+        self.assertGreaterEqual(payload["current_time_score"], 0.0)
+        self.assertGreaterEqual(payload["long_term_score"], 0.0)
         self.assertIn("200d", payload["moving_averages"])
         self.assertIn("150d", payload["moving_averages"])
         self.assertIn("100d", payload["moving_averages"])
@@ -36,6 +41,16 @@ class ScoringEngineTests(unittest.TestCase):
         self.assertIn("publication_date", payload["next_expected_report"])
         self.assertIn("bullish_signals", payload["insights"])
         self.assertIn("weighted_contributions", payload["scoring_breakdown"])
+
+    def test_market_snapshot_reports_point_in_time_and_quality(self):
+        snapshot = fetch_market_snapshot("MSFT", "2024-01-02")
+        self.assertEqual(snapshot["as_of"], "2024-01-02 00:00:00")
+        self.assertIn("point_in_time_cutoff", snapshot)
+        self.assertIn("future_bars_excluded", snapshot)
+        self.assertIn("data_quality", snapshot)
+        self.assertIn("score", snapshot["data_quality"])
+        self.assertIsInstance(snapshot["data_quality"]["flags"], list)
+        self.assertIsInstance(snapshot["future_bars_excluded"], int)
 
 
 if __name__ == "__main__":
