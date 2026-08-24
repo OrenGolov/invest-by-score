@@ -371,9 +371,10 @@ def _build_feature_metadata(snapshot: dict) -> dict:
     }
 
 
-def _build_governance(snapshot: dict, score: float) -> dict:
+def _build_governance(snapshot: dict, score: float, fundamental_snapshot: dict | None = None) -> dict:
     quality_score = float(snapshot.get("data_quality", {}).get("score", 0.0))
     source_confidence = float(snapshot.get("source_confidence", 0.0))
+    fundamental_confidence = float((fundamental_snapshot or {}).get("source_confidence", 0.0))
     gate_reasons: list[str] = []
 
     if score < 5.5:
@@ -382,6 +383,12 @@ def _build_governance(snapshot: dict, score: float) -> dict:
         gate_reasons.append("quality_below_threshold")
     if source_confidence < 0.7:
         gate_reasons.append("source_confidence_below_threshold")
+    if not (fundamental_snapshot or {}).get("point_in_time_valid", True):
+        gate_reasons.append("future_dated_fundamental_payload")
+    if fundamental_confidence < 0.7 and (fundamental_snapshot or {}).get("source_status") != "live_provider":
+        gate_reasons.append("fundamental_source_confidence_below_threshold")
+    if (fundamental_snapshot or {}).get("source_status") == "provider_key_required":
+        gate_reasons.append("fundamental_provider_not_configured")
 
     action_allowed = bool(not gate_reasons)
 
@@ -391,11 +398,11 @@ def _build_governance(snapshot: dict, score: float) -> dict:
         "minimum_quality_score": 60.0,
         "quality_score": round(quality_score, 2),
         "minimum_source_confidence": 0.7,
-        "source_confidence": round(source_confidence, 2),
+        "source_confidence": round(min(source_confidence, fundamental_confidence), 2),
         "score_threshold": 5.5,
         "mode": "ANALYSIS_ONLY" if not action_allowed else "PAPER_TRADING_READY",
         "gate_reasons": gate_reasons,
-        "governance_note": "Scores are only actionable when evidence quality, source confidence, and minimum score thresholds are all satisfied.",
+        "governance_note": "Scores are only actionable when evidence quality, source confidence, timestamp validity, and minimum score thresholds are all satisfied.",
     }
 
 
@@ -419,26 +426,68 @@ def _build_evidence_ledger(snapshot: dict, governance: dict) -> dict:
 
 def _build_fundamental_features(snapshot: dict, fundamental_snapshot: dict | None = None) -> dict:
     metrics = (fundamental_snapshot or {}).get("valuation_metrics", {})
-    revenue_growth = float(metrics.get("revenue_growth", 0.0) or 0.0) * 100.0
-    margin_quality = float(metrics.get("gross_margins", 0.0) or 0.0) * 100.0
-    free_cash_flow_quality = 5.0 if float(metrics.get("free_cash_flow", 0.0) or 0.0) <= 0.0 else 7.5
+    revenue_growth = float(metrics.get("revenue_growth", 0.0) or 0.0)
+    margin_quality = float(metrics.get("gross_margins", 0.0) or 0.0)
+    free_cash_flow = float(metrics.get("free_cash_flow", 0.0) or 0.0)
     leverage_ratio = float(metrics.get("debt_to_equity", 0.0) or 0.0)
-    balance_sheet_quality = max(0.0, min(10.0, 10.0 - leverage_ratio * 5.0))
     price_to_book = float(metrics.get("price_to_book", 4.0) or 4.0)
-    valuation_quality = max(0.0, min(10.0, 10.0 - (price_to_book - 2.0) * 1.5))
     return_on_equity = float(metrics.get("return_on_equity", 0.0) or 0.0)
+    trailing_pe = float(metrics.get("trailing_pe", 0.0) or 0.0)
+    forward_pe = float(metrics.get("forward_pe", 0.0) or 0.0)
+    growth_score = max(0.0, min(10.0, (revenue_growth * 100.0) / 10.0 if revenue_growth else 5.0))
+    margin_score = max(0.0, min(10.0, (margin_quality * 100.0) / 10.0 if margin_quality else 5.0))
+    free_cash_flow_quality = 8.0 if free_cash_flow > 0.0 else 3.0
+    balance_sheet_quality = max(0.0, min(10.0, 10.0 - leverage_ratio * 5.0))
+    valuation_quality = max(0.0, min(10.0, 10.0 - (price_to_book - 2.0) * 1.5))
+    quality_score = max(0.0, min(10.0, (return_on_equity * 100.0) * 0.08 + 4.0))
+
+    source_contract = (fundamental_snapshot or {}).get("source_contract", {})
+    evidence = []
+    if revenue_growth > 0.0:
+        evidence.append("Revenue profile is positive and supports a constructive business-quality view.")
+    else:
+        evidence.append("Revenue profile is weak or missing, which reduces confidence in the business-quality layer.")
+    if margin_quality > 0.0:
+        evidence.append("Margins are positive and improve the quality of the fundamental profile.")
+    else:
+        evidence.append("Margins are weak or not available, which limits fundamental support.")
+    if free_cash_flow > 0.0:
+        evidence.append("Free cash flow is positive and supports balance-sheet flexibility.")
+    else:
+        evidence.append("Free cash flow is weak or missing, which raises risk and reduces conviction.")
+    if leverage_ratio > 1.5:
+        evidence.append("Debt load is elevated versus equity, which reduces balance-sheet quality.")
+    else:
+        evidence.append("Balance-sheet leverage remains manageable for this profile.")
+    if price_to_book > 4.0:
+        evidence.append("Valuation is rich relative to book value and reduces valuation quality.")
+    else:
+        evidence.append("Valuation is moderate relative to book value, supporting a more balanced view.")
 
     return {
-        "revenue_growth": round(max(0.0, min(10.0, revenue_growth / 10.0)), 2),
-        "margin_quality": round(max(0.0, min(10.0, margin_quality / 10.0)), 2),
+        "source_contract": source_contract,
+        "valuation_metrics": {
+            "trailing_pe": round(trailing_pe, 4) if trailing_pe else None,
+            "forward_pe": round(forward_pe, 4) if forward_pe else None,
+            "price_to_book": round(price_to_book, 4) if price_to_book else None,
+            "free_cash_flow": round(free_cash_flow, 4) if free_cash_flow else None,
+            "debt_to_equity": round(leverage_ratio, 4) if leverage_ratio else None,
+            "return_on_equity": round(return_on_equity, 4) if return_on_equity else None,
+            "revenue_growth": round(revenue_growth, 4) if revenue_growth else None,
+            "gross_margin": round(margin_quality, 4) if margin_quality else None,
+            "ebitda_margin": round(float(metrics.get("ebitda_margin", 0.0) or 0.0), 4) if metrics.get("ebitda_margin") is not None else None,
+        },
+        "revenue_growth": round(growth_score, 2),
+        "margin_quality": round(margin_score, 2),
         "free_cash_flow_quality": round(free_cash_flow_quality, 2),
         "balance_sheet_quality": round(balance_sheet_quality, 2),
         "valuation_quality": round(valuation_quality, 2),
-        "capital_allocation_quality": round(min(10.0, max(0.0, return_on_equity * 100.0)), 2),
-        "earnings_resilience": round(min(10.0, max(0.0, (float(metrics.get("return_on_equity", 0.0) or 0.0) * 100.0) + 3.0)), 2),
-        "fundamental_regime": "constructive" if revenue_growth > 0 and margin_quality > 0 else "mixed",
-        "source_status": "live_yahoo_finance",
-        "notes": "Fundamental inputs are taken from the live Yahoo Finance snapshot and kept point-in-time by comparing its reported timestamp to the requested as-of value.",
+        "capital_allocation_quality": round(quality_score, 2),
+        "earnings_resilience": round(quality_score, 2),
+        "fundamental_regime": "constructive" if growth_score >= 6.0 and margin_score >= 5.5 and balance_sheet_quality >= 6.0 else "mixed",
+        "source_status": (fundamental_snapshot or {}).get("source_status", "unknown"),
+        "evidence": evidence,
+        "notes": "The fundamental layer is only actionable when source confidence, timestamp validity, and data quality all pass. Otherwise it stays in analysis-only mode.",
     }
 
 
@@ -514,10 +563,15 @@ def build_score(ticker: str, as_of: str, timestamp: str | None = None) -> ScoreR
     source_reliability = _build_source_reliability()
     technical_features = _build_technical_features(snapshot)
     feature_metadata = _build_feature_metadata(snapshot)
-    governance = _build_governance(snapshot, capped_score)
+    governance = _build_governance(snapshot, capped_score, fundamental_snapshot)
     evidence_ledger = _build_evidence_ledger(snapshot, governance)
     fundamental_features = _build_fundamental_features(snapshot, fundamental_snapshot)
     fundamental_score = _build_fundamental_score(snapshot, fundamental_snapshot)
+
+    if not governance["risk_gate_passed"] or fundamental_snapshot.get("source_confidence", 0.0) < 0.7:
+        action = "ANALYSIS_ONLY"
+        risk_flags.append("Fundamental source weak or invalid")
+        confidence = max(0.25, confidence - 0.2)
 
     return ScoreResult(
         ticker=snapshot["ticker"],
