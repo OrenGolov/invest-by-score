@@ -37,6 +37,8 @@ class ScoreResult:
     insights: dict[str, object] = field(default_factory=dict)
     scoring_breakdown: dict[str, float | str | dict | list] = field(default_factory=dict)
     source_reliability: dict[str, object] = field(default_factory=dict)
+    technical_features: dict[str, object] = field(default_factory=dict)
+    feature_metadata: dict[str, object] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
