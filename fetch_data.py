@@ -261,6 +261,25 @@ def _quality_adjusted_confidence(domain: str, provider_status: str, timestamp_va
     return max(0.0, min(1.0, round(base, 4)))
 
 
+def get_provider_health_matrix() -> dict[str, dict[str, float | str | list[str]]]:
+    """Return a provider health matrix with confidence, quality, and status for each domain."""
+    health: dict[str, dict[str, float | str | list[str]]] = {}
+    for domain, config in SOURCE_REGISTRY.items():
+        confidence = float(config.get("base_confidence", 0.0))
+        health_score = min(1.0, max(0.0, confidence))
+        health[domain] = {
+            "provider": config.get("provider", "unknown"),
+            "source_id": config.get("source_id", "unknown"),
+            "status": config.get("status", "unknown"),
+            "health_score": round(health_score, 4),
+            "confidence": round(confidence, 4),
+            "fallback_rank": config.get("fallback_rank", 0),
+            "fallbacks": [config.get("provider", "unknown")],
+            "domain": config.get("domain", domain),
+        }
+    return health
+
+
 def resolve_fundamental_provider(ticker: str, as_of: str, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> dict:
     """Resolve the active fundamental provider and record the explicit fallback path."""
     api_key = os.getenv("ALPHAVANTAGE_API_KEY")

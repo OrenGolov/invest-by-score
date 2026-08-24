@@ -7,7 +7,9 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from core.agent_contracts import NoTradeDecision
+from core.audit_store import get_audit_events, get_decision_by_replay_hash
 from core.orchestrator import orchestrate_score
+from fetch_data import get_provider_health_matrix
 
 ROOT = Path(__file__).resolve().parent
 HTML_PATH = ROOT / "index.html"
@@ -45,6 +47,24 @@ class AppHandler(SimpleHTTPRequestHandler):
                 self._send_json(200, payload)
             except Exception as exc:  # pragma: no cover - runtime validation path
                 self._send_json(400, {"ok": False, "error": str(exc)})
+            return
+
+        if parsed.path == "/api/provider-health":
+            self._send_json(200, {"ok": True, "data": get_provider_health_matrix()})
+            return
+
+        if parsed.path == "/api/audit-events":
+            params = parse_qs(parsed.query)
+            limit = params.get("limit", ["50"])[0]
+            try:
+                self._send_json(200, {"ok": True, "data": get_audit_events(limit=int(limit))})
+            except ValueError:
+                self._send_json(400, {"ok": False, "error": "limit must be an integer"})
+            return
+
+        if parsed.path.startswith("/api/replay"):
+            replay_hash = parsed.query.split("=", 1)[1] if "=" in parsed.query else ""
+            self._send_json(200, {"ok": True, "data": get_decision_by_replay_hash(replay_hash)})
             return
 
         if parsed.path in ("/", "/index.html"):
