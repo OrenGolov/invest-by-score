@@ -7,10 +7,10 @@ import pandas as pd
 
 from agents.market_data_agent import fetch_market_snapshot
 from core.agent_contracts import AgentContract, OrchestrationDecision
-from core.audit_store import persist_decision_audit
+from core.audit_store import get_audit_events, get_decision_by_replay_hash, persist_decision_audit
 from core.orchestrator import orchestrate_score
 from core.score_engine import build_score
-from fetch_data import fetch_fundamental_snapshot, resolve_fundamental_provider
+from fetch_data import fetch_fundamental_snapshot, get_provider_health_matrix, resolve_fundamental_provider
 
 
 class ScoringEngineTests(unittest.TestCase):
@@ -168,6 +168,28 @@ class ScoringEngineTests(unittest.TestCase):
         self.assertIn("replay_metadata", result.to_dict())
         self.assertIn("effective_confidence", result.source_quality)
         self.assertIn("replay_hash", result.replay_metadata)
+
+    def test_provider_health_matrix_tracks_quality_and_status(self):
+        health = get_provider_health_matrix()
+        self.assertIn("market_data", health)
+        self.assertIn("fundamentals", health)
+        self.assertIn("health_score", health["market_data"])
+        self.assertIn("status", health["fundamentals"])
+
+    def test_audit_retrieval_and_replay_lookup_work(self):
+        event = persist_decision_audit({
+            "ticker": "MSFT",
+            "as_of": "2024-01-02 00:00:00",
+            "mode": "ANALYSIS_ONLY",
+            "action": "ANALYSIS_ONLY",
+            "score": 6.5,
+            "confidence": 0.75,
+            "replay_hash": "replay-lookup-test",
+            "source_quality": {"effective_confidence": 0.69},
+        })
+        self.assertIn("event_id", event)
+        self.assertTrue(get_audit_events(limit=5))
+        self.assertIn("replay_hash", get_decision_by_replay_hash("replay-lookup-test")[0])
 
 
 if __name__ == "__main__":
