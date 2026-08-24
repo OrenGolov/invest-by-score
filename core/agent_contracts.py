@@ -1,0 +1,38 @@
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass, field
+from typing import Any
+
+
+@dataclass
+class AgentContract:
+    agent: str
+    ticker: str
+    as_of: str
+    status: str = "OK"
+    score: float = 0.0
+    confidence: float = 0.0
+    uncertainty: dict[str, float] = field(default_factory=lambda: {"lower": 0.0, "upper": 0.0})
+    evidence: list[dict[str, str]] = field(default_factory=list)
+    model_version: str = "v1.0"
+    input_hash: str = ""
+    warnings: list[str] = field(default_factory=list)
+    payload: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class OrchestrationDecision:
+    ticker: str
+    as_of: str
+    mode: str
+    action: str
+    score: float
+    confidence: float
+    agent_outputs: list[AgentContract] = field(default_factory=list)
+    summary: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
