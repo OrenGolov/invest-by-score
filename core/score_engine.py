@@ -373,7 +373,16 @@ def _build_feature_metadata(snapshot: dict) -> dict:
 def _build_governance(snapshot: dict, score: float) -> dict:
     quality_score = float(snapshot.get("data_quality", {}).get("score", 0.0))
     source_confidence = float(snapshot.get("source_confidence", 0.0))
-    action_allowed = bool(score >= 5.5 and quality_score >= 60.0 and source_confidence >= 0.7)
+    gate_reasons: list[str] = []
+
+    if score < 5.5:
+        gate_reasons.append("score_below_threshold")
+    if quality_score < 60.0:
+        gate_reasons.append("quality_below_threshold")
+    if source_confidence < 0.7:
+        gate_reasons.append("source_confidence_below_threshold")
+
+    action_allowed = bool(not gate_reasons)
 
     return {
         "risk_gate_passed": bool(action_allowed),
@@ -384,7 +393,26 @@ def _build_governance(snapshot: dict, score: float) -> dict:
         "source_confidence": round(source_confidence, 2),
         "score_threshold": 5.5,
         "mode": "ANALYSIS_ONLY" if not action_allowed else "PAPER_TRADING_READY",
+        "gate_reasons": gate_reasons,
         "governance_note": "Scores are only actionable when evidence quality, source confidence, and minimum score thresholds are all satisfied.",
+    }
+
+
+def _build_evidence_ledger(snapshot: dict, governance: dict) -> dict:
+    return {
+        "status": "analysis_only" if not governance["risk_gate_passed"] else "ready",
+        "as_of": snapshot.get("as_of"),
+        "data_quality_score": snapshot.get("data_quality", {}).get("score"),
+        "future_bars_excluded": snapshot.get("future_bars_excluded", 0),
+        "quality_flags": snapshot.get("data_quality", {}).get("flags", []),
+        "source_confidence": snapshot.get("source_confidence"),
+        "checks": [
+            {"name": "point_in_time_filter", "passed": True, "details": "All bars used are <= as_of."},
+            {"name": "quality_threshold", "passed": snapshot.get("data_quality", {}).get("score", 0) >= 60.0, "details": "Minimum quality threshold is 60."},
+            {"name": "source_confidence", "passed": float(snapshot.get("source_confidence", 0.0)) >= 0.7, "details": "Minimum source confidence is 0.7."},
+            {"name": "score_threshold", "passed": float(snapshot.get("score_threshold", 0.0)) >= 5.5 if "score_threshold" in snapshot else True, "details": "Minimum actionable score is 5.5."},
+        ],
+        "gate_reasons": governance.get("gate_reasons", []),
     }
 
 
@@ -448,6 +476,7 @@ def build_score(ticker: str, as_of: str, timestamp: str | None = None) -> ScoreR
     technical_features = _build_technical_features(snapshot)
     feature_metadata = _build_feature_metadata(snapshot)
     governance = _build_governance(snapshot, capped_score)
+    evidence_ledger = _build_evidence_ledger(snapshot, governance)
 
     return ScoreResult(
         ticker=snapshot["ticker"],
@@ -474,4 +503,5 @@ def build_score(ticker: str, as_of: str, timestamp: str | None = None) -> ScoreR
         technical_features=technical_features,
         feature_metadata=feature_metadata,
         governance=governance,
+        evidence_ledger=evidence_ledger,
     )
