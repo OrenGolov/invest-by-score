@@ -7,9 +7,10 @@ import pandas as pd
 
 from agents.market_data_agent import fetch_market_snapshot
 from core.agent_contracts import AgentContract, OrchestrationDecision
+from core.audit_store import persist_decision_audit
 from core.orchestrator import orchestrate_score
 from core.score_engine import build_score
-from fetch_data import fetch_fundamental_snapshot
+from fetch_data import fetch_fundamental_snapshot, resolve_fundamental_provider
 
 
 class ScoringEngineTests(unittest.TestCase):
@@ -132,6 +133,41 @@ class ScoringEngineTests(unittest.TestCase):
         result = orchestrate_score("MSFT", "2024-01-02")
         self.assertIn("analysis_only", result.mode.lower())
         self.assertIn("analysis_only", result.action.lower())
+
+    def test_fundamental_provider_resolution_has_explicit_fallbacks(self):
+        with patch.dict("os.environ", {"ALPHAVANTAGE_API_KEY": ""}, clear=False):
+            provider = resolve_fundamental_provider("MSFT", "2024-01-02")
+            self.assertIn("provider", provider)
+            self.assertIn("status", provider)
+            self.assertEqual(provider["status"], "provider_key_required")
+
+    def test_decision_audit_persistence_writes_event_record(self):
+        result = build_score("MSFT", "2024-01-02")
+        event = persist_decision_audit({
+            "ticker": result.ticker,
+            "as_of": result.as_of,
+            "mode": "ANALYSIS_ONLY",
+            "action": result.action,
+            "score": result.score,
+            "confidence": result.confidence,
+            "replay_hash": "abc123",
+            "source_quality": {
+                "market_confidence": 0.8,
+                "fundamental_confidence": 0.55,
+                "effective_confidence": 0.68,
+            },
+        })
+        self.assertIn("event_id", event)
+        self.assertIn("ticker", event)
+        self.assertEqual(event["ticker"], "MSFT")
+        self.assertIn("replay_hash", event)
+
+    def test_score_contract_includes_richer_source_quality_and_replay_metadata(self):
+        result = build_score("MSFT", "2024-01-02")
+        self.assertIn("source_quality", result.to_dict())
+        self.assertIn("replay_metadata", result.to_dict())
+        self.assertIn("effective_confidence", result.source_quality)
+        self.assertIn("replay_hash", result.replay_metadata)
 
 
 if __name__ == "__main__":

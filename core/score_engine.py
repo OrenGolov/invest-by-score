@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import timedelta
 
 from agents.market_data_agent import fetch_market_snapshot
 from agents.technical_agent import score_technical
+from core.audit_store import persist_decision_audit
 from core.config import DEFAULT_ACTION, MAX_SCORE
 from core.schemas import ScoreResult
 from fetch_data import fetch_fundamental_snapshot
@@ -503,6 +506,28 @@ def _build_fundamental_score(snapshot: dict, fundamental_snapshot: dict | None =
     return round(max(0.0, min(10.0, base)), 2)
 
 
+def _build_replay_metadata(ticker: str, as_of: str, snapshot: dict, fundamental_snapshot: dict, score: float, confidence: float) -> dict:
+    payload = {
+        "ticker": ticker.upper(),
+        "as_of": as_of,
+        "market_snapshot_hash": hashlib.sha256(json.dumps(snapshot, sort_keys=True, default=str).encode("utf-8")).hexdigest(),
+        "fundamental_snapshot_hash": hashlib.sha256(json.dumps(fundamental_snapshot, sort_keys=True, default=str).encode("utf-8")).hexdigest(),
+        "score": round(float(score), 2),
+        "confidence": round(float(confidence), 4),
+        "deterministic": True,
+    }
+    return {
+        "replay_hash": hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest(),
+        "snapshot_hash": payload["market_snapshot_hash"],
+        "fundamental_snapshot_hash": payload["fundamental_snapshot_hash"],
+        "deterministic": True,
+        "source_record_ids": [
+            str(snapshot.get("source_contract", {}).get("source_id", "market_data")),
+            str((fundamental_snapshot or {}).get("source_contract", {}).get("source_id", "fundamentals")),
+        ],
+    }
+
+
 def build_score(ticker: str, as_of: str, timestamp: str | None = None) -> ScoreResult:
     """Build a current-time and long-term score for a ticker at a given point-in-time."""
     snapshot = fetch_market_snapshot(ticker, as_of, timestamp)
@@ -573,7 +598,17 @@ def build_score(ticker: str, as_of: str, timestamp: str | None = None) -> ScoreR
         risk_flags.append("Fundamental source weak or invalid")
         confidence = max(0.25, confidence - 0.2)
 
-    return ScoreResult(
+    source_quality = {
+        "market_confidence": round(float(snapshot.get("source_confidence", 0.0)), 4),
+        "fundamental_confidence": round(float(fundamental_snapshot.get("source_confidence", 0.0)), 4),
+        "effective_confidence": round(float(min(snapshot.get("source_confidence", 0.0), fundamental_snapshot.get("source_confidence", 0.0))), 4),
+        "quality_score": round(float(snapshot.get("data_quality", {}).get("score", 0.0)), 2),
+        "minimum_quality_score": 60.0,
+        "provider_resolution": fundamental_snapshot.get("provider_resolution", {}),
+    }
+    replay_metadata = _build_replay_metadata(ticker, as_of, snapshot, fundamental_snapshot, capped_score, confidence)
+
+    result = ScoreResult(
         ticker=snapshot["ticker"],
         as_of=snapshot["as_of"],
         score=round(capped_score, 2),
@@ -601,4 +636,19 @@ def build_score(ticker: str, as_of: str, timestamp: str | None = None) -> ScoreR
         evidence_ledger=evidence_ledger,
         fundamental_score=round(fundamental_score, 2),
         fundamental_features=fundamental_features,
+        source_quality=source_quality,
+        replay_metadata=replay_metadata,
     )
+
+    audit_event = persist_decision_audit({
+        "ticker": result.ticker,
+        "as_of": result.as_of,
+        "mode": governance.get("mode", "ANALYSIS_ONLY"),
+        "action": result.action,
+        "score": result.score,
+        "confidence": result.confidence,
+        "source_quality": source_quality,
+        "replay_hash": replay_metadata["replay_hash"],
+    })
+    result.replay_metadata["audit_event_id"] = audit_event["event_id"]
+    return result
