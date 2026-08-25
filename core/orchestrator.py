@@ -167,6 +167,8 @@ def orchestrate_score(ticker: str, as_of: str, timestamp: str | None = None) -> 
         action=action,
         score=float(score_result.score),
         confidence=float(score_result.confidence),
+        current_time_score=float(score_result.current_time_score),
+        long_term_score=float(score_result.long_term_score),
         agent_outputs=[market_agent, technical_agent, fundamental_agent, risk_agent, audit_agent],
         summary=(
             "Typed, point-in-time orchestrator run for the requested timestamp. "

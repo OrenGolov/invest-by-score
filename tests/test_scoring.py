@@ -107,6 +107,9 @@ class ScoringEngineTests(unittest.TestCase):
         self.assertTrue(all(agent.input_hash for agent in result.agent_outputs))
         self.assertIn("market_data", result.agent_outputs[0].agent)
         self.assertIn("status", result.agent_outputs[0].payload)
+        score_result = build_score("MSFT", "2024-01-02")
+        self.assertEqual(result.current_time_score, score_result.current_time_score)
+        self.assertEqual(result.long_term_score, score_result.long_term_score)
         replay = orchestrate_score("MSFT", "2024-01-02")
         self.assertEqual(result.to_dict(), replay.to_dict())
 

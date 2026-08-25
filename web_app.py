@@ -42,6 +42,8 @@ class AppHandler(SimpleHTTPRequestHandler):
                         veto_reasons=result.veto_reasons,
                         replay_hash=result.replay_hash,
                         snapshot_hash=result.snapshot_hash,
+                        current_time_score=result.current_time_score,
+                        long_term_score=result.long_term_score,
                         evidence=[{"source_record_id": source_id, "reason": "vetoed"} for source_id in result.source_record_ids],
                         agent_outputs=result.agent_outputs,
                     ).to_dict()
