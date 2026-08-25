@@ -46,6 +46,8 @@ class NoTradeDecision:
     veto_reasons: list[str] = field(default_factory=list)
     replay_hash: str = ""
     snapshot_hash: str = ""
+    current_time_score: float = 0.0
+    long_term_score: float = 0.0
     evidence: list[dict[str, str]] = field(default_factory=list)
     agent_outputs: list[AgentContract] = field(default_factory=list)
 
@@ -61,6 +63,8 @@ class OrchestrationDecision:
     action: str
     score: float
     confidence: float
+    current_time_score: float = 0.0
+    long_term_score: float = 0.0
     agent_outputs: list[AgentContract] = field(default_factory=list)
     summary: str = ""
     veto_reasons: list[str] = field(default_factory=list)
