@@ -7,7 +7,8 @@ from datetime import timedelta
 from agents.market_data_agent import fetch_market_snapshot
 from agents.technical_agent import score_technical
 from core.audit_store import persist_decision_audit
-from core.config import DEFAULT_ACTION, MAX_SCORE
+from core.config import CURRENT_SCORE_VERSION, DEFAULT_ACTION, LONG_TERM_SCORE_VERSION, MAX_SCORE
+from core.news_contract import fetch_news_snapshot
 from core.schemas import ScoreResult
 from fetch_data import fetch_fundamental_snapshot
 
@@ -110,17 +111,17 @@ def _build_next_expected_report(as_of: str) -> dict:
     }
 
 
-def _build_insights(snapshot: dict, score: float) -> dict:
-    ma_50 = snapshot.get("moving_averages", {}).get("50d")
+def _build_insights(snapshot: dict, score: float, news_snapshot: dict) -> dict:
+    ma_150 = snapshot.get("moving_averages", {}).get("150d")
     ma_200 = snapshot.get("moving_averages", {}).get("200d")
     rsi = float(snapshot.get("rsi", 50.0))
     bullish = []
     bearish = []
 
-    if ma_50 and ma_200 and ma_50 > ma_200:
-        bullish.append("50-day moving average remains above the 200-day average.")
+    if ma_150 and ma_200 and ma_150 > ma_200:
+        bullish.append("150-day moving average remains above the 200-day average.")
     else:
-        bearish.append("Trend structure remains weaker than the long-term baseline.")
+        bearish.append("Long-term trend structure remains weaker than the 200-day baseline.")
 
     if rsi > 55:
         bullish.append("Momentum is constructive and the RSI is above neutral.")
@@ -149,7 +150,11 @@ def _build_insights(snapshot: dict, score: float) -> dict:
             "Weakening breadth would reduce conviction in the current trend.",
         ],
         "trend_analysis": "The trend is mixed but generally constructive when volume and moving-average support are intact.",
-        "sentiment_analysis": "Sentiment is neutral to mildly positive given stable momentum and measured participation.",
+        "sentiment_analysis": (
+            news_snapshot.get("reason", "News/sentiment data is unavailable.")
+            if news_snapshot.get("status") != "OK"
+            else f"News sentiment score: {news_snapshot.get('sentiment_score')}"
+        ),
         "unusual_market_behavior_detection": "No major anomaly flagged from the current price/volume pattern.",
         "institutional_activity_insights": "Institutional participation appears steady but not decisively skewed.",
         "anomaly_detection": "No outlier event or pattern break is material at the current as-of timestamp.",
@@ -164,20 +169,29 @@ def _build_insights(snapshot: dict, score: float) -> dict:
     }
 
 
-def _score_current_time(snapshot: dict) -> float:
+def _score_current_time(snapshot: dict, news_snapshot: dict) -> float:
+    """Near-term/tactical score.
+
+    Feature group: news/sentiment, 1d/5d/20d movement, RSI, volume, and
+    the 50d/100d moving averages only. Deliberately excludes the 150d/200d
+    averages and any longer-horizon return so this score cannot become an
+    alias of `_score_long_term`, which draws from a disjoint feature set.
+    """
     close = float(snapshot.get("close", 0.0))
     change_1d = float(snapshot.get("change_1d", 0.0))
     change_5d = float(snapshot.get("change_5d", 0.0))
     change_20d = float(snapshot.get("change_20d", 0.0))
     trend_vs_20d_mean = float(snapshot.get("trend_vs_20d_mean", 0.0))
     rsi = float(snapshot.get("rsi", 50.0))
-    volatility = float(snapshot.get("volatility", 0.0))
     volume_ratio = float(snapshot.get("volume_ratio_20d", 1.0))
     price_vs_ma_50 = float(snapshot.get("price_vs_ma_50", 0.0))
     price_vs_ma_100 = float(snapshot.get("price_vs_ma_100", 0.0))
     ma_50 = float(snapshot.get("moving_averages", {}).get("50d", 0.0))
     ma_100 = float(snapshot.get("moving_averages", {}).get("100d", 0.0))
-    ma_200 = float(snapshot.get("moving_averages", {}).get("200d", 0.0))
+
+    news_contribution = 0.0
+    if news_snapshot.get("status") == "OK" and news_snapshot.get("sentiment_score") is not None:
+        news_contribution = max(-1.0, min(1.0, float(news_snapshot["sentiment_score"]) * 1.0))
 
     score = 4.0
     score += max(-1.7, min(1.7, change_1d * 42.0))
@@ -190,20 +204,7 @@ def _score_current_time(snapshot: dict) -> float:
     score += max(-1.0, min(1.0, (volume_ratio - 1.0) * 2.8))
     if ma_50 and ma_100:
         score += max(-1.1, min(1.1, ((ma_50 - ma_100) / ma_100) * 22.0))
-    score -= min(1.5, volatility * 28.0)
-
-    if rsi > 60:
-        score += 0.4
-    elif rsi < 40:
-        score -= 0.4
-    if volume_ratio > 1.1:
-        score += 0.3
-    elif volume_ratio < 0.9:
-        score -= 0.3
-    if price_vs_ma_50 > 0 and price_vs_ma_100 > 0:
-        score += 0.5
-    elif price_vs_ma_50 < 0 and price_vs_ma_100 < 0:
-        score -= 0.5
+    score += news_contribution
 
     if close <= 0:
         score = 0.0
@@ -211,78 +212,74 @@ def _score_current_time(snapshot: dict) -> float:
 
 
 def _score_long_term(snapshot: dict) -> float:
+    """Structural/long-horizon score.
+
+    Feature group: the 60d historical return, the 150d/200d moving
+    averages, the structural trend cross between them, and a volatility
+    risk discount. Fundamentals are intentionally not blended in yet
+    (tracked separately as `fundamental_score`). Deliberately excludes
+    1d/5d/20d movement, RSI, volume, and the 50d/100d averages so this
+    score draws from a feature set disjoint from `_score_current_time`.
+    """
     close = float(snapshot.get("close", 0.0))
     volatility = float(snapshot.get("volatility", 0.0))
-    trend_vs_20d_mean = float(snapshot.get("trend_vs_20d_mean", 0.0))
-    change_20d = float(snapshot.get("change_20d", 0.0))
+    change_60d = float(snapshot.get("change_60d", 0.0))
     price_vs_ma_150 = float(snapshot.get("price_vs_ma_150", 0.0))
     price_vs_ma_200 = float(snapshot.get("price_vs_ma_200", 0.0))
     moving_averages = snapshot.get("moving_averages", {})
-    ma_50 = float(moving_averages.get("50d", 0.0))
-    ma_100 = float(moving_averages.get("100d", 0.0))
     ma_150 = float(moving_averages.get("150d", 0.0))
     ma_200 = float(moving_averages.get("200d", 0.0))
 
     score = 4.0
+    score += max(-1.5, min(1.5, change_60d * 10.0))
     score += max(-2.0, min(2.0, price_vs_ma_150 * 26.0))
     score += max(-2.2, min(2.2, price_vs_ma_200 * 30.0))
     if ma_200:
-        score += max(-1.8, min(1.8, ((ma_50 - ma_200) / ma_200) * 40.0))
-    if ma_150:
-        score += max(-1.4, min(1.4, ((ma_100 - ma_150) / ma_150) * 22.0))
-    score += max(-1.0, min(1.0, change_20d * 8.0))
-    score += max(-1.0, min(1.0, trend_vs_20d_mean * 10.0))
-    if ma_50 and ma_200:
-        score += max(-1.2, min(1.2, ((ma_50 - ma_200) / ma_200) * 12.0))
-    if ma_100 and ma_200:
-        score += max(-1.0, min(1.0, ((ma_100 - ma_200) / ma_200) * 10.0))
-    score -= min(1.8, volatility * 22.0)
+        score += max(-1.8, min(1.8, ((ma_150 - ma_200) / ma_200) * 40.0))
+    score -= max(0.0, min(1.8, volatility * 22.0))
 
     if close <= 0:
         score = 0.0
     return round(max(0.0, min(MAX_SCORE, score)), 2)
 
 
-def _build_scoring_breakdown(snapshot: dict, score: float, current_time_score: float, long_term_score: float) -> dict:
+def _build_scoring_breakdown(snapshot: dict, score: float, current_time_score: float, long_term_score: float, news_snapshot: dict) -> dict:
     momentum = max(-2.0, min(2.0, float(snapshot.get("change_20d", 0.0)) * 30.0))
     trend = max(-1.5, min(1.5, float(snapshot.get("trend_vs_20d_mean", 0.0)) * 20.0))
-    ma_alignment = 0.0
     moving_averages = snapshot.get("moving_averages", {})
     ma_50 = float(moving_averages.get("50d", 0.0))
+    ma_100 = float(moving_averages.get("100d", 0.0))
+    ma_150 = float(moving_averages.get("150d", 0.0))
     ma_200 = float(moving_averages.get("200d", 0.0))
-    if ma_50 and ma_200:
-        ma_alignment = max(-1.5, min(1.5, ((ma_50 - ma_200) / ma_200) * 50.0))
+    ma_short_term_alignment = 0.0
+    if ma_50 and ma_100:
+        ma_short_term_alignment = max(-1.5, min(1.5, ((ma_50 - ma_100) / ma_100) * 22.0))
+    structural_trend = 0.0
+    if ma_150 and ma_200:
+        structural_trend = max(-1.8, min(1.8, ((ma_150 - ma_200) / ma_200) * 40.0))
     rsi_weight = max(-1.5, min(1.5, ((float(snapshot.get("rsi", 50.0)) - 50.0) / 50.0) * 1.5))
-    volume_ratio = float(snapshot.get("volume", 0.0)) / float(snapshot.get("avg_volume_20d", 1.0)) if float(snapshot.get("avg_volume_20d", 1.0)) else 1.0
+    volume_ratio = float(snapshot.get("volume_ratio_20d", 1.0))
     volume_weight = max(-1.0, min(1.0, (volume_ratio - 1.0) * 2.0))
     volatility_weight = min(1.5, float(snapshot.get("volatility", 0.0)) * 30.0) if float(snapshot.get("volatility", 0.0)) > 0 else 0.0
-    news_proxy = 0.0
-    rsi = float(snapshot.get("rsi", 50.0))
-    if rsi > 55:
-        news_proxy += 0.8
-    elif rsi < 45:
-        news_proxy -= 0.8
-    if float(snapshot.get("change_1d", 0.0)) > 0:
-        news_proxy += 0.5
-    elif float(snapshot.get("change_1d", 0.0)) < 0:
-        news_proxy -= 0.5
-    if float(snapshot.get("price_vs_ma_50", 0.0)) > 0:
-        news_proxy += 0.7
-    elif float(snapshot.get("price_vs_ma_50", 0.0)) < 0:
-        news_proxy -= 0.7
+
+    news_status = news_snapshot.get("status", "UNAVAILABLE")
+    news_contribution = float(news_snapshot.get("sentiment_score") or 0.0) if news_status == "OK" else 0.0
 
     return {
         "final_score": round(score, 2),
         "current_time_score": round(current_time_score, 2),
         "long_term_score": round(long_term_score, 2),
+        "current_score_version": CURRENT_SCORE_VERSION,
+        "long_term_score_version": LONG_TERM_SCORE_VERSION,
         "weighted_contributions": {
             "price_momentum_20d": round(momentum, 2),
             "trend_vs_20d_mean": round(trend, 2),
-            "moving_average_alignment": round(ma_alignment, 2),
+            "ma_50_100_alignment": round(ma_short_term_alignment, 2),
+            "structural_trend_150_200": round(structural_trend, 2),
             "rsi_signal": round(rsi_weight, 2),
             "volume_confirmation": round(volume_weight, 2),
             "volatility_drag": round(-volatility_weight, 2),
-            "news_sentiment_proxy": round(news_proxy, 2),
+            "news_sentiment": round(news_contribution, 2),
         },
         "current_time_breakdown": {
             "recent_momentum": round(max(-2.0, min(2.0, float(snapshot.get("change_5d", 0.0)) * 25.0)), 2),
@@ -290,20 +287,21 @@ def _build_scoring_breakdown(snapshot: dict, score: float, current_time_score: f
             "ma_50_100_alignment": round(max(-1.5, min(1.5, float(snapshot.get("price_vs_ma_50", 0.0)) * 35.0 + float(snapshot.get("price_vs_ma_100", 0.0)) * 22.0)), 2),
             "rsi_signal": round(max(-1.5, min(1.5, ((float(snapshot.get("rsi", 50.0)) - 50.0) / 50.0) * 2.0)), 2),
             "volume_confirmation": round(max(-1.0, min(1.0, (volume_ratio - 1.0) * 2.5)), 2),
-            "news_sentiment_proxy": round(news_proxy, 2),
+            "news_sentiment": {"status": news_status, "value": round(news_contribution, 2) if news_status == "OK" else None},
         },
         "long_term_breakdown": {
-            "price_vs_150d_ma": round(max(-2.0, min(2.0, float(snapshot.get("price_vs_ma_150", 0.0)) * 30.0)), 2),
-            "price_vs_200d_ma": round(max(-2.0, min(2.0, float(snapshot.get("price_vs_ma_200", 0.0)) * 28.0)), 2),
-            "ma_50_200_alignment": round(max(-1.5, min(1.5, ((ma_50 - ma_200) / ma_200) * 40.0)), 2) if ma_200 else 0.0,
-            "ma_100_150_alignment": round(max(-1.0, min(1.0, ((ma_50 - ma_200) / ma_200) * 40.0)), 2) if ma_200 else 0.0,
+            "historical_return_60d": round(max(-1.5, min(1.5, float(snapshot.get("change_60d", 0.0)) * 10.0)), 2),
+            "price_vs_150d_ma": round(max(-2.0, min(2.0, float(snapshot.get("price_vs_ma_150", 0.0)) * 26.0)), 2),
+            "price_vs_200d_ma": round(max(-2.2, min(2.2, float(snapshot.get("price_vs_ma_200", 0.0)) * 30.0)), 2),
+            "structural_trend_150_200": round(structural_trend, 2),
         },
         "score_change_drivers": [
-            "Current-time momentum and news-style sentiment are driving the near-term reading.",
-            "Longer-horizon moving-average positioning and the 150d/200d trend anchor the structural outlook.",
-            "Volatility pressure offsets gains when market dispersion expands.",
+            "Current-time momentum, RSI, volume, and the 50d/100d moving averages drive the near-term reading.",
+            "The 60-day historical return and the 150d/200d structural trend anchor the long-term outlook.",
+            "News/sentiment contributes zero weight while no verified provider is connected.",
+            "Volatility pressure discounts the long-term score when market dispersion expands.",
         ],
-        "historical_comparison": "The overall score blends a near-term momentum view with a broader trend assessment from the 150d and 200d structure.",
+        "historical_comparison": "The overall score blends a near-term momentum view (50d/100d) with a structural trend assessment (150d/200d); the two share no input feature.",
     }
 
 
@@ -359,17 +357,26 @@ def _build_technical_features(snapshot: dict) -> dict:
     }
 
 
-def _build_feature_metadata(snapshot: dict) -> dict:
+CURRENT_SCORE_FEATURES = ("change_1d", "change_5d", "change_20d", "trend_vs_20d_mean", "rsi", "volume_ratio_20d", "price_vs_ma_50", "price_vs_ma_100", "ma_50", "ma_100")
+LONG_TERM_SCORE_FEATURES = ("change_60d", "price_vs_ma_150", "price_vs_ma_200", "ma_150", "ma_200", "volatility")
+
+
+def _build_feature_metadata(snapshot: dict, news_snapshot: dict) -> dict:
+    feature_contracts = snapshot.get("features", {})
     return {
         "feature_family": "technical",
         "feature_version": "v1.0",
         "as_of": snapshot.get("as_of"),
         "source": snapshot.get("source"),
+        "current_score_features": [feature_contracts[name] for name in CURRENT_SCORE_FEATURES if name in feature_contracts],
+        "long_term_score_features": [feature_contracts[name] for name in LONG_TERM_SCORE_FEATURES if name in feature_contracts],
+        "news_feature": news_snapshot,
         "features": [
-            {"name": "trend_regime", "owner_agent": "Market Data Agent", "lookback_window": "50d/100d/200d", "calculation": "moving_average_alignment"},
+            {"name": "trend_regime", "owner_agent": "Market Data Agent", "lookback_window": "50d/100d/150d/200d", "calculation": "moving_average_alignment"},
             {"name": "relative_strength", "owner_agent": "Technical Agent", "lookback_window": "14d RSI", "calculation": "rsi"},
             {"name": "volume_confirmation", "owner_agent": "Market Data Agent", "lookback_window": "20d volume average", "calculation": "volume_ratio_20d"},
             {"name": "volatility_regime", "owner_agent": "Market Data Agent", "lookback_window": "30d realized volatility", "calculation": "volatility"},
+            {"name": "news_sentiment", "owner_agent": "News Intelligence Agent", "lookback_window": "N/A", "calculation": "unavailable_until_provider_connected"},
         ],
     }
 
@@ -506,12 +513,13 @@ def _build_fundamental_score(snapshot: dict, fundamental_snapshot: dict | None =
     return round(max(0.0, min(10.0, base)), 2)
 
 
-def _build_replay_metadata(ticker: str, as_of: str, snapshot: dict, fundamental_snapshot: dict, score: float, confidence: float) -> dict:
+def _build_replay_metadata(ticker: str, as_of: str, snapshot: dict, fundamental_snapshot: dict, news_snapshot: dict, score: float, confidence: float) -> dict:
     payload = {
         "ticker": ticker.upper(),
         "as_of": as_of,
         "market_snapshot_hash": hashlib.sha256(json.dumps(snapshot, sort_keys=True, default=str).encode("utf-8")).hexdigest(),
         "fundamental_snapshot_hash": hashlib.sha256(json.dumps(fundamental_snapshot, sort_keys=True, default=str).encode("utf-8")).hexdigest(),
+        "news_snapshot_hash": hashlib.sha256(json.dumps(news_snapshot, sort_keys=True, default=str).encode("utf-8")).hexdigest(),
         "score": round(float(score), 2),
         "confidence": round(float(confidence), 4),
         "deterministic": True,
@@ -520,10 +528,12 @@ def _build_replay_metadata(ticker: str, as_of: str, snapshot: dict, fundamental_
         "replay_hash": hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest(),
         "snapshot_hash": payload["market_snapshot_hash"],
         "fundamental_snapshot_hash": payload["fundamental_snapshot_hash"],
+        "news_snapshot_hash": payload["news_snapshot_hash"],
         "deterministic": True,
         "source_record_ids": [
             str(snapshot.get("source_contract", {}).get("source_id", "market_data")),
             str((fundamental_snapshot or {}).get("source_contract", {}).get("source_id", "fundamentals")),
+            str(news_snapshot.get("source_id", "news_provider_unconfigured")),
         ],
     }
 
@@ -532,7 +542,8 @@ def build_score(ticker: str, as_of: str, timestamp: str | None = None) -> ScoreR
     """Build a current-time and long-term score for a ticker at a given point-in-time."""
     snapshot = fetch_market_snapshot(ticker, as_of, timestamp)
     fundamental_snapshot = fetch_fundamental_snapshot(ticker, as_of)
-    current_time_score = _score_current_time(snapshot)
+    news_snapshot = fetch_news_snapshot(ticker, snapshot["as_of"])
+    current_time_score = _score_current_time(snapshot, news_snapshot)
     long_term_score = _score_long_term(snapshot)
     blended_score = round((current_time_score + long_term_score) / 2.0, 2)
     capped_score = max(0.0, min(MAX_SCORE, blended_score))
@@ -555,8 +566,10 @@ def build_score(ticker: str, as_of: str, timestamp: str | None = None) -> ScoreR
     if risk_flags:
         confidence = max(0.35, confidence - 0.2)
 
+    news_status_note = "verified news sentiment" if news_snapshot.get("status") == "OK" else "no news sentiment (no verified provider connected)"
     explanation = (
-        f"Dual-factor score combining current-time momentum, sentiment proxy, and 50d/100d trend structure with a longer-term view based on 150d/200d averages and historical regime. "
+        f"Dual-factor score combining current-time momentum, RSI, volume, and 50d/100d trend structure ({news_status_note}) "
+        f"with a longer-term view based on the 60-day return, 150d/200d averages, and structural trend. "
         f"Current price is {snapshot['close']:.2f}; 20-day momentum is {snapshot.get('change_20d', 0.0):.2%}; RSI is {snapshot.get('rsi', 50.0):.1f}."
     )
 
@@ -569,6 +582,7 @@ def build_score(ticker: str, as_of: str, timestamp: str | None = None) -> ScoreR
         "price_vs_ma_200": snapshot.get("price_vs_ma_200"),
         "market_regime": snapshot.get("market_regime"),
         "trend_vs_20d_mean": snapshot.get("trend_vs_20d_mean"),
+        "change_60d": snapshot.get("change_60d"),
     }
 
     data_quality = snapshot.get("data_quality", {})
@@ -583,11 +597,11 @@ def build_score(ticker: str, as_of: str, timestamp: str | None = None) -> ScoreR
     recommended_actions = _build_recommended_actions(capped_score, confidence, snapshot["as_of"])
     latest_financial_report = _build_latest_financial_report(snapshot["as_of"])
     next_expected_report = _build_next_expected_report(snapshot["as_of"])
-    insights = _build_insights(snapshot, capped_score)
-    scoring_breakdown = _build_scoring_breakdown(snapshot, capped_score, current_time_score, long_term_score)
+    insights = _build_insights(snapshot, capped_score, news_snapshot)
+    scoring_breakdown = _build_scoring_breakdown(snapshot, capped_score, current_time_score, long_term_score, news_snapshot)
     source_reliability = _build_source_reliability()
     technical_features = _build_technical_features(snapshot)
-    feature_metadata = _build_feature_metadata(snapshot)
+    feature_metadata = _build_feature_metadata(snapshot, news_snapshot)
     governance = _build_governance(snapshot, capped_score, fundamental_snapshot)
     evidence_ledger = _build_evidence_ledger(snapshot, governance)
     fundamental_features = _build_fundamental_features(snapshot, fundamental_snapshot)
@@ -606,7 +620,7 @@ def build_score(ticker: str, as_of: str, timestamp: str | None = None) -> ScoreR
         "minimum_quality_score": 60.0,
         "provider_resolution": fundamental_snapshot.get("provider_resolution", {}),
     }
-    replay_metadata = _build_replay_metadata(ticker, as_of, snapshot, fundamental_snapshot, capped_score, confidence)
+    replay_metadata = _build_replay_metadata(ticker, as_of, snapshot, fundamental_snapshot, news_snapshot, capped_score, confidence)
 
     result = ScoreResult(
         ticker=snapshot["ticker"],
@@ -638,6 +652,7 @@ def build_score(ticker: str, as_of: str, timestamp: str | None = None) -> ScoreR
         fundamental_features=fundamental_features,
         source_quality=source_quality,
         replay_metadata=replay_metadata,
+        news_snapshot=news_snapshot,
     )
 
     audit_event = persist_decision_audit({
