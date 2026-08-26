@@ -131,6 +131,23 @@ def orchestrate_score(ticker: str, as_of: str, timestamp: str | None = None) -> 
         source_record_id="risk_policy",
     )
 
+    news_snapshot = score_result.news_snapshot
+    news_agent = AgentContract(
+        agent="news_intelligence",
+        ticker=ticker.upper(),
+        as_of=snapshot["as_of"],
+        status=news_snapshot.get("status", "UNAVAILABLE"),
+        score=0.0,
+        confidence=float(news_snapshot.get("source_confidence", 0.0)),
+        uncertainty={"lower": 0.0, "upper": 0.0},
+        evidence=[{"source_record_id": news_snapshot.get("source_id", "news_provider_unconfigured"), "reason": news_snapshot.get("reason", "")}],
+        model_version=news_snapshot.get("calculation_version", "news-contract-v1"),
+        input_hash=_stable_hash(news_snapshot),
+        warnings=[] if news_snapshot.get("status") == "OK" else ["news_provider_unconfigured"],
+        payload={"status": news_snapshot.get("status", "UNAVAILABLE"), "sentiment_score": news_snapshot.get("sentiment_score")},
+        source_record_id=str(news_snapshot.get("source_id", "news_provider_unconfigured")),
+    )
+
     audit_agent = AgentContract(
         agent="performance_auditor",
         ticker=ticker.upper(),
@@ -169,7 +186,7 @@ def orchestrate_score(ticker: str, as_of: str, timestamp: str | None = None) -> 
         confidence=float(score_result.confidence),
         current_time_score=float(score_result.current_time_score),
         long_term_score=float(score_result.long_term_score),
-        agent_outputs=[market_agent, technical_agent, fundamental_agent, risk_agent, audit_agent],
+        agent_outputs=[market_agent, technical_agent, fundamental_agent, news_agent, risk_agent, audit_agent],
         summary=(
             "Typed, point-in-time orchestrator run for the requested timestamp. "
             "The system remains analysis-only unless quality and source checks pass."

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
+from core.config import MARKET_FEATURE_VERSION
 from fetch_data import fetch_price_history
 
 
@@ -19,6 +20,18 @@ def _pct_change(series: pd.Series, periods: int = 1) -> float:
     if pd.isna(previous) or previous == 0:
         return 0.0
     return float((series.iloc[-1] / previous) - 1.0)
+
+
+def _feature_contract(name: str, value, as_of: str, source_id: str, published_time: str, lookback_period: str) -> dict:
+    return {
+        "name": name,
+        "value": value,
+        "as_of": as_of,
+        "source_id": source_id,
+        "published_time": published_time,
+        "calculation_version": MARKET_FEATURE_VERSION,
+        "lookback_period": lookback_period,
+    }
 
 
 def fetch_market_snapshot(ticker: str, as_of: str, timestamp: str | None = None) -> dict:
@@ -82,6 +95,13 @@ def fetch_market_snapshot(ticker: str, as_of: str, timestamp: str | None = None)
     price_vs_ma_50 = ((latest_close / ma_50) - 1.0) if ma_50 else 0.0
     price_vs_ma_200 = ((latest_close / ma_200) - 1.0) if ma_200 else 0.0
     price_vs_ma_100 = ((latest_close / ma_100) - 1.0) if ma_100 else 0.0
+    price_vs_ma_150 = ((latest_close / ma_150) - 1.0) if ma_150 else 0.0
+
+    change_1d = _pct_change(history["Close"], 1)
+    change_5d = _pct_change(history["Close"], 5)
+    change_20d = _pct_change(history["Close"], 20)
+    change_60d = _pct_change(history["Close"], 60)
+    trend_vs_20d_mean = float(latest_close / close_20d_mean - 1.0) if close_20d_mean else 0.0
 
     bars_available = len(history)
     gaps_detected = int(history.index.to_series().diff().dt.days.gt(1).sum())
@@ -134,6 +154,32 @@ def fetch_market_snapshot(ticker: str, as_of: str, timestamp: str | None = None)
         })
 
     timestamp_valid = all(ts <= target for ts in history.index)
+    as_of_str = target.strftime("%Y-%m-%d %H:%M:%S")
+    published_time_str = history.index[-1].strftime("%Y-%m-%d %H:%M:%S")
+    source_id = "yahoo_finance_chart"
+
+    def _feature(name: str, value, lookback_period: str) -> dict:
+        return _feature_contract(name, value, as_of_str, source_id, published_time_str, lookback_period)
+
+    features = {
+        "change_1d": _feature("change_1d", change_1d, "1d"),
+        "change_5d": _feature("change_5d", change_5d, "5d"),
+        "change_20d": _feature("change_20d", change_20d, "20d"),
+        "change_60d": _feature("change_60d", change_60d, "60d"),
+        "trend_vs_20d_mean": _feature("trend_vs_20d_mean", trend_vs_20d_mean, "20d"),
+        "rsi": _feature("rsi", round(float(rsi), 2), "14d"),
+        "volatility": _feature("volatility", round(float(volatility), 4), "30d"),
+        "volume_ratio_20d": _feature("volume_ratio_20d", round(volume_ratio_20d, 4), "20d"),
+        "price_vs_ma_50": _feature("price_vs_ma_50", round(price_vs_ma_50, 4), "50d"),
+        "price_vs_ma_100": _feature("price_vs_ma_100", round(price_vs_ma_100, 4), "100d"),
+        "price_vs_ma_150": _feature("price_vs_ma_150", round(price_vs_ma_150, 4), "150d"),
+        "price_vs_ma_200": _feature("price_vs_ma_200", round(price_vs_ma_200, 4), "200d"),
+        "ma_50": _feature("ma_50", round(float(ma_50), 2), "50d"),
+        "ma_100": _feature("ma_100", round(float(ma_100), 2), "100d"),
+        "ma_150": _feature("ma_150", round(float(ma_150), 2), "150d"),
+        "ma_200": _feature("ma_200", round(float(ma_200), 2), "200d"),
+    }
+
     return {
         "ticker": ticker.upper(),
         "as_of": target.strftime("%Y-%m-%d %H:%M:%S"),
@@ -166,14 +212,15 @@ def fetch_market_snapshot(ticker: str, as_of: str, timestamp: str | None = None)
         "volume_ratio_20d": round(volume_ratio_20d, 4),
         "price_vs_ma_50": round(price_vs_ma_50, 4),
         "price_vs_ma_100": round(price_vs_ma_100, 4),
-        "price_vs_ma_150": round(float((latest_close / ma_150) - 1.0) if ma_150 else 0.0, 4),
+        "price_vs_ma_150": round(price_vs_ma_150, 4),
         "price_vs_ma_200": round(price_vs_ma_200, 4),
-        "change_1d": _pct_change(history["Close"], 1),
-        "change_5d": _pct_change(history["Close"], 5),
-        "change_20d": _pct_change(history["Close"], 20),
+        "change_1d": change_1d,
+        "change_5d": change_5d,
+        "change_20d": change_20d,
+        "change_60d": change_60d,
         "high_20d": float(recent_20["High"].max()),
         "low_20d": float(recent_20["Low"].min()),
-        "trend_vs_20d_mean": float(latest_close / close_20d_mean - 1.0) if close_20d_mean else 0.0,
+        "trend_vs_20d_mean": trend_vs_20d_mean,
         "recent_5d_min": float(recent_5["Low"].min()),
         "recent_5d_max": float(recent_5["High"].max()),
         "moving_averages": {
@@ -198,4 +245,7 @@ def fetch_market_snapshot(ticker: str, as_of: str, timestamp: str | None = None)
             "point_in_time_cutoff": target.strftime("%Y-%m-%d %H:%M:%S"),
             "point_in_time_policy": "Only bars with timestamp <= as_of are eligible for scoring; all future bars are excluded before indicators are calculated.",
         },
+        "calculation_version": MARKET_FEATURE_VERSION,
+        "lookback_period": "variable",
+        "features": features,
     }
