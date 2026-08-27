@@ -2,12 +2,35 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from agents.market_data_agent import fetch_market_snapshot
 from agents.technical_agent import score_technical
 from core.audit_store import persist_decision_audit
-from core.config import CURRENT_SCORE_VERSION, DEFAULT_ACTION, LONG_TERM_SCORE_VERSION, MAX_SCORE
+from core.config import (
+    CONFIDENCE_CAP,
+    CONFIDENCE_FLOOR,
+    CONFIDENCE_FRESHNESS_DECAY_DAYS,
+    CONFIDENCE_FRESHNESS_GRACE_DAYS,
+    CONFIDENCE_FULL_COVERAGE_BARS,
+    CONFIDENCE_SIGNAL_DEADZONE_RATIO,
+    CONFIDENCE_VERSION,
+    CONFIDENCE_VOL_CALM_DAILY_STD,
+    CONFIDENCE_VOL_CHAOTIC_DAILY_STD,
+    CONFIDENCE_WEIGHT_DATA_QUALITY,
+    CONFIDENCE_WEIGHT_FRESHNESS,
+    CONFIDENCE_WEIGHT_HISTORY_COVERAGE,
+    CONFIDENCE_WEIGHT_SIGNAL_AGREEMENT,
+    CONFIDENCE_WEIGHT_SOURCE_RELIABILITY,
+    CONFIDENCE_WEIGHT_VOLATILITY_REGIME,
+    CURRENT_SCORE_VERSION,
+    DEFAULT_ACTION,
+    FUNDAMENTAL_SOURCE_PENALTY,
+    GOVERNANCE_RISK_GATE_PENALTY,
+    LONG_TERM_SCORE_VERSION,
+    MAX_SCORE,
+    RISK_FLAG_CONFIDENCE_PENALTIES,
+)
 from core.news_contract import fetch_news_snapshot
 from core.schemas import ScoreResult
 from fetch_data import fetch_fundamental_snapshot
@@ -513,6 +536,173 @@ def _build_fundamental_score(snapshot: dict, fundamental_snapshot: dict | None =
     return round(max(0.0, min(10.0, base)), 2)
 
 
+def _clip01(value: float) -> float:
+    """Clamp a numeric factor onto the unit interval."""
+    return max(0.0, min(1.0, float(value)))
+
+
+def _signal_direction(value: float | None, deadzone: float) -> float:
+    """Map a signed ratio onto {-1, 0, +1} with a noise dead-zone."""
+    if value is None:
+        return 0.0
+    if value > deadzone:
+        return 1.0
+    if value < -deadzone:
+        return -1.0
+    return 0.0
+
+
+def _factor_entry(name: str, value: float, weight: float, note: str) -> dict:
+    return {
+        "name": name,
+        "value": round(_clip01(value), 4),
+        "weight": weight,
+        "contribution": round(_clip01(value) * weight, 4),
+        "note": note,
+    }
+
+
+def _compute_signal_agreement(snapshot: dict) -> float:
+    """Directional agreement across momentum horizons and trend structure.
+
+    Reads signed relative differences already produced by the market-data
+    agent (momentum over 5d/20d horizons, distance versus the 20-day mean,
+    and price versus the 50d/200d averages). Signals are mapped to bull/
+    bear/neutral directions and averaged: perfect agreement scores 1.0 and
+    total disagreement scores 0.5.
+    """
+    deadzone = CONFIDENCE_SIGNAL_DEADZONE_RATIO
+    directions = [
+        _signal_direction(snapshot.get("change_5d"), deadzone),
+        _signal_direction(snapshot.get("change_20d"), deadzone),
+        _signal_direction(snapshot.get("trend_vs_20d_mean"), deadzone),
+        _signal_direction(snapshot.get("price_vs_ma_50"), deadzone),
+        _signal_direction(snapshot.get("price_vs_ma_200"), deadzone),
+    ]
+    mean_direction = abs(sum(directions) / len(directions))
+    return 0.5 + 0.5 * mean_direction
+
+
+def _parse_calendar_day(raw: object) -> datetime | None:
+    try:
+        return datetime.strptime(str(raw)[:10], "%Y-%m-%d")
+    except Exception:
+        return None
+
+
+def _freshness_factor(snapshot: dict) -> tuple[float, str]:
+    """Credit decay based on how stale the newest bar is relative to as_of."""
+    newest = _parse_calendar_day(snapshot.get("last_valid_bar"))
+    as_of = _parse_calendar_day(snapshot.get("as_of"))
+    if newest is None or as_of is None:
+        return 0.7, "bar age unknown; neutral freshness credit applied"
+    stale_days = max(0, (as_of - newest).days)
+    if stale_days <= CONFIDENCE_FRESHNESS_GRACE_DAYS:
+        value = 1.0
+    else:
+        span = max(1, CONFIDENCE_FRESHNESS_DECAY_DAYS)
+        value = 1.0 - (stale_days - CONFIDENCE_FRESHNESS_GRACE_DAYS) / span
+        value = _clip01(value)
+    return value, f"newest bar {stale_days} calendar day(s) older than as_of"
+
+
+def _volatility_regime_factor(snapshot: dict) -> tuple[float, str]:
+    """Map daily-return standard deviation onto calm-to-chaotic credit."""
+    volatility = snapshot.get("volatility")
+    if volatility is None:
+        return 0.8, "daily volatility unavailable; mildly reduced credit"
+    vol = abs(float(volatility))
+    span = CONFIDENCE_VOL_CHAOTIC_DAILY_STD - CONFIDENCE_VOL_CALM_DAILY_STD
+    value = (CONFIDENCE_VOL_CHAOTIC_DAILY_STD - vol) / span
+    return _clip01(value), f"daily return std {vol:.4f}"
+
+
+def _source_reliability_factor(snapshot: dict, fundamental_snapshot: dict | None) -> tuple[float, str]:
+    """Blend market-feed reliability with the fundamental provider posture."""
+    market_confidence = _clip01(float(snapshot.get("source_confidence", 0.8)))
+    fundamental_confidence = _clip01(float((fundamental_snapshot or {}).get("source_confidence", 0.0)))
+    fundamental_status = str((fundamental_snapshot or {}).get("source_status", "unknown"))
+    blend = 0.6 * market_confidence + 0.4 * fundamental_confidence
+    note = f"market feed {market_confidence:.2f}; fundamentals {fundamental_status} ({fundamental_confidence:.2f})"
+    return blend, note
+
+
+def _compute_confidence(
+    snapshot: dict,
+    fundamental_snapshot: dict | None,
+    risk_flags: list[str],
+    governance_risk_gate_passed: bool,
+) -> tuple[float, dict]:
+    """Evidence-based, deterministic confidence estimate for the blended score.
+
+    Confidence measures how reliable the estimate is, not how bullish it is.
+    Every factor is derived from inputs already persisted with the decision,
+    so any stored confidence can be replayed from its components.
+    """
+    factors = []
+
+    quality_value = _clip01(float(snapshot.get("data_quality", {}).get("score", 0.0)) / 100.0)
+    factors.append(_factor_entry("data_quality", quality_value, CONFIDENCE_WEIGHT_DATA_QUALITY, "point-in-time validation score of eligible bars"))
+
+    reliability_value, reliability_note = _source_reliability_factor(snapshot, fundamental_snapshot)
+    factors.append(_factor_entry("source_reliability", reliability_value, CONFIDENCE_WEIGHT_SOURCE_RELIABILITY, reliability_note))
+
+    agreement_value = _compute_signal_agreement(snapshot)
+    factors.append(_factor_entry("signal_agreement", agreement_value, CONFIDENCE_WEIGHT_SIGNAL_AGREEMENT, "directional agreement of momentum and trend factors"))
+
+    freshness_value, freshness_note = _freshness_factor(snapshot)
+    factors.append(_factor_entry("freshness", freshness_value, CONFIDENCE_WEIGHT_FRESHNESS, freshness_note))
+
+    bars_available = snapshot.get("data_quality", {}).get("bars_available")
+    if bars_available is None:
+        bars_available = snapshot.get("bars_available")
+    if bars_available is None:
+        coverage_value, coverage_note = 0.75, "bar count unknown; reduced coverage credit"
+    else:
+        bars_available = int(bars_available)
+        coverage_value = _clip01(bars_available / max(1, CONFIDENCE_FULL_COVERAGE_BARS))
+        coverage_note = f"{bars_available} valid bars available"
+    factors.append(_factor_entry("history_coverage", coverage_value, CONFIDENCE_WEIGHT_HISTORY_COVERAGE, coverage_note))
+
+    volatility_value, volatility_note = _volatility_regime_factor(snapshot)
+    factors.append(_factor_entry("volatility_regime", volatility_value, CONFIDENCE_WEIGHT_VOLATILITY_REGIME, volatility_note))
+
+    penalties: list[dict[str, float | str]] = []
+    for flag in dict.fromkeys(risk_flags):  # preserve order, ignore duplicates
+        magnitude = RISK_FLAG_CONFIDENCE_PENALTIES.get(flag)
+        if magnitude:
+            penalties.append({"name": flag, "magnitude": magnitude})
+
+    fundamental_status = str((fundamental_snapshot or {}).get("source_status", "unknown"))
+    fundamental_confidence = _clip01(float((fundamental_snapshot or {}).get("source_confidence", 0.0)))
+    fundamental_weak = fundamental_confidence < 0.7
+    if fundamental_weak:
+        penalties.append({"name": "Fundamental source weak or invalid", "magnitude": FUNDAMENTAL_SOURCE_PENALTY})
+
+    if not governance_risk_gate_passed:
+        penalties.append({"name": "Governance risk gate failed", "magnitude": GOVERNANCE_RISK_GATE_PENALTY})
+
+    raw_confidence = sum(factor["contribution"] for factor in factors)
+    total_penalty = round(sum(float(penalty["magnitude"]) for penalty in penalties), 4)
+    effective = _clip01(raw_confidence - total_penalty)
+    confidence = round(max(CONFIDENCE_FLOOR, min(CONFIDENCE_CAP, effective)), 4)
+
+    breakdown = {
+        "calculation_version": CONFIDENCE_VERSION,
+        "value": confidence,
+        "raw_weighted_sum": round(raw_confidence, 4),
+        "total_penalty": total_penalty,
+        "floor": CONFIDENCE_FLOOR,
+        "cap": CONFIDENCE_CAP,
+        "fundamental_weak": fundamental_weak,
+        "fundamental_source_status": fundamental_status,
+        "risk_gate_passed": bool(governance_risk_gate_passed),
+        "factors": factors,
+        "penalties": penalties,
+    }
+    return confidence, breakdown
+
+
 def _build_replay_metadata(ticker: str, as_of: str, snapshot: dict, fundamental_snapshot: dict, news_snapshot: dict, score: float, confidence: float) -> dict:
     payload = {
         "ticker": ticker.upper(),
@@ -562,9 +752,13 @@ def build_score(ticker: str, as_of: str, timestamp: str | None = None) -> ScoreR
     if float(snapshot.get("rsi", 50.0)) < 30.0 or float(snapshot.get("rsi", 50.0)) > 70.0:
         risk_flags.append("RSI extreme")
 
-    confidence = min(0.95, 0.5 + (capped_score / MAX_SCORE) * 0.45)
-    if risk_flags:
-        confidence = max(0.35, confidence - 0.2)
+    governance = _build_governance(snapshot, capped_score, fundamental_snapshot)
+    confidence, confidence_breakdown = _compute_confidence(
+        snapshot,
+        fundamental_snapshot,
+        risk_flags,
+        governance_risk_gate_passed=bool(governance["risk_gate_passed"]),
+    )
 
     news_status_note = "verified news sentiment" if news_snapshot.get("status") == "OK" else "no news sentiment (no verified provider connected)"
     explanation = (
@@ -602,15 +796,15 @@ def build_score(ticker: str, as_of: str, timestamp: str | None = None) -> ScoreR
     source_reliability = _build_source_reliability()
     technical_features = _build_technical_features(snapshot)
     feature_metadata = _build_feature_metadata(snapshot, news_snapshot)
-    governance = _build_governance(snapshot, capped_score, fundamental_snapshot)
     evidence_ledger = _build_evidence_ledger(snapshot, governance)
     fundamental_features = _build_fundamental_features(snapshot, fundamental_snapshot)
     fundamental_score = _build_fundamental_score(snapshot, fundamental_snapshot)
 
-    if not governance["risk_gate_passed"] or fundamental_snapshot.get("source_confidence", 0.0) < 0.7:
+    if not governance["risk_gate_passed"] or confidence_breakdown["fundamental_weak"]:
         action = "ANALYSIS_ONLY"
-        risk_flags.append("Fundamental source weak or invalid")
-        confidence = max(0.25, confidence - 0.2)
+        reason = "Fundamental source weak or invalid"
+        if reason not in risk_flags:
+            risk_flags.append(reason)
 
     source_quality = {
         "market_confidence": round(float(snapshot.get("source_confidence", 0.0)), 4),
@@ -629,6 +823,7 @@ def build_score(ticker: str, as_of: str, timestamp: str | None = None) -> ScoreR
         current_time_score=round(current_time_score, 2),
         long_term_score=round(long_term_score, 2),
         confidence=round(confidence, 2),
+        confidence_breakdown=confidence_breakdown,
         explanation=explanation,
         risk_flags=risk_flags,
         action=action,
