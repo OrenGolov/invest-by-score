@@ -140,6 +140,8 @@ class NoTradeDecision:
     veto_reasons: list[str] = field(default_factory=list)
     replay_hash: str = ""
     snapshot_hash: str = ""
+    current_time_score: float = 0.0
+    long_term_score: float = 0.0
     evidence: list[dict[str, str]] = field(default_factory=list)
     agent_outputs: list[dict[str, Any]] = field(default_factory=list)
 
@@ -179,6 +181,7 @@ class ScoreResult:
     source_quality: dict[str, object] = field(default_factory=dict)
     replay_metadata: dict[str, object] = field(default_factory=dict)
     news_snapshot: dict[str, object] = field(default_factory=dict)
+    confidence_breakdown: dict[str, object] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)

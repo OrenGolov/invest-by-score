@@ -71,3 +71,36 @@ metrics, update source reliability, and generate a learning report. Retraining
 creates a candidate version. Promotion requires out-of-sample comparison,
 drift checks, reproducibility, and a release gate; historical predictions never
 change.
+## Confidence Model
+
+The user-facing confidence value is produced by
+`core.score_engine._compute_confidence` (calculation version
+`evidence-confidence-v2`). It measures how reliable the estimate is, not how
+bullish it is, so it must never be inferred from the score itself. The model is
+a deterministic weighted sum of six evidence factors minus explicit, named
+penalties, clamped to `[CONFIDENCE_FLOOR, CONFIDENCE_CAP]`.
+
+| Factor | Weight | Source |
+| --- | --- | --- |
+| data_quality | 0.25 | `data_quality.score` from the point-in-time market snapshot |
+| source_reliability | 0.20 | market feed confidence blended (0.6/0.4) with the fundamental provider posture |
+| signal_agreement | 0.20 | directional agreement of momentum horizons and MA structure |
+| freshness | 0.15 | calendar staleness of the newest eligible bar versus `as_of` |
+| history_coverage | 0.10 | valid bars available versus full long-window coverage |
+| volatility_regime | 0.10 | daily-return standard deviation mapped calm-to-chaotic |
+
+Penalties (`core/config.py`) replace the previous flat −0.20 per category and
+apply once per condition regardless of how many triggers repeat it:
+Weak momentum −0.10, Low volume −0.08, Downtrend −0.12, RSI extreme −0.06,
+weak fundamental source −0.10, failed governance risk gate −0.05.
+
+Guarantees:
+
+- Every component is persisted on the score result under
+  `confidence_breakdown`, so any stored decision can be replayed or audited
+  from its own inputs.
+- Governance gates and vetoes are unchanged and remain fail-closed; a weak
+  fundamental source still forces `ANALYSIS_ONLY` and the orchestrator still
+  vets on its own thresholds.
+- Missing data degrades factors instead of inventing values, consistent with
+  the platform rule that failures attach visibly to the snapshot.

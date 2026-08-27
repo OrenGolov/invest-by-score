@@ -329,6 +329,27 @@
       `).join('');
     }
 
+    function renderConfidenceNote(breakdown) {
+      if (!breakdown || !Array.isArray(breakdown.factors) || !breakdown.factors.length) {
+        return { text: 'Model confidence', full: '' };
+      }
+      const sortedFactors = [...breakdown.factors].sort((a, b) => Number(a.value ?? 0) - Number(b.value ?? 0));
+      const weakest = sortedFactors[0];
+      const penalties = Array.isArray(breakdown.penalties) ? breakdown.penalties : [];
+      const factorSummary = `${weakest.name} ${Math.round(Number(weakest.value ?? 0) * 100)}%`;
+      const penaltySummary = penalties.length
+        ? `, ${penalties.length} penalt${penalties.length === 1 ? 'y' : 'ies'}`
+        : '';
+      const detail = [
+        ...breakdown.factors.map(f => `${f.name}: ${Math.round(Number(f.value ?? 0) * 100)}% (weight ${f.weight})`),
+        ...penalties.map(p => `penalty: ${p.name} −${p.magnitude}`),
+      ];
+      return {
+        text: `evidence-based · weakest: ${factorSummary}${penaltySummary}`,
+        full: detail.join(' | '),
+      };
+    }
+
     function render(data) {
       const decision = data?.data || data;
       const score = Number(decision.score ?? 0);
@@ -340,6 +361,7 @@
       const currentClass = currentScore >= 7 ? 'score-good' : currentScore >= 4 ? 'score-warn' : 'score-bad';
       const longTermClass = longTermScore >= 7 ? 'score-good' : longTermScore >= 4 ? 'score-warn' : 'score-bad';
       const vetoReasons = Array.isArray(decision.veto_reasons) ? decision.veto_reasons : [];
+      const confNote = renderConfidenceNote(decision.confidence_breakdown);
 
       const summary = `
         <div class="panel full-width">
@@ -375,7 +397,7 @@
           <div class="card">
             <div class="label">Confidence</div>
             <div class="value">${confidence.toFixed(0)}%</div>
-            <div class="sub">Model confidence</div>
+            <div class="sub"${confNote.full ? ` title="${escapeHtml(confNote.full)}"` : ''}>${confNote.text}</div>
           </div>
         </div>
 

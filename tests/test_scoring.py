@@ -9,7 +9,7 @@ from agents.market_data_agent import fetch_market_snapshot
 from core.agent_contracts import AgentContract, OrchestrationDecision
 from core.audit_store import get_audit_events, get_decision_by_replay_hash, get_decision_by_ticker_and_as_of, persist_decision_audit
 from core.orchestrator import orchestrate_score
-from core.score_engine import build_score
+from core.score_engine import build_score, _compute_confidence
 from fetch_data import fetch_fundamental_snapshot, get_provider_health_matrix, resolve_fundamental_provider
 
 
@@ -219,6 +219,129 @@ class ScoringEngineTests(unittest.TestCase):
         matches = get_decision_by_ticker_and_as_of("aapl", "2024-01-03 00:00:00")
         self.assertTrue(matches)
         self.assertEqual(matches[0]["ticker"], "AAPL")
+
+
+class ConfidenceModelTests(unittest.TestCase):
+    """Regressions for the evidence-based confidence model (confidence-v2).
+
+    These tests are hermetic: _compute_confidence operates on synthetic
+    snapshots so factor sensitivity is proven without any network access.
+    """
+
+    @staticmethod
+    def _snapshot(**overrides):
+        base = {
+            "as_of": "2026-08-27 00:00:00",
+            "last_valid_bar": "2026-08-26 00:00:00",
+            "source_confidence": 0.8,
+            "data_quality": {"score": 85.0, "bars_available": 250},
+            "volatility": 0.02,
+            "change_5d": 0.01,
+            "change_20d": 0.03,
+            "trend_vs_20d_mean": 0.004,
+            "price_vs_ma_50": 0.01,
+            "price_vs_ma_200": 0.05,
+        }
+        base.update(overrides)
+        return base
+
+    def _confidence(self, snapshot=None, fundamental=None, flags=()):
+        confidence, breakdown = _compute_confidence(
+            snapshot or self._snapshot(),
+            fundamental if fundamental is not None else {
+                "source_status": "live_provider", "source_confidence": 0.9
+            },
+            list(flags),
+            governance_risk_gate_passed=True,
+        )
+        return confidence, breakdown
+
+    def test_breakdown_shape_and_bounds(self):
+        confidence, breakdown = self._confidence()
+        self.assertEqual(breakdown["calculation_version"], "evidence-confidence-v2")
+        self.assertEqual(round(sum(f["weight"] for f in breakdown["factors"]), 4), 1.0)
+        self.assertEqual(len(breakdown["factors"]), 6)
+        self.assertLessEqual(confidence, breakdown["cap"])
+        self.assertGreaterEqual(confidence, breakdown["floor"])
+        factors = {f["name"] for f in breakdown["factors"]}
+        self.assertEqual(
+            factors,
+            {"data_quality", "source_reliability", "signal_agreement", "freshness", "history_coverage", "volatility_regime"},
+        )
+
+    def test_data_quality_factor_is_sensitivity_tested(self):
+        high, _ = self._confidence(self._snapshot(data_quality={"score": 90.0, "bars_available": 250}))
+        low, _ = self._confidence(self._snapshot(data_quality={"score": 40.0, "bars_available": 250}))
+        self.assertGreater(high, low)
+
+    def test_stale_bars_reduce_confidence(self):
+        fresh, _ = self._confidence()
+        stale, stale_breakdown = self._confidence(self._snapshot(last_valid_bar="2026-07-10 00:00:00"))
+        self.assertGreater(fresh, stale)
+        freshness = next(f for f in stale_breakdown["factors"] if f["name"] == "freshness")
+        self.assertEqual(freshness["value"], 0.0)
+
+    def test_chaotic_volatility_reduces_confidence(self):
+        calm, _ = self._confidence(self._snapshot(volatility=0.015))
+        chaotic, _ = self._confidence(self._snapshot(volatility=0.09))
+        self.assertGreater(calm, chaotic)
+
+
+    def test_conflicting_signals_reduce_agreement_below_perfect(self):
+        aligned, aligned_breakdown = self._confidence()
+        agreement_aligned = next(f for f in aligned_breakdown["factors"] if f["name"] == "signal_agreement")
+        self.assertAlmostEqual(agreement_aligned["value"], 1.0)
+        mixed, mixed_breakdown = self._confidence(self._snapshot(price_vs_ma_200=-0.05))
+        agreement_mixed = next(f for f in mixed_breakdown["factors"] if f["name"] == "signal_agreement")
+        self.assertLess(agreement_mixed["value"], agreement_aligned["value"])
+        self.assertLess(mixed, aligned)
+
+    def test_penalty_applied_once_per_condition(self):
+        _, duplicate_flags = self._confidence(flags=["Weak momentum", "Weak momentum"])
+        self.assertEqual(duplicate_flags["total_penalty"], 0.10)
+        _, all_flags = self._confidence(flags=["Weak momentum", "Low volume"])
+        self.assertAlmostEqual(all_flags["total_penalty"], 0.18)
+
+    def test_fundamental_weakness_penalized_once_not_twice(self):
+        _, missing_fundamentals = self._confidence(fundamental={"source_status": "provider_key_required", "source_confidence": 0.0})
+        self.assertTrue(missing_fundamentals["fundamental_weak"])
+        weak_entries = [p for p in missing_fundamentals["penalties"] if p["name"] == "Fundamental source weak or invalid"]
+        self.assertEqual(len(weak_entries), 1)
+        self.assertEqual(weak_entries[0]["magnitude"], 0.10)
+
+    def test_live_fundamentals_avoid_penalty_and_raise_confidence(self):
+        strong, strong_breakdown = self._confidence(fundamental={"source_status": "live_provider", "source_confidence": 0.9})
+        weak, _ = self._confidence(fundamental={"source_status": "fallback_estimate", "source_confidence": 0.5})
+        self.assertFalse(strong_breakdown["fundamental_weak"])
+        self.assertEqual(strong_breakdown["total_penalty"], 0.0)
+        self.assertGreater(strong, weak)
+
+    def test_governance_failure_adds_explicit_penalty(self):
+        confidence_ok, _ = self._confidence()
+        confidence_failed, failed_breakdown = _compute_confidence(
+            self._snapshot(),
+            {"source_status": "live_provider", "source_confidence": 0.9},
+            [],
+            governance_risk_gate_passed=False,
+        )
+        gate_penalties = [p for p in failed_breakdown["penalties"] if p["name"] == "Governance risk gate failed"]
+        self.assertEqual(len(gate_penalties), 1)
+        self.assertEqual(gate_penalties[0]["magnitude"], 0.05)
+        self.assertFalse(failed_breakdown["risk_gate_passed"])
+        self.assertLess(confidence_failed, confidence_ok)
+
+    def test_identical_inputs_are_deterministic(self):
+        first = self._confidence()
+        second = self._confidence()
+        self.assertEqual(first[0], second[0])
+        self.assertEqual(first[1], second[1])
+
+    def test_build_score_exposes_breakdown_in_payload(self):
+        result = build_score("MSFT", "2024-01-02")
+        payload = result.to_dict()
+        self.assertIn("confidence_breakdown", payload)
+        self.assertEqual(payload["confidence_breakdown"]["calculation_version"], "evidence-confidence-v2")
+        self.assertLessEqual(abs(payload["confidence_breakdown"]["value"] - payload["confidence"]), 0.005)
 
 
 if __name__ == "__main__":
