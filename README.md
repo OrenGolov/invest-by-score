@@ -48,8 +48,14 @@ python fetch_data.py
 The current collector is a prototype input adapter, not a production-grade
 real-time or execution service. Provider licensing, rate limits, timestamps,
 corporate actions, and source outages must be handled before deployment.
-
+## github
+git add .
+git commit -m ""
+git push origin spring-vs
 ## Open on Another PC
+web_app.py
+PS C:\Users\Oren.Golovchik\Desktop\investment-project> python .\web_app.py
+
 
 Clone the repository and recreate the virtual environment locally. The local
 `venv/`, `__pycache__/`, and generated `data/` cache are intentionally not
