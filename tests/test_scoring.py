@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import pandas as pd
 
-from agents.market_data_agent import fetch_market_snapshot
+from agents.market_data_agent import _pct_change, fetch_market_snapshot
 from core.agent_contracts import AgentContract, OrchestrationDecision
 from core.audit_store import get_audit_events, get_decision_by_replay_hash, get_decision_by_ticker_and_as_of, persist_decision_audit
 from core.orchestrator import orchestrate_score
@@ -342,6 +342,51 @@ class ConfidenceModelTests(unittest.TestCase):
         self.assertIn("confidence_breakdown", payload)
         self.assertEqual(payload["confidence_breakdown"]["calculation_version"], "evidence-confidence-v2")
         self.assertLessEqual(abs(payload["confidence_breakdown"]["value"] - payload["confidence"]), 0.005)
+
+
+class MarketDataIntegrityTests(unittest.TestCase):
+    """Regressions for market-data feature integrity defects."""
+
+    def test_pct_change_compares_previous_bar_not_itself(self):
+        series = pd.Series([10.0, 11.0, 12.0])
+        self.assertAlmostEqual(_pct_change(series, 1), 12.0 / 11.0 - 1.0)
+        ramp = pd.Series([float(value) for value in range(1, 22)])
+        self.assertAlmostEqual(_pct_change(ramp, 5), 21.0 / 16.0 - 1.0)
+
+    def test_pct_change_short_series_is_neutral(self):
+        self.assertEqual(_pct_change(pd.Series([10.0]), 1), 0.0)
+        self.assertEqual(_pct_change(pd.Series(dtype=float), 1), 0.0)
+        # A zero anchor bar must yield a neutral contribution, not a blow-up.
+        self.assertEqual(_pct_change(pd.Series([0.0, 9.0]), 1), 0.0)
+
+    @staticmethod
+    def _history_frame(days):
+        index = pd.DatetimeIndex([pd.Timestamp(day) for day in days])
+        values = [10.0 + position * 0.1 for position in range(len(index))]
+        return pd.DataFrame(
+            {"Open": values, "High": values, "Low": values, "Close": values, "Volume": [250_000.0] * len(index)},
+            index=index,
+        )
+
+    def test_weekends_and_holidays_are_not_flagged_as_gaps(self):
+        # Consecutive calendar sessions never leave more than a 4-day hole,
+        # so ordinary weekends/holiday clusters must not degrade quality.
+        days = pd.date_range("2026-07-13", periods=35, freq="D").tolist()
+        frame = MarketDataIntegrityTests._history_frame(days)
+        with patch("agents.market_data_agent.fetch_price_history", return_value=frame):
+            snapshot = fetch_market_snapshot("TESTX", "2026-08-17")
+        self.assertEqual(snapshot["gaps_detected"], 0)
+        self.assertNotIn("market_gap_detected", snapshot["data_quality"]["flags"])
+
+    def test_multi_day_coverage_stall_is_flagged(self):
+        days = pd.date_range("2026-06-15", periods=72, freq="D").tolist()
+        hole_start, hole_end = pd.Timestamp("2026-07-20"), pd.Timestamp("2026-08-10")
+        surviving = [day for day in days if not (hole_start <= day <= hole_end)]
+        frame = MarketDataIntegrityTests._history_frame(surviving)
+        with patch("agents.market_data_agent.fetch_price_history", return_value=frame):
+            snapshot = fetch_market_snapshot("TESTX", "2026-08-26")
+        self.assertEqual(snapshot["gaps_detected"], 1)
+        self.assertIn("market_gap_detected", snapshot["data_quality"]["flags"])
 
 
 if __name__ == "__main__":
