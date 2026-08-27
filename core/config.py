@@ -8,6 +8,57 @@ CURRENT_SCORE_VERSION = "current-score-v2"
 LONG_TERM_SCORE_VERSION = "long-term-score-v2"
 NEWS_CONTRACT_VERSION = "news-contract-v1"
 
+# --- Ensemble wiring (W1) ------------------------------------------------------
+# The published score is the weighted product of agent contributions, not an
+# independent hand-built blend. Both weight sets share an identical key set,
+# must each sum to 1.0 (validated at import time), and intentionally differ
+# per horizon: business quality matters more to the structural view than to
+# the tactical one. Agents without a live implementation hold an explicit 0.0
+# weight — presence in the dict is the contract; absence fails at import.
+ENSEMBLE_VERSION = "ensemble-v1"
+
+ENSEMBLE_WEIGHTS_CURRENT = {
+    "market_data": 0.0,          # informational only: feeds confidence/gates
+    "technical_analysis": 0.85,  # current-time technical view
+    "fundamental_analysis": 0.15,
+    "news_intelligence": 0.0,    # UNAVAILABLE stub; dedicated weight lands with Sprint N1
+    "sentiment": 0.0,            # not implemented
+    "macroeconomic": 0.0,        # not implemented
+    "market_regime": 0.0,        # not implemented; regime gates via risk policy
+}
+
+ENSEMBLE_WEIGHTS_LONG = {
+    "market_data": 0.0,
+    "technical_analysis": 0.75,  # long-term structural technical view
+    "fundamental_analysis": 0.25,
+    "news_intelligence": 0.0,
+    "sentiment": 0.0,
+    "macroeconomic": 0.0,
+    "market_regime": 0.0,
+}
+
+
+def _validate_ensemble_weights(name: str, weights: dict[str, float]) -> None:
+    """Import-time guard: complete key set, non-negative, summing to 1.0."""
+    if not weights:
+        raise ValueError(f"{name} must not be empty")
+    if set(weights) != set(ENSEMBLE_WEIGHTS_CURRENT):
+        raise ValueError(
+            f"{name} keys must match ENSEMBLE_WEIGHTS_CURRENT exactly: "
+            f"missing={sorted(set(ENSEMBLE_WEIGHTS_CURRENT) - set(weights))} "
+            f"extra={sorted(set(weights) - set(ENSEMBLE_WEIGHTS_CURRENT))}"
+        )
+    negative = {agent: weight for agent, weight in weights.items() if float(weight) < 0.0}
+    if negative:
+        raise ValueError(f"{name} weights must be non-negative, got {negative}")
+    total = float(sum(weights.values()))
+    if abs(total - 1.0) > 1e-9:
+        raise ValueError(f"{name} must sum to 1.0 (tolerance 1e-9), got {total!r}")
+
+
+_validate_ensemble_weights("ENSEMBLE_WEIGHTS_CURRENT", ENSEMBLE_WEIGHTS_CURRENT)
+_validate_ensemble_weights("ENSEMBLE_WEIGHTS_LONG", ENSEMBLE_WEIGHTS_LONG)
+
 # Evidence-based confidence model (see core.score_engine._compute_confidence).
 # Each factor produces a value in [0, 1]; the confidence is the weighted sum
 # minus explicit risk penalties, clamped to [CONFIDENCE_FLOOR, CONFIDENCE_CAP].

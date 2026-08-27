@@ -182,6 +182,7 @@ class ScoreResult:
     replay_metadata: dict[str, object] = field(default_factory=dict)
     news_snapshot: dict[str, object] = field(default_factory=dict)
     confidence_breakdown: dict[str, object] = field(default_factory=dict)
+    ensemble_breakdown: dict[str, object] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)

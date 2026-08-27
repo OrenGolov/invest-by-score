@@ -24,6 +24,9 @@ from core.config import (
     CONFIDENCE_WEIGHT_SOURCE_RELIABILITY,
     CONFIDENCE_WEIGHT_VOLATILITY_REGIME,
     CURRENT_SCORE_VERSION,
+    ENSEMBLE_VERSION,
+    ENSEMBLE_WEIGHTS_CURRENT,
+    ENSEMBLE_WEIGHTS_LONG,
     DEFAULT_ACTION,
     FUNDAMENTAL_SOURCE_PENALTY,
     GOVERNANCE_RISK_GATE_PENALTY,
@@ -321,6 +324,7 @@ def _build_scoring_breakdown(snapshot: dict, score: float, current_time_score: f
             "The 60-day return and the price-versus-MA150 distance anchor the long-term outlook; volatility discounts it.",
             "Collinear duplicates (price-vs-MA100 at full strength, the MA150/MA200 cross) no longer double-count the same drawdown fact.",
             "News/sentiment contributes zero weight while no verified provider is connected.",
+            "Business quality enters the headline through horizon-specific ensemble weights (see ensemble_breakdown), not an ad-hoc term.",
         ],
         "historical_comparison": "Near-term momentum (1-20d, MA50) and structural trend (60d, MA150) draw from disjoint feature sets; overlapping legacy terms were retired so each fact is counted once.",
     }
@@ -701,6 +705,82 @@ def _compute_confidence(
     return confidence, breakdown
 
 
+def _ensemble_blend(
+    contributions: dict[str, dict],
+    weights_current: dict[str, float],
+    weights_long: dict[str, float],
+) -> tuple[float, float, dict]:
+    """Blend per-agent, per-horizon contributions into the published scores.
+
+    Eligibility requires status OK and a non-None score for that horizon;
+    an agent score of None is excluded from the renormalization denominator,
+    never coerced to zero. Ineligible agents' raw weights are redistributed
+    proportionally across the eligible ones. Zero-weight agents (e.g. the
+    informational market_data entry) appear in the breakdown for
+    transparency but mathematically cannot move the score. If no agent is
+    eligible for a horizon, that horizon returns 0.0 and
+    `no_eligible_agents` is flagged; the caller must hold the decision in
+    ANALYSIS_ONLY. Pure and deterministic: same inputs, same outputs.
+    """
+    eligible_current = [
+        agent for agent, info in contributions.items()
+        if info.get("status") == "OK" and info.get("score_current") is not None
+    ]
+    eligible_long = [
+        agent for agent, info in contributions.items()
+        if info.get("status") == "OK" and info.get("score_long") is not None
+    ]
+    denominator_current = sum(float(weights_current.get(agent, 0.0)) for agent in eligible_current)
+    denominator_long = sum(float(weights_long.get(agent, 0.0)) for agent in eligible_long)
+    no_eligible = denominator_current <= 0.0 or denominator_long <= 0.0
+
+    entries: dict[str, dict] = {}
+    current_total = 0.0
+    long_total = 0.0
+    for agent in sorted(set(contributions) | set(weights_current)):
+        info = contributions.get(agent, {})
+        raw_current = float(weights_current.get(agent, 0.0))
+        raw_long = float(weights_long.get(agent, 0.0))
+        status = str(info.get("status", "UNAVAILABLE"))
+        score_current = info.get("score_current")
+        score_long = info.get("score_long")
+        is_eligible_current = agent in eligible_current and not no_eligible
+        is_eligible_long = agent in eligible_long and not no_eligible
+        effective_current = (raw_current / denominator_current) if is_eligible_current else 0.0
+        effective_long = (raw_long / denominator_long) if is_eligible_long else 0.0
+        contribution_current = round(effective_current * float(score_current), 6) if is_eligible_current else 0.0
+        contribution_long = round(effective_long * float(score_long), 6) if is_eligible_long else 0.0
+        current_total += contribution_current
+        long_total += contribution_long
+        entries[agent] = {
+            "raw_weight_current": round(raw_current, 6),
+            "raw_weight_long": round(raw_long, 6),
+            "effective_weight_current": round(effective_current, 6),
+            "effective_weight_long": round(effective_long, 6),
+            "score_current": round(float(score_current), 4) if score_current is not None else None,
+            "score_long": round(float(score_long), 4) if score_long is not None else None,
+            "status": status,
+            "eligible_current": is_eligible_current,
+            "eligible_long": is_eligible_long,
+            "contribution_current": contribution_current,
+            "contribution_long": contribution_long,
+            "note": str(info.get("note", "")),
+        }
+
+    current_score = 0.0 if no_eligible else round(current_total, 2)
+    long_score = 0.0 if no_eligible else round(long_total, 2)
+    breakdown = {
+        "calculation_version": ENSEMBLE_VERSION,
+        "weights_current": dict(sorted(weights_current.items())),
+        "weights_long": dict(sorted(weights_long.items())),
+        "current_time_score": current_score,
+        "long_term_score": long_score,
+        "no_eligible_agents": no_eligible,
+        "agents": entries,
+    }
+    return current_score, long_score, breakdown
+
+
 def _build_replay_metadata(ticker: str, as_of: str, snapshot: dict, fundamental_snapshot: dict, news_snapshot: dict, score: float, confidence: float) -> dict:
     payload = {
         "ticker": ticker.upper(),
@@ -731,13 +811,54 @@ def build_score(ticker: str, as_of: str, timestamp: str | None = None) -> ScoreR
     snapshot = fetch_market_snapshot(ticker, as_of, timestamp)
     fundamental_snapshot = fetch_fundamental_snapshot(ticker, as_of)
     news_snapshot = fetch_news_snapshot(ticker, snapshot["as_of"])
-    current_time_score = _score_current_time(snapshot, news_snapshot)
-    long_term_score = _score_long_term(snapshot)
+    technical_current_view = _score_current_time(snapshot, news_snapshot)
+    technical_long_view = _score_long_term(snapshot)
+    fundamental_score = _build_fundamental_score(snapshot, fundamental_snapshot)
+
+    fundamental_pit_valid = bool(fundamental_snapshot.get("point_in_time_valid", True))
+    fundamental_live = str(fundamental_snapshot.get("source_status", "unknown")) == "live_provider"
+    market_quality = float(snapshot.get("data_quality", {}).get("score", 0.0))
+    news_ok = news_snapshot.get("status") == "OK" and news_snapshot.get("sentiment_score") is not None
+    contributions = {
+        "market_data": {
+            "score_current": round(market_quality / 10.0, 4),
+            "score_long": round(market_quality / 10.0, 4),
+            "status": "OK" if market_quality >= 60.0 else "INCOMPLETE",
+            "note": "informational only: quality feeds confidence and governance gates, zero directional weight",
+        },
+        "technical_analysis": {
+            "score_current": technical_current_view,
+            "score_long": technical_long_view,
+            "status": "OK",
+            "note": "canonical technical views, one per horizon",
+        },
+        "fundamental_analysis": {
+            "score_current": fundamental_score if fundamental_pit_valid else None,
+            "score_long": fundamental_score if fundamental_pit_valid else None,
+            "status": "OK" if fundamental_pit_valid else "UNAVAILABLE",
+            "note": "live provider" if fundamental_live else "fallback estimates; governance applies the fundamental-weak penalty",
+        },
+        "news_intelligence": {
+            "score_current": None,
+            "score_long": None,
+            "status": "OK" if news_ok else "UNAVAILABLE",
+            "note": "sentiment is currently embedded in the technical current view; a dedicated weight activates with Sprint N1",
+        },
+        "sentiment": {"score_current": None, "score_long": None, "status": "UNAVAILABLE", "note": "not implemented"},
+        "macroeconomic": {"score_current": None, "score_long": None, "status": "UNAVAILABLE", "note": "not implemented"},
+        "market_regime": {"score_current": None, "score_long": None, "status": "UNAVAILABLE", "note": "not implemented; regime gates via risk policy"},
+    }
+    current_time_score, long_term_score, ensemble_breakdown = _ensemble_blend(
+        contributions, ENSEMBLE_WEIGHTS_CURRENT, ENSEMBLE_WEIGHTS_LONG
+    )
     blended_score = round((current_time_score + long_term_score) / 2.0, 2)
     capped_score = max(0.0, min(MAX_SCORE, blended_score))
 
     risk_flags = []
     action = DEFAULT_ACTION
+    if ensemble_breakdown["no_eligible_agents"]:
+        risk_flags.append("no_eligible_agents")
+        action = "ANALYSIS_ONLY"
     if capped_score < 3.0:
         risk_flags.append("Weak momentum")
         action = "ANALYSIS_ONLY"
@@ -760,8 +881,8 @@ def build_score(ticker: str, as_of: str, timestamp: str | None = None) -> ScoreR
 
     news_status_note = "verified news sentiment" if news_snapshot.get("status") == "OK" else "no news sentiment (no verified provider connected)"
     explanation = (
-        f"Dual-factor score combining current-time momentum, RSI, volume, and 50d/100d trend structure ({news_status_note}) "
-        f"with a longer-term view based on the 60-day return, 150d/200d averages, and structural trend. "
+        f"Weighted ensemble ({ENSEMBLE_VERSION}) blending the current-time technical view, the long-term structural "
+        f"view, and business quality per horizon weights ({news_status_note}). "
         f"Current price is {snapshot['close']:.2f}; 20-day momentum is {snapshot.get('change_20d', 0.0):.2%}; RSI is {snapshot.get('rsi', 50.0):.1f}."
     )
 
@@ -796,7 +917,6 @@ def build_score(ticker: str, as_of: str, timestamp: str | None = None) -> ScoreR
     feature_metadata = _build_feature_metadata(snapshot, news_snapshot)
     evidence_ledger = _build_evidence_ledger(snapshot, governance)
     fundamental_features = _build_fundamental_features(snapshot, fundamental_snapshot)
-    fundamental_score = _build_fundamental_score(snapshot, fundamental_snapshot)
 
     if not governance["risk_gate_passed"] or confidence_breakdown["fundamental_weak"]:
         action = "ANALYSIS_ONLY"
@@ -822,6 +942,7 @@ def build_score(ticker: str, as_of: str, timestamp: str | None = None) -> ScoreR
         long_term_score=round(long_term_score, 2),
         confidence=round(confidence, 2),
         confidence_breakdown=confidence_breakdown,
+        ensemble_breakdown=ensemble_breakdown,
         explanation=explanation,
         risk_flags=risk_flags,
         action=action,
