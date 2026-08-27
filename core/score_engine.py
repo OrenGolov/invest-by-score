@@ -208,7 +208,6 @@ def _score_current_time(snapshot: dict, news_snapshot: dict) -> float:
     rsi = float(snapshot.get("rsi", 50.0))
     volume_ratio = float(snapshot.get("volume_ratio_20d", 1.0))
     price_vs_ma_50 = float(snapshot.get("price_vs_ma_50", 0.0))
-    price_vs_ma_100 = float(snapshot.get("price_vs_ma_100", 0.0))
     ma_50 = float(snapshot.get("moving_averages", {}).get("50d", 0.0))
     ma_100 = float(snapshot.get("moving_averages", {}).get("100d", 0.0))
 
@@ -219,14 +218,21 @@ def _score_current_time(snapshot: dict, news_snapshot: dict) -> float:
     score = 4.0
     score += max(-1.7, min(1.7, change_1d * 42.0))
     score += max(-1.4, min(1.4, change_5d * 18.0))
-    score += max(-1.3, min(1.3, change_20d * 12.0))
+    # Momentum gets headroom relative to the static MA-distance terms below
+    # so a genuine recovery can lift this score instead of being pinned to
+    # the floor by older drawdown features.
+    score += max(-2.0, min(2.0, change_20d * 12.0))
     score += max(-1.4, min(1.4, trend_vs_20d_mean * 18.0))
+    # One primary near-term distance measure only. The previous version also
+    # added price-versus-MA100 and the MA50/MA100 cross at full strength;
+    # those re-counted the same drawdown information and triple-punished
+    # anything sitting under its averages. The trend cross remains as a
+    # tiebreaker at half strength.
     score += max(-1.8, min(1.8, price_vs_ma_50 * 30.0))
-    score += max(-1.2, min(1.2, price_vs_ma_100 * 18.0))
+    if ma_50 and ma_100:
+        score += max(-0.55, min(0.55, ((ma_50 - ma_100) / ma_100) * 22.0))
     score += max(-1.2, min(1.2, ((rsi - 50.0) / 35.0)))
     score += max(-1.0, min(1.0, (volume_ratio - 1.0) * 2.8))
-    if ma_50 and ma_100:
-        score += max(-1.1, min(1.1, ((ma_50 - ma_100) / ma_100) * 22.0))
     score += news_contribution
 
     if close <= 0:
@@ -248,17 +254,16 @@ def _score_long_term(snapshot: dict) -> float:
     volatility = float(snapshot.get("volatility", 0.0))
     change_60d = float(snapshot.get("change_60d", 0.0))
     price_vs_ma_150 = float(snapshot.get("price_vs_ma_150", 0.0))
-    price_vs_ma_200 = float(snapshot.get("price_vs_ma_200", 0.0))
-    moving_averages = snapshot.get("moving_averages", {})
-    ma_150 = float(moving_averages.get("150d", 0.0))
-    ma_200 = float(moving_averages.get("200d", 0.0))
 
     score = 4.0
     score += max(-1.5, min(1.5, change_60d * 10.0))
-    score += max(-2.0, min(2.0, price_vs_ma_150 * 26.0))
-    score += max(-2.2, min(2.2, price_vs_ma_200 * 30.0))
-    if ma_200:
-        score += max(-1.8, min(1.8, ((ma_150 - ma_200) / ma_200) * 40.0))
+    # One primary structural distance measure. price_vs_ma_200 and the
+    # MA150/MA200 cross were removed: both are near-linear restatements of
+    # price_vs_ma_150 for this purpose, and summing them independently
+    # triple-counted a single drawdown fact against structurally cheap
+    # names. The disjoint-feature contract still holds: this scorer touches
+    # only long-horizon fields and never reads 1d/5d/20d momentum or RSI.
+    score += max(-2.5, min(2.5, price_vs_ma_150 * 30.0))
     score -= max(0.0, min(1.8, volatility * 22.0))
 
     if close <= 0:
@@ -267,26 +272,40 @@ def _score_long_term(snapshot: dict) -> float:
 
 
 def _build_scoring_breakdown(snapshot: dict, score: float, current_time_score: float, long_term_score: float, news_snapshot: dict) -> dict:
-    momentum = max(-2.0, min(2.0, float(snapshot.get("change_20d", 0.0)) * 30.0))
-    trend = max(-1.5, min(1.5, float(snapshot.get("trend_vs_20d_mean", 0.0)) * 20.0))
+    """Mirror of the live scoring formulas for dashboard explanation.
+
+    Every entry uses the same coefficient and clip as the expression that
+    produced the headline score, so the explanation panel can never
+    contradict it. Collinear terms retired from the scorers are absent here
+    as well, so no fact is displayed (or counted) twice.
+    """
+    news_status = news_snapshot.get("status", "UNAVAILABLE")
+    news_contribution = float(news_snapshot.get("sentiment_score") or 0.0) if news_status == "OK" else 0.0
+
+    rsi = float(snapshot.get("rsi", 50.0))
+    volume_ratio = float(snapshot.get("volume_ratio_20d", 1.0))
     moving_averages = snapshot.get("moving_averages", {})
     ma_50 = float(moving_averages.get("50d", 0.0))
     ma_100 = float(moving_averages.get("100d", 0.0))
-    ma_150 = float(moving_averages.get("150d", 0.0))
-    ma_200 = float(moving_averages.get("200d", 0.0))
-    ma_short_term_alignment = 0.0
-    if ma_50 and ma_100:
-        ma_short_term_alignment = max(-1.5, min(1.5, ((ma_50 - ma_100) / ma_100) * 22.0))
-    structural_trend = 0.0
-    if ma_150 and ma_200:
-        structural_trend = max(-1.8, min(1.8, ((ma_150 - ma_200) / ma_200) * 40.0))
-    rsi_weight = max(-1.5, min(1.5, ((float(snapshot.get("rsi", 50.0)) - 50.0) / 50.0) * 1.5))
-    volume_ratio = float(snapshot.get("volume_ratio_20d", 1.0))
-    volume_weight = max(-1.0, min(1.0, (volume_ratio - 1.0) * 2.0))
-    volatility_weight = min(1.5, float(snapshot.get("volatility", 0.0)) * 30.0) if float(snapshot.get("volatility", 0.0)) > 0 else 0.0
 
-    news_status = news_snapshot.get("status", "UNAVAILABLE")
-    news_contribution = float(news_snapshot.get("sentiment_score") or 0.0) if news_status == "OK" else 0.0
+    current_terms = {
+        "momentum_1d": max(-1.7, min(1.7, float(snapshot.get("change_1d", 0.0)) * 42.0)),
+        "momentum_5d": max(-1.4, min(1.4, float(snapshot.get("change_5d", 0.0)) * 18.0)),
+        "momentum_20d": max(-2.0, min(2.0, float(snapshot.get("change_20d", 0.0)) * 12.0)),
+        "trend_vs_20d_mean": max(-1.4, min(1.4, float(snapshot.get("trend_vs_20d_mean", 0.0)) * 18.0)),
+        "price_vs_50d_ma": max(-1.8, min(1.8, float(snapshot.get("price_vs_ma_50", 0.0)) * 30.0)),
+        "ma_50_100_alignment": (
+            max(-0.55, min(0.55, ((ma_50 - ma_100) / ma_100) * 22.0)) if ma_50 and ma_100 else 0.0
+        ),
+        "rsi_signal": max(-1.2, min(1.2, ((rsi - 50.0) / 35.0))),
+        "volume_confirmation": max(-1.0, min(1.0, (volume_ratio - 1.0) * 2.8)),
+        "news_sentiment": max(-1.0, min(1.0, news_contribution)),
+    }
+    long_terms = {
+        "historical_return_60d": max(-1.5, min(1.5, float(snapshot.get("change_60d", 0.0)) * 10.0)),
+        "price_vs_150d_ma": max(-2.5, min(2.5, float(snapshot.get("price_vs_ma_150", 0.0)) * 30.0)),
+        "volatility_drag": -max(0.0, min(1.8, float(snapshot.get("volatility", 0.0)) * 22.0)),
+    }
 
     return {
         "final_score": round(score, 2),
@@ -294,37 +313,16 @@ def _build_scoring_breakdown(snapshot: dict, score: float, current_time_score: f
         "long_term_score": round(long_term_score, 2),
         "current_score_version": CURRENT_SCORE_VERSION,
         "long_term_score_version": LONG_TERM_SCORE_VERSION,
-        "weighted_contributions": {
-            "price_momentum_20d": round(momentum, 2),
-            "trend_vs_20d_mean": round(trend, 2),
-            "ma_50_100_alignment": round(ma_short_term_alignment, 2),
-            "structural_trend_150_200": round(structural_trend, 2),
-            "rsi_signal": round(rsi_weight, 2),
-            "volume_confirmation": round(volume_weight, 2),
-            "volatility_drag": round(-volatility_weight, 2),
-            "news_sentiment": round(news_contribution, 2),
-        },
-        "current_time_breakdown": {
-            "recent_momentum": round(max(-2.0, min(2.0, float(snapshot.get("change_5d", 0.0)) * 25.0)), 2),
-            "trend_vs_20d_mean": round(max(-1.5, min(1.5, float(snapshot.get("trend_vs_20d_mean", 0.0)) * 18.0)), 2),
-            "ma_50_100_alignment": round(max(-1.5, min(1.5, float(snapshot.get("price_vs_ma_50", 0.0)) * 35.0 + float(snapshot.get("price_vs_ma_100", 0.0)) * 22.0)), 2),
-            "rsi_signal": round(max(-1.5, min(1.5, ((float(snapshot.get("rsi", 50.0)) - 50.0) / 50.0) * 2.0)), 2),
-            "volume_confirmation": round(max(-1.0, min(1.0, (volume_ratio - 1.0) * 2.5)), 2),
-            "news_sentiment": {"status": news_status, "value": round(news_contribution, 2) if news_status == "OK" else None},
-        },
-        "long_term_breakdown": {
-            "historical_return_60d": round(max(-1.5, min(1.5, float(snapshot.get("change_60d", 0.0)) * 10.0)), 2),
-            "price_vs_150d_ma": round(max(-2.0, min(2.0, float(snapshot.get("price_vs_ma_150", 0.0)) * 26.0)), 2),
-            "price_vs_200d_ma": round(max(-2.2, min(2.2, float(snapshot.get("price_vs_ma_200", 0.0)) * 30.0)), 2),
-            "structural_trend_150_200": round(structural_trend, 2),
-        },
+        "weighted_contributions": {name: round(value, 2) for name, value in {**current_terms, **long_terms}.items()},
+        "current_time_breakdown": {name: round(value, 2) for name, value in current_terms.items()},
+        "long_term_breakdown": {name: round(value, 2) for name, value in long_terms.items()},
         "score_change_drivers": [
-            "Current-time momentum, RSI, volume, and the 50d/100d moving averages drive the near-term reading.",
-            "The 60-day historical return and the 150d/200d structural trend anchor the long-term outlook.",
+            "1d/5d/20d momentum, distance versus the 20d mean, price-vs-MA50, an MA50/MA100 cross tiebreaker, RSI, and volume drive the near-term reading.",
+            "The 60-day return and the price-versus-MA150 distance anchor the long-term outlook; volatility discounts it.",
+            "Collinear duplicates (price-vs-MA100 at full strength, the MA150/MA200 cross) no longer double-count the same drawdown fact.",
             "News/sentiment contributes zero weight while no verified provider is connected.",
-            "Volatility pressure discounts the long-term score when market dispersion expands.",
         ],
-        "historical_comparison": "The overall score blends a near-term momentum view (50d/100d) with a structural trend assessment (150d/200d); the two share no input feature.",
+        "historical_comparison": "Near-term momentum (1-20d, MA50) and structural trend (60d, MA150) draw from disjoint feature sets; overlapping legacy terms were retired so each fact is counted once.",
     }
 
 

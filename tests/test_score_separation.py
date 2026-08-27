@@ -129,7 +129,10 @@ class FeatureGroupSeparationTests(unittest.TestCase):
         )
         current = _score_current_time(extreme_long_term_only, NEUTRAL_NEWS)
         long_term = _score_long_term(extreme_long_term_only)
-        self.assertEqual(long_term, MAX_SCORE)
+        # Ceiling after de-duplication: base 4 + 1.5 (60d momentum) + 2.5
+        # (structural distance) - 0 (volatility) = 8.0. The old 10.0 ceiling
+        # was reachable only by triple-counting overlapping MA distances.
+        self.assertEqual(long_term, 8.0)
         self.assertLess(current, MAX_SCORE - 1.0)
         self.assertNotEqual(current, long_term)
 

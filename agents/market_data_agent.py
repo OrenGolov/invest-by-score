@@ -14,12 +14,26 @@ def _coerce_as_of(as_of: str, timestamp: str | None = None) -> pd.Timestamp:
 
 
 def _pct_change(series: pd.Series, periods: int = 1) -> float:
+    """Return the fractional change between the latest bar and N bars earlier.
+
+    N=1 means "versus the previous bar", so the comparison anchor must be
+    one slot beyond the window start: iloc[-(periods + 1)]. Using
+    iloc[-periods] would compare the last bar with itself and silently
+    collapse every change feature toward zero.
+    """
     if len(series) <= periods:
         return 0.0
-    previous = series.iloc[-periods]
+    previous = series.iloc[-1 - periods]
     if pd.isna(previous) or previous == 0:
         return 0.0
     return float((series.iloc[-1] / previous) - 1.0)
+
+
+# Calendar days that must pass without a session before the data is treated
+# as having a coverage hole. Weekends (2 days) and most holiday clusters (3-4)
+# are normal exchange closures; stalls of five or more calendar days indicate
+# an outage, a trading halt, or missing provider coverage instead.
+MARKET_GAP_STALL_CALENDAR_DAYS = 4
 
 
 def _feature_contract(name: str, value, as_of: str, source_id: str, published_time: str, lookback_period: str) -> dict:
@@ -104,7 +118,12 @@ def fetch_market_snapshot(ticker: str, as_of: str, timestamp: str | None = None)
     trend_vs_20d_mean = float(latest_close / close_20d_mean - 1.0) if close_20d_mean else 0.0
 
     bars_available = len(history)
-    gaps_detected = int(history.index.to_series().diff().dt.days.gt(1).sum())
+    # Business-day aware gap detection: weekends and ordinary holidays are
+    # normal closures, not data defects. Only multi-day coverage stalls
+    # (more than MARKET_GAP_STALL_CALENDAR_DAYS of consecutive non-trading
+    # calendar time) are counted, so quality scores reflect real holes.
+    session_day_steps = history.index.normalize().to_series().diff().dt.days.dropna()
+    gaps_detected = int(session_day_steps.gt(MARKET_GAP_STALL_CALENDAR_DAYS).sum())
     quality_flags: list[str] = []
     quality_score = 100.0
 
