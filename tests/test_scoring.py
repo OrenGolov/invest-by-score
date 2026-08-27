@@ -6,10 +6,11 @@ from unittest.mock import patch
 import pandas as pd
 
 from agents.market_data_agent import _pct_change, fetch_market_snapshot
+from core import config as core_config
 from core.agent_contracts import AgentContract, OrchestrationDecision
 from core.audit_store import get_audit_events, get_decision_by_replay_hash, get_decision_by_ticker_and_as_of, persist_decision_audit
 from core.orchestrator import orchestrate_score
-from core.score_engine import build_score, _compute_confidence
+from core.score_engine import _compute_confidence, _ensemble_blend, build_score
 from fetch_data import fetch_fundamental_snapshot, get_provider_health_matrix, resolve_fundamental_provider
 
 
@@ -387,6 +388,153 @@ class MarketDataIntegrityTests(unittest.TestCase):
             snapshot = fetch_market_snapshot("TESTX", "2026-08-26")
         self.assertEqual(snapshot["gaps_detected"], 1)
         self.assertIn("market_gap_detected", snapshot["data_quality"]["flags"])
+
+
+class EnsembleBlendTests(unittest.TestCase):
+    """W1: versioned ensemble wiring — weights, renormalization, breakdown."""
+
+    @staticmethod
+    def _contributions(**overrides):
+        base = {
+            "market_data": {"score_current": 10.0, "score_long": 10.0, "status": "OK", "note": "informational"},
+            "technical_analysis": {"score_current": 8.0, "score_long": 6.0, "status": "OK", "note": ""},
+            "fundamental_analysis": {"score_current": 5.0, "score_long": 5.0, "status": "OK", "note": ""},
+            "news_intelligence": {"score_current": None, "score_long": None, "status": "UNAVAILABLE", "note": ""},
+            "sentiment": {"score_current": None, "score_long": None, "status": "UNAVAILABLE", "note": ""},
+            "macroeconomic": {"score_current": None, "score_long": None, "status": "UNAVAILABLE", "note": ""},
+            "market_regime": {"score_current": None, "score_long": None, "status": "UNAVAILABLE", "note": ""},
+        }
+        base.update(overrides)
+        return base
+
+    def _blend(self, contributions=None):
+        return _ensemble_blend(
+            contributions if contributions is not None else self._contributions(),
+            core_config.ENSEMBLE_WEIGHTS_CURRENT,
+            core_config.ENSEMBLE_WEIGHTS_LONG,
+        )
+
+    def test_weight_sets_share_keys_sum_to_one_and_are_non_negative(self):
+        for weights in (core_config.ENSEMBLE_WEIGHTS_CURRENT, core_config.ENSEMBLE_WEIGHTS_LONG):
+            self.assertAlmostEqual(sum(weights.values()), 1.0, places=9)
+            self.assertTrue(all(weight >= 0.0 for weight in weights.values()))
+        self.assertEqual(set(core_config.ENSEMBLE_WEIGHTS_CURRENT), set(core_config.ENSEMBLE_WEIGHTS_LONG))
+        self.assertEqual(
+            set(core_config.ENSEMBLE_WEIGHTS_CURRENT),
+            {"market_data", "technical_analysis", "fundamental_analysis", "news_intelligence", "sentiment", "macroeconomic", "market_regime"},
+        )
+        self.assertTrue(core_config.ENSEMBLE_VERSION)
+
+    def test_validation_helper_rejects_invalid_weight_sets(self):
+        validate = core_config._validate_ensemble_weights
+        complete = dict(core_config.ENSEMBLE_WEIGHTS_CURRENT)
+        with self.assertRaises(ValueError):
+            validate("empty", {})
+        with self.assertRaises(ValueError):
+            validate("key_mismatch", {key: value for key, value in complete.items() if key != "sentiment"})
+        with self.assertRaises(ValueError):
+            validate("bad_sum", {**complete, "technical_analysis": 0.5})
+        with self.assertRaises(ValueError):
+            validate("negative", {**complete, "sentiment": -0.1})
+
+    def test_blend_matches_weighted_math(self):
+        current, long_term, breakdown = self._blend()
+        self.assertEqual(current, 0.85 * 8.0 + 0.15 * 5.0)
+        self.assertEqual(long_term, 0.75 * 6.0 + 0.25 * 5.0)
+        self.assertEqual(breakdown["current_time_score"], current)
+        self.assertEqual(breakdown["long_term_score"], long_term)
+        self.assertFalse(breakdown["no_eligible_agents"])
+        technical = breakdown["agents"]["technical_analysis"]
+        self.assertAlmostEqual(technical["effective_weight_current"], 0.85, places=9)
+        contributions_sum = (
+            technical["contribution_current"]
+            + breakdown["agents"]["fundamental_analysis"]["contribution_current"]
+        )
+        self.assertAlmostEqual(contributions_sum, current, places=9)
+
+
+    def test_renormalization_when_fundamental_unavailable(self):
+        contributions = self._contributions(
+            fundamental_analysis={"score_current": None, "score_long": None, "status": "UNAVAILABLE", "note": "future-dated payload"},
+        )
+        current, long_term, breakdown = self._blend(contributions)
+        self.assertEqual(current, 8.0)
+        self.assertEqual(long_term, 6.0)
+        fundamental = breakdown["agents"]["fundamental_analysis"]
+        self.assertAlmostEqual(fundamental["raw_weight_current"], 0.15, places=9)
+        self.assertEqual(fundamental["effective_weight_current"], 0.0)
+        self.assertFalse(fundamental["eligible_current"])
+        self.assertAlmostEqual(
+            sum(entry["effective_weight_current"] for entry in breakdown["agents"].values()), 1.0, places=9
+        )
+        self.assertAlmostEqual(
+            sum(entry["effective_weight_long"] for entry in breakdown["agents"].values()), 1.0, places=9
+        )
+
+    def test_zero_weight_informational_agent_cannot_move_score(self):
+        baseline_current, baseline_long, _ = self._blend()
+        degraded_current, degraded_long, degraded_breakdown = self._blend(
+            self._contributions(
+                market_data={"score_current": 0.0, "score_long": 0.0, "status": "INCOMPLETE", "note": "degraded"},
+            )
+        )
+        self.assertEqual(degraded_current, baseline_current)
+        self.assertEqual(degraded_long, baseline_long)
+        market_entry = degraded_breakdown["agents"]["market_data"]
+        self.assertEqual(market_entry["contribution_current"], 0.0)
+        self.assertEqual(market_entry["status"], "INCOMPLETE")
+
+    def test_none_score_is_excluded_not_coerced_to_zero(self):
+        contributions = self._contributions(
+            technical_analysis={"score_current": None, "score_long": 6.0, "status": "OK", "note": ""},
+        )
+        current, long_term, breakdown = self._blend(contributions)
+        self.assertEqual(current, 5.0)  # fundamental alone at effective weight 1.0
+        self.assertEqual(long_term, 0.75 * 6.0 + 0.25 * 5.0)
+        technical = breakdown["agents"]["technical_analysis"]
+        self.assertFalse(technical["eligible_current"])
+        self.assertTrue(technical["eligible_long"])
+
+    def test_no_eligible_agents_flags_and_zeroes(self):
+        contributions = self._contributions()
+        for info in contributions.values():
+            info["status"] = "UNAVAILABLE"
+            info["score_current"] = None
+            info["score_long"] = None
+        current, long_term, breakdown = self._blend(contributions)
+        self.assertEqual(current, 0.0)
+        self.assertEqual(long_term, 0.0)
+        self.assertTrue(breakdown["no_eligible_agents"])
+
+    def test_weight_changes_move_the_score(self):
+        contributions = self._contributions()
+        all_technical = {agent: (1.0 if agent == "technical_analysis" else 0.0) for agent in core_config.ENSEMBLE_WEIGHTS_CURRENT}
+        all_fundamental = {agent: (1.0 if agent == "fundamental_analysis" else 0.0) for agent in core_config.ENSEMBLE_WEIGHTS_CURRENT}
+        tech_current, _, _ = _ensemble_blend(contributions, all_technical, core_config.ENSEMBLE_WEIGHTS_LONG)
+        fund_current, _, _ = _ensemble_blend(contributions, all_fundamental, core_config.ENSEMBLE_WEIGHTS_LONG)
+        self.assertEqual(tech_current, 8.0)
+        self.assertEqual(fund_current, 5.0)
+
+    def test_identical_inputs_are_deterministic(self):
+        self.assertEqual(self._blend(), self._blend())
+
+    def test_build_score_exposes_ensemble_breakdown(self):
+        result = build_score("MSFT", "2024-01-02")
+        breakdown = result.ensemble_breakdown
+        self.assertEqual(breakdown["calculation_version"], "ensemble-v1")
+        self.assertFalse(breakdown["no_eligible_agents"])
+        self.assertEqual(len(breakdown["agents"]), 7)
+        self.assertAlmostEqual(
+            sum(entry["effective_weight_current"] for entry in breakdown["agents"].values()), 1.0, places=6
+        )
+        self.assertAlmostEqual(
+            sum(entry["effective_weight_long"] for entry in breakdown["agents"].values()), 1.0, places=6
+        )
+        self.assertEqual(breakdown["current_time_score"], result.current_time_score)
+        self.assertEqual(breakdown["long_term_score"], result.long_term_score)
+        technical = breakdown["agents"]["technical_analysis"]
+        self.assertTrue(technical["eligible_current"])
+        self.assertIn("canonical", technical["note"])
 
 
 if __name__ == "__main__":
