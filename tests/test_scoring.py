@@ -10,11 +10,12 @@ from agents.market_data_agent import _pct_change, fetch_market_snapshot
 from core import config as core_config
 from core.agent_contracts import AgentContract, OrchestrationDecision
 from core.audit_store import get_audit_events, get_decision_by_replay_hash, get_decision_by_ticker_and_as_of, persist_decision_audit
+from agents.technical_agent import score_technical
 from core.audit_policy import evaluate_audit_policy, stable_hash
 from core.orchestrator import _derive_agent_statuses, _select_mode, orchestrate_score
 from core.schemas import STATUS_POSTURE, AgentStatus, status_posture, worst_status
 from core.risk_policy import evaluate_risk_policy
-from core.score_engine import _compute_confidence, _ensemble_blend, build_score
+from core.score_engine import _compute_confidence, _ensemble_blend, _score_current_time, _score_long_term, build_score
 from fetch_data import fetch_fundamental_snapshot, get_provider_health_matrix, resolve_fundamental_provider
 
 
@@ -940,6 +941,65 @@ class StatusTaxonomyTests(unittest.TestCase):
         for agent in decision.agent_outputs:
             with self.subTest(agent=agent.agent):
                 AgentStatus(agent.status)  # raises on unknown status
+
+
+class TechnicalTruthTests(unittest.TestCase):
+    """W5: one technical truth — score_technical is the canonical blend."""
+
+    @staticmethod
+    def _snapshot(**over):
+        snapshot = {
+            "close": 100.0,
+            "change_1d": 0.01,
+            "change_5d": 0.02,
+            "change_20d": 0.05,
+            "change_60d": 0.10,
+            "trend_vs_20d_mean": 0.01,
+            "rsi": 55.0,
+            "volume": 1_000_000.0,
+            "avg_volume_20d": 900_000.0,
+            "volume_ratio_20d": 1.1,
+            "volatility": 0.02,
+            "price_vs_ma_50": 0.02,
+            "price_vs_ma_100": 0.03,
+            "price_vs_ma_150": 0.04,
+            "price_vs_ma_200": 0.05,
+            "moving_averages": {"50d": 98.0, "100d": 97.0, "150d": 96.0, "200d": 95.0},
+        }
+        snapshot.update(over)
+        return snapshot
+
+    def test_score_technical_is_canonical_blend(self):
+        snapshot = self._snapshot()
+        news = {"status": "UNAVAILABLE"}
+        expected = round((_score_current_time(snapshot, news) + _score_long_term(snapshot)) / 2.0, 2)
+        self.assertEqual(score_technical(snapshot, news), expected)
+
+    def test_score_technical_defaults_to_unavailable_news(self):
+        snapshot = self._snapshot()
+        self.assertEqual(
+            score_technical(snapshot),
+            score_technical(snapshot, {"status": "UNAVAILABLE"}),
+        )
+
+    def test_news_snapshot_flows_through_the_agent_view(self):
+        snapshot = self._snapshot()
+        with_news = score_technical(snapshot, {"status": "OK", "sentiment_score": 1.0})
+        without_news = score_technical(snapshot)
+        self.assertGreater(with_news, without_news)
+
+    def test_orchestrator_technical_agent_matches_canonical_blend(self):
+        result = build_score("MSFT", "2024-01-02")
+        decision = orchestrate_score("MSFT", "2024-01-02")
+        technical_agent = next(a for a in decision.agent_outputs if a.agent == "technical_analysis")
+        technical = result.ensemble_breakdown["agents"]["technical_analysis"]
+        expected = round((technical["score_current"] + technical["score_long"]) / 2.0, 2)
+        self.assertEqual(technical_agent.score, expected)
+        # Rounding envelope around the exact blend of the canonical views.
+        self.assertLessEqual(
+            abs(technical_agent.score - (technical["score_current"] + technical["score_long"]) / 2.0),
+            0.005,
+        )
 
 
 if __name__ == "__main__":

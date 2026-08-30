@@ -1,47 +1,31 @@
+"""Technical analysis agent (W5: single technical truth).
+
+This module is a thin adapter over the canonical scorers in
+`core.score_engine` — the single source of technical truth. The independent
+multi-factor formula that used to live here was deleted: it disagreed with
+the published score by construction (split-brain), since the headline came
+from `_score_current_time`/`_score_long_term` with different coefficients.
+
+The disjoint-feature contract still holds and stays test-enforced in
+`tests/test_score_separation.py`: `_score_current_time` never reads
+long-horizon inputs (150d/200d averages, 60d returns) and
+`_score_long_term` never reads short-horizon inputs (1d/5d/20d movement,
+RSI, volume, 50d/100d averages).
+"""
+
 from __future__ import annotations
 
-from core.config import MAX_SCORE
+from core.score_engine import _score_current_time, _score_long_term
 
 
-def score_technical(snapshot: dict) -> float:
-    """Compute a multi-factor technical score from momentum, trend, RSI, and volatility."""
-    change_1d = float(snapshot.get("change_1d", 0.0))
-    change_5d = float(snapshot.get("change_5d", 0.0))
-    change_20d = float(snapshot.get("change_20d", 0.0))
-    trend_vs_20d_mean = float(snapshot.get("trend_vs_20d_mean", 0.0))
-    volume = float(snapshot.get("volume", 0.0))
-    avg_volume_20d = float(snapshot.get("avg_volume_20d", 1.0))
-    rsi = float(snapshot.get("rsi", 50.0))
-    volatility = float(snapshot.get("volatility", 0.0))
-    moving_averages = snapshot.get("moving_averages", {})
+def score_technical(snapshot: dict, news_snapshot: dict | None = None) -> float:
+    """Blended technical view: (current + long) / 2 from the canonical scorers.
 
-    ma_200 = float(moving_averages.get("200d", 0.0))
-    ma_150 = float(moving_averages.get("150d", 0.0))
-    ma_100 = float(moving_averages.get("100d", 0.0))
-    ma_50 = float(moving_averages.get("50d", 0.0))
-    close = float(snapshot.get("close", 0.0))
-
-    score = 5.0
-    score += max(-2.0, min(2.0, change_20d * 30.0))
-    score += max(-2.0, min(2.0, change_5d * 25.0))
-    score += max(-1.5, min(1.5, change_1d * 20.0))
-    score += max(-1.5, min(1.5, trend_vs_20d_mean * 20.0))
-
-    if ma_50 and ma_200:
-        score += max(-1.5, min(1.5, ((ma_50 - ma_200) / ma_200) * 50.0))
-    if ma_100 and ma_150:
-        score += max(-1.0, min(1.0, ((ma_100 - ma_150) / ma_150) * 20.0))
-
-    score += max(-1.5, min(1.5, ((rsi - 50.0) / 50.0) * 1.5))
-
-    volume_ratio = volume / avg_volume_20d if avg_volume_20d else 1.0
-    score += max(-1.0, min(1.0, (volume_ratio - 1.0) * 2.0))
-
-    if volatility > 0:
-        score -= min(1.5, volatility * 30.0)
-
-    if close <= 0:
-        score = 0.0
-
-    score = max(0.0, min(MAX_SCORE, score))
-    return round(score, 2)
+    Passing the decision's real news snapshot keeps this view identical to
+    the one the ensemble consumed (news sentiment is embedded in the
+    current-time view until Sprint N1 gives it a dedicated weight).
+    """
+    news = news_snapshot if news_snapshot is not None else {"status": "UNAVAILABLE"}
+    current = _score_current_time(snapshot, news)
+    long_term = _score_long_term(snapshot)
+    return round((current + long_term) / 2.0, 2)

@@ -5,7 +5,6 @@ import json
 from datetime import datetime, timedelta
 
 from agents.market_data_agent import fetch_market_snapshot
-from agents.technical_agent import score_technical
 from core.audit_store import persist_decision_audit
 from core.config import (
     CONFIDENCE_CAP,
