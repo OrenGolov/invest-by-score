@@ -6,6 +6,7 @@ import json
 from agents.market_data_agent import fetch_market_snapshot
 from agents.technical_agent import score_technical
 from core.agent_contracts import AgentContract, NoTradeDecision, OrchestrationDecision
+from core.risk_policy import evaluate_risk_policy
 from core.score_engine import build_score
 from fetch_data import fetch_fundamental_snapshot
 
@@ -15,23 +16,34 @@ def _stable_hash(payload: dict) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def _build_veto_reasons(snapshot: dict, fundamental_snapshot: dict, score_result) -> list[str]:
-    reasons: list[str] = []
-    if float(snapshot.get("data_quality", {}).get("score", 0.0)) < 60.0:
-        reasons.append("data_quality_below_threshold")
-    if float(snapshot.get("source_confidence", 0.0)) < 0.7:
-        reasons.append("market_source_confidence_below_threshold")
-    if not bool(snapshot.get("source_contract", {}).get("timestamp_valid", True)):
-        reasons.append("future_dated_market_data")
-    if not bool(fundamental_snapshot.get("point_in_time_valid", True)):
-        reasons.append("future_dated_fundamental_payload")
-    if float((fundamental_snapshot or {}).get("source_confidence", 0.0)) < 0.7 and (fundamental_snapshot or {}).get("source_status") != "live_provider":
-        reasons.append("fundamental_source_confidence_below_threshold")
-    if score_result.action == "ANALYSIS_ONLY":
-        reasons.append("analysis_only_mode")
-    if float(score_result.score) < 5.5:
-        reasons.append("score_below_threshold")
-    return reasons
+def _build_risk_context(snapshot: dict, fundamental_snapshot: dict, score_result) -> dict:
+    """Assemble the risk-policy evaluation context from persisted inputs."""
+    return {
+        "market_data_quality": snapshot.get("data_quality", {}).get("score"),
+        "market_source_confidence": snapshot.get("source_confidence"),
+        "market_timestamp_valid": bool(snapshot.get("source_contract", {}).get("timestamp_valid", True)),
+        "fundamental_point_in_time_valid": fundamental_snapshot.get("point_in_time_valid", True),
+        "fundamental_source_confidence": fundamental_snapshot.get("source_confidence"),
+        "fundamental_source_status": fundamental_snapshot.get("source_status"),
+        "score": score_result.score,
+        "action": score_result.action,
+        "confidence": score_result.confidence,
+        "confidence_breakdown": score_result.confidence_breakdown,
+    }
+
+
+def _select_mode(action: str, veto_rule_ids: list[str], risk_gate_passed: bool) -> str:
+    """Single place deciding the decision posture.
+
+    Invariant: PAPER requires zero triggered veto-severity rules AND a passed
+    risk gate; ANALYSIS_ONLY propagates the scoring engine's posture; anything
+    else is NO_TRADE. Fail-closed by construction.
+    """
+    if action == "ANALYSIS_ONLY":
+        return "ANALYSIS_ONLY"
+    if not veto_rule_ids and risk_gate_passed:
+        return "PAPER"
+    return "NO_TRADE"
 
 
 def orchestrate_score(ticker: str, as_of: str, timestamp: str | None = None) -> OrchestrationDecision:
@@ -47,6 +59,7 @@ def orchestrate_score(ticker: str, as_of: str, timestamp: str | None = None) -> 
     ]
     snapshot_hash = _stable_hash(snapshot)
     replay_hash = _stable_hash({"ticker": ticker.upper(), "as_of": snapshot["as_of"], "market": snapshot, "fundamentals": fundamental_snapshot})
+    risk_evaluation = evaluate_risk_policy(_build_risk_context(snapshot, fundamental_snapshot, score_result))
 
     market_payload = {
         "status": "OK",
@@ -115,19 +128,35 @@ def orchestrate_score(ticker: str, as_of: str, timestamp: str | None = None) -> 
         source_record_id=str(fundamental_snapshot.get("source", "provider_key_required")),
     )
 
+    triggered_rules = [rule for rule in risk_evaluation["rules"] if rule["triggered"]]
     risk_agent = AgentContract(
         agent="risk_management",
         ticker=ticker.upper(),
         as_of=snapshot["as_of"],
-        status="OK",
+        status="VETO" if risk_evaluation["veto"] else "OK",
         score=float(score_result.score),
         confidence=max(0.0, min(1.0, float(score_result.confidence))),
         uncertainty={"lower": 0.0, "upper": 0.5},
-        evidence=[{"source_record_id": "risk_policy", "reason": "Risk gate enforces minimum quality, confidence, and timestamp thresholds."}],
-        model_version="risk-v1",
+        evidence=[{
+            "source_record_id": "risk_policy",
+            "reason": (
+                f"Risk policy {risk_evaluation['policy_version']}: "
+                f"{len(triggered_rules)} of {len(risk_evaluation['rules'])} rules triggered "
+                f"({len(risk_evaluation['veto_rule_ids'])} veto-severity)."
+            ),
+        }],
+        model_version=risk_evaluation["policy_version"],
         input_hash=snapshot_hash,
-        warnings=[],
-        payload={"status": "OK", "veto_ready": True, "risk_flags": score_result.risk_flags},
+        warnings=[rule["rule_id"] for rule in triggered_rules],
+        payload={
+            "status": "VETO" if risk_evaluation["veto"] else "OK",
+            "policy_version": risk_evaluation["policy_version"],
+            "veto": risk_evaluation["veto"],
+            "veto_rule_ids": risk_evaluation["veto_rule_ids"],
+            "warning_rule_ids": risk_evaluation["warning_rule_ids"],
+            "rules": risk_evaluation["rules"],
+            "risk_flags": score_result.risk_flags,
+        },
         source_record_id="risk_policy",
     )
 
@@ -164,17 +193,14 @@ def orchestrate_score(ticker: str, as_of: str, timestamp: str | None = None) -> 
         source_record_id="audit_policy",
     )
 
-    veto_reasons = _build_veto_reasons(snapshot, fundamental_snapshot, score_result)
-    mode = "ANALYSIS_ONLY"
+    veto_reasons = list(risk_evaluation["veto_rule_ids"])
+    mode = _select_mode(score_result.action, veto_reasons, bool(score_result.governance.get("risk_gate_passed")))
     action = score_result.action
-    if score_result.action == "ANALYSIS_ONLY":
-        mode = "ANALYSIS_ONLY"
+    if mode == "ANALYSIS_ONLY":
         action = "ANALYSIS_ONLY"
-    elif not veto_reasons and score_result.governance.get("risk_gate_passed"):
-        mode = "PAPER"
+    elif mode == "PAPER":
         action = "PAPER"
-    else:
-        mode = "NO_TRADE"
+    elif mode == "NO_TRADE":
         action = "NO_TRADE"
 
     decision = OrchestrationDecision(

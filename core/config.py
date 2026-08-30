@@ -59,6 +59,74 @@ def _validate_ensemble_weights(name: str, weights: dict[str, float]) -> None:
 _validate_ensemble_weights("ENSEMBLE_WEIGHTS_CURRENT", ENSEMBLE_WEIGHTS_CURRENT)
 _validate_ensemble_weights("ENSEMBLE_WEIGHTS_LONG", ENSEMBLE_WEIGHTS_LONG)
 
+# --- Risk policy (W2) -----------------------------------------------------------
+# Single source of truth for every governance threshold. The evaluator lives in
+# core/risk_policy.py and is the only consumer; nothing else may hard-code these
+# limits. severity "veto" blocks PAPER posture; "warning" is visible but does
+# not block. Missing/None inputs evaluate to triggered rules — fail-closed.
+RISK_POLICY_VERSION = "risk-policy-v2"
+
+RISK_POLICY_V2 = {
+    "data_quality_below_threshold": {
+        "severity": "veto",
+        "minimum_market_data_quality": 60.0,
+    },
+    "market_source_confidence_below_threshold": {
+        "severity": "veto",
+        "minimum_market_source_confidence": 0.7,
+    },
+    "future_dated_market_data": {
+        "severity": "veto",
+    },
+    "future_dated_fundamental_payload": {
+        "severity": "veto",
+    },
+    "fundamental_source_confidence_below_threshold": {
+        "severity": "veto",
+        "minimum_fundamental_source_confidence": 0.7,
+    },
+    "score_below_threshold": {
+        "severity": "veto",
+        "minimum_score": 5.5,
+    },
+    "analysis_only_mode": {
+        "severity": "veto",
+    },
+    "confidence_below_minimum": {
+        "severity": "veto",
+        "minimum_confidence": 0.35,
+    },
+    "confidence_penalty_budget_exceeded": {
+        "severity": "warning",
+        "maximum_total_penalty": 0.15,
+    },
+    "freshness_degraded": {
+        "severity": "warning",
+        "minimum_freshness_factor": 0.5,
+    },
+    "volatility_regime_elevated": {
+        "severity": "warning",
+        "minimum_volatility_regime_factor": 0.3,
+    },
+}
+
+
+def _validate_risk_policy() -> None:
+    """Import-time guard: every rule is a non-empty spec with valid severity."""
+    if not RISK_POLICY_V2:
+        raise ValueError("RISK_POLICY_V2 must contain at least one rule")
+    for rule_id, spec in RISK_POLICY_V2.items():
+        if not isinstance(spec, dict) or not spec:
+            raise ValueError(f"RISK_POLICY_V2 rule {rule_id!r} must be a non-empty spec")
+        if spec.get("severity") not in {"veto", "warning"}:
+            raise ValueError(
+                f"RISK_POLICY_V2 rule {rule_id!r} severity must be 'veto' or 'warning', "
+                f"got {spec.get('severity')!r}"
+            )
+
+
+_validate_risk_policy()
+
 # Evidence-based confidence model (see core.score_engine._compute_confidence).
 # Each factor produces a value in [0, 1]; the confidence is the weighted sum
 # minus explicit risk penalties, clamped to [CONFIDENCE_FLOOR, CONFIDENCE_CAP].

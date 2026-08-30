@@ -9,7 +9,8 @@ from agents.market_data_agent import _pct_change, fetch_market_snapshot
 from core import config as core_config
 from core.agent_contracts import AgentContract, OrchestrationDecision
 from core.audit_store import get_audit_events, get_decision_by_replay_hash, get_decision_by_ticker_and_as_of, persist_decision_audit
-from core.orchestrator import orchestrate_score
+from core.orchestrator import _select_mode, orchestrate_score
+from core.risk_policy import evaluate_risk_policy
 from core.score_engine import _compute_confidence, _ensemble_blend, build_score
 from fetch_data import fetch_fundamental_snapshot, get_provider_health_matrix, resolve_fundamental_provider
 
@@ -535,6 +536,147 @@ class EnsembleBlendTests(unittest.TestCase):
         technical = breakdown["agents"]["technical_analysis"]
         self.assertTrue(technical["eligible_current"])
         self.assertIn("canonical", technical["note"])
+
+
+class RiskPolicyTests(unittest.TestCase):
+    """W2: fail-closed risk policy — rules, severities, mode invariant."""
+
+    LEGACY_VETO_IDS = {
+        "data_quality_below_threshold",
+        "market_source_confidence_below_threshold",
+        "future_dated_market_data",
+        "future_dated_fundamental_payload",
+        "fundamental_source_confidence_below_threshold",
+        "analysis_only_mode",
+        "score_below_threshold",
+    }
+
+    @staticmethod
+    def _context(**overrides):
+        context = {
+            "market_data_quality": 85.0,
+            "market_source_confidence": 0.8,
+            "market_timestamp_valid": True,
+            "fundamental_point_in_time_valid": True,
+            "fundamental_source_confidence": 0.9,
+            "fundamental_source_status": "live_provider",
+            "score": 6.5,
+            "action": "PAPER",
+            "confidence": 0.8,
+            "confidence_breakdown": {
+                "total_penalty": 0.0,
+                "factors": [
+                    {"name": "freshness", "value": 1.0},
+                    {"name": "volatility_regime", "value": 0.9},
+                ],
+            },
+        }
+        context.update(overrides)
+        return context
+
+    def test_clean_context_triggers_nothing(self):
+        evaluation = evaluate_risk_policy(self._context())
+        self.assertFalse(evaluation["veto"])
+        self.assertEqual(evaluation["veto_rule_ids"], [])
+        self.assertEqual(evaluation["warning_rule_ids"], [])
+        self.assertEqual(evaluation["policy_version"], "risk-policy-v2")
+        self.assertTrue(all(not rule["triggered"] for rule in evaluation["rules"]))
+
+    def test_every_veto_rule_triggers_when_forced(self):
+        forcing = {
+            "data_quality_below_threshold": {"market_data_quality": 50.0},
+            "market_source_confidence_below_threshold": {"market_source_confidence": 0.5},
+            "future_dated_market_data": {"market_timestamp_valid": False},
+            "future_dated_fundamental_payload": {"fundamental_point_in_time_valid": False},
+            "fundamental_source_confidence_below_threshold": {
+                "fundamental_source_confidence": 0.5,
+                "fundamental_source_status": "provider_key_required",
+            },
+            "score_below_threshold": {"score": 4.0},
+            "analysis_only_mode": {"action": "ANALYSIS_ONLY"},
+            "confidence_below_minimum": {"confidence": 0.3},
+        }
+        for rule_id, overrides in forcing.items():
+            with self.subTest(rule_id=rule_id):
+                evaluation = evaluate_risk_policy(self._context(**overrides))
+                rule = next(rule for rule in evaluation["rules"] if rule["rule_id"] == rule_id)
+                self.assertTrue(rule["triggered"], rule["detail"])
+                self.assertEqual(rule["severity"], "veto")
+                self.assertIn(rule_id, evaluation["veto_rule_ids"])
+                self.assertTrue(evaluation["veto"])
+
+    def test_fail_closed_missing_inputs_trigger_every_rule(self):
+        evaluation = evaluate_risk_policy({})
+        self.assertTrue(evaluation["veto"])
+        self.assertTrue(all(rule["triggered"] for rule in evaluation["rules"]))
+        self.assertIn("missing", " ".join(rule["detail"] for rule in evaluation["rules"]).lower())
+        expected = {
+            rule_id for rule_id, spec in core_config.RISK_POLICY_V2.items()
+            if spec["severity"] == "veto"
+        }
+        self.assertEqual(set(evaluation["veto_rule_ids"]), expected)
+
+    def test_warning_rules_do_not_veto(self):
+        evaluation = evaluate_risk_policy(self._context(
+            confidence_breakdown={
+                "total_penalty": 0.20,
+                "factors": [
+                    {"name": "freshness", "value": 0.2},
+                    {"name": "volatility_regime", "value": 0.1},
+                ],
+            },
+        ))
+        self.assertFalse(evaluation["veto"])
+        self.assertEqual(evaluation["veto_rule_ids"], [])
+        self.assertEqual(
+            set(evaluation["warning_rule_ids"]),
+            {"confidence_penalty_budget_exceeded", "freshness_degraded", "volatility_regime_elevated"},
+        )
+
+
+    def test_legacy_veto_ids_are_preserved_on_degraded_context(self):
+        evaluation = evaluate_risk_policy(self._context(
+            market_data_quality=50.0,
+            market_source_confidence=0.5,
+            market_timestamp_valid=False,
+            fundamental_point_in_time_valid=False,
+            fundamental_source_confidence=0.1,
+            fundamental_source_status="provider_key_required",
+            score=4.0,
+            action="ANALYSIS_ONLY",
+            confidence=0.8,
+        ))
+        self.assertTrue(self.LEGACY_VETO_IDS.issubset(set(evaluation["veto_rule_ids"])))
+
+    def test_confidence_boundary_passes_at_exact_threshold(self):
+        at_threshold = evaluate_risk_policy(self._context(confidence=0.35))
+        below_threshold = evaluate_risk_policy(self._context(confidence=0.34))
+        confidence_rule_at = next(rule for rule in at_threshold["rules"] if rule["rule_id"] == "confidence_below_minimum")
+        confidence_rule_below = next(rule for rule in below_threshold["rules"] if rule["rule_id"] == "confidence_below_minimum")
+        self.assertFalse(confidence_rule_at["triggered"])
+        self.assertTrue(confidence_rule_below["triggered"])
+
+    def test_select_mode_invariant_no_paper_while_veto_fires(self):
+        for rule_id in core_config.RISK_POLICY_V2:
+            with self.subTest(rule_id=rule_id):
+                self.assertNotEqual(_select_mode("PAPER", [rule_id], True), "PAPER")
+        self.assertEqual(_select_mode("PAPER", [], True), "PAPER")
+        self.assertEqual(_select_mode("ANALYSIS_ONLY", [], True), "ANALYSIS_ONLY")
+        self.assertEqual(_select_mode("PAPER", [], False), "NO_TRADE")
+
+    def test_orchestrator_risk_agent_carries_policy_evaluation(self):
+        decision = orchestrate_score("MSFT", "2024-01-02")
+        risk_agent = next(agent for agent in decision.agent_outputs if agent.agent == "risk_management")
+        payload = risk_agent.payload
+        self.assertEqual(payload["policy_version"], "risk-policy-v2")
+        self.assertEqual(risk_agent.model_version, "risk-policy-v2")
+        self.assertIn(risk_agent.status, {"OK", "VETO"})
+        self.assertTrue(payload["rules"])
+        for rule in payload["rules"]:
+            self.assertIn(rule["severity"], {"veto", "warning"})
+            self.assertIsInstance(rule["triggered"], bool)
+            self.assertTrue(rule["detail"])
+        self.assertEqual(decision.veto_reasons, payload["veto_rule_ids"])
 
 
 if __name__ == "__main__":

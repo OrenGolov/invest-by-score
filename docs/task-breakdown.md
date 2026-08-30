@@ -63,6 +63,12 @@ backtest) compounds on this fault line. Close it first.
 
 ### W2. Risk agent becomes a real fail-closed gate
 
+- Status: **implemented** — `core/risk_policy.py` evaluates `RISK_POLICY_V2`
+  (core/config.py); the orchestrator's risk agent carries the full structured
+  rule evaluation and `veto_rule_ids` replace `_build_veto_reasons`; mode
+  selection is centralized in `_select_mode` with the tested invariant that
+  PAPER is unreachable while any veto-severity rule fires.
+
 - Objective: replace the relay (`status:"OK", veto_ready:True`) with a
   deterministic policy evaluation that cannot be bypassed downstream.
 - Design constraints:
