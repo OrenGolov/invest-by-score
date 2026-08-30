@@ -66,6 +66,13 @@ _validate_ensemble_weights("ENSEMBLE_WEIGHTS_LONG", ENSEMBLE_WEIGHTS_LONG)
 # not block. Missing/None inputs evaluate to triggered rules — fail-closed.
 RISK_POLICY_VERSION = "risk-policy-v2"
 
+# --- Audit policy (W3) ----------------------------------------------------------
+# The auditor independently verifies that a decision is provable: evidence
+# sufficiency, hash integrity, determinism, calibration sanity, and ensemble
+# consistency. Its evaluator lives in core/audit_policy.py; a failed veto-
+# severity check appends the "auditor_veto" reason and blocks PAPER posture.
+AUDIT_POLICY_VERSION = "audit-policy-v1"
+
 RISK_POLICY_V2 = {
     "data_quality_below_threshold": {
         "severity": "veto",

@@ -1,19 +1,17 @@
 from __future__ import annotations
 
-import hashlib
-import json
-
 from agents.market_data_agent import fetch_market_snapshot
 from agents.technical_agent import score_technical
 from core.agent_contracts import AgentContract, NoTradeDecision, OrchestrationDecision
+from core.audit_policy import evaluate_audit_policy, stable_hash
 from core.risk_policy import evaluate_risk_policy
 from core.score_engine import build_score
 from fetch_data import fetch_fundamental_snapshot
 
 
 def _stable_hash(payload: dict) -> str:
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    """Canonical hashing owned by the audit layer (single implementation)."""
+    return stable_hash(payload)
 
 
 def _build_risk_context(snapshot: dict, fundamental_snapshot: dict, score_result) -> dict:
@@ -52,6 +50,7 @@ def orchestrate_score(ticker: str, as_of: str, timestamp: str | None = None) -> 
     fundamental_snapshot = fetch_fundamental_snapshot(ticker, as_of, use_cache=True)
     technical_score = score_technical(snapshot)
     score_result = build_score(ticker, as_of, timestamp)
+    probe_result = build_score(ticker, as_of, timestamp, persist_audit=False)
 
     source_record_ids = [
         str(snapshot.get("source_contract", {}).get("source_id", "yahoo_finance_chart")),
@@ -177,23 +176,66 @@ def orchestrate_score(ticker: str, as_of: str, timestamp: str | None = None) -> 
         source_record_id=str(news_snapshot.get("source_id", "news_provider_unconfigured")),
     )
 
+    audit_evaluation = evaluate_audit_policy({
+        "ticker": ticker.upper(),
+        "as_of": snapshot["as_of"],
+        "agents": [agent.to_dict() for agent in (market_agent, technical_agent, fundamental_agent, news_agent, risk_agent)],
+        "expected_input_hashes": {
+            "market_data": snapshot_hash,
+            "technical_analysis": snapshot_hash,
+            "fundamental_analysis": _stable_hash(fundamental_snapshot),
+            "news_intelligence": _stable_hash(news_snapshot),
+            "risk_management": snapshot_hash,
+        },
+        "snapshot": snapshot,
+        "snapshot_hash": snapshot_hash,
+        "replay_hash": replay_hash,
+        "first_result": score_result.to_dict(),
+        "second_result": probe_result.to_dict(),
+        "confidence": score_result.confidence,
+        "confidence_breakdown": score_result.confidence_breakdown,
+        "ensemble_breakdown": score_result.ensemble_breakdown,
+        "current_time_score": score_result.current_time_score,
+        "long_term_score": score_result.long_term_score,
+        "governance": score_result.governance,
+        "evidence_ledger": score_result.evidence_ledger,
+    })
+    failed_checks = [finding for finding in audit_evaluation["findings"] if not finding["passed"]]
     audit_agent = AgentContract(
         agent="performance_auditor",
         ticker=ticker.upper(),
         as_of=snapshot["as_of"],
-        status="OK",
+        status="VETO" if audit_evaluation["veto"] else "OK",
         score=float(score_result.score),
         confidence=max(0.0, min(1.0, float(score_result.confidence))),
         uncertainty={"lower": 0.0, "upper": 0.3},
-        evidence=[{"source_record_id": "audit_policy", "reason": "Audit checks the score for evidence sufficiency and replayability."}],
-        model_version="audit-v1",
+        evidence=[{
+            "source_record_id": "audit_policy",
+            "reason": (
+                f"Audit policy {audit_evaluation['policy_version']}: "
+                f"{len(audit_evaluation['findings']) - len(failed_checks)} of {len(audit_evaluation['findings'])} checks passed."
+            ),
+        }],
+        model_version=audit_evaluation["policy_version"],
         input_hash=replay_hash,
-        warnings=[],
-        payload={"status": "OK", "replay_hash": replay_hash, "evidence_status": score_result.governance.get("evidence_status", "sufficient")},
+        warnings=[finding["check_id"] for finding in failed_checks],
+        payload={
+            "status": "VETO" if audit_evaluation["veto"] else "OK",
+            "policy_version": audit_evaluation["policy_version"],
+            "veto": audit_evaluation["veto"],
+            "veto_check_ids": audit_evaluation["veto_check_ids"],
+            "warning_check_ids": audit_evaluation["warning_check_ids"],
+            "findings": audit_evaluation["findings"],
+            "replay_hash": replay_hash,
+            "snapshot_hash": snapshot_hash,
+            "evidence_status": score_result.governance.get("evidence_status", "sufficient"),
+        },
         source_record_id="audit_policy",
     )
 
     veto_reasons = list(risk_evaluation["veto_rule_ids"])
+    if audit_evaluation["veto"]:
+        veto_reasons.append("auditor_veto")
     mode = _select_mode(score_result.action, veto_reasons, bool(score_result.governance.get("risk_gate_passed")))
     action = score_result.action
     if mode == "ANALYSIS_ONLY":

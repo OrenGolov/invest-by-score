@@ -97,6 +97,14 @@ backtest) compounds on this fault line. Close it first.
 
 ### W3. Auditor agent becomes an evidence-and-replay validator
 
+- Status: **implemented** — `core/audit_policy.py` (owning canonical hashing)
+  evaluates seven checks: evidence sufficiency, agent input-hash integrity,
+  snapshot-hash recomputation, a determinism probe (second in-process build
+  via `build_score(persist_audit=False)`), calibration sanity, ensemble
+  consistency, and evidence-ledger consistency (warning). A failed
+  veto-severity check appends the `auditor_veto` reason, blocking PAPER
+  through the `_select_mode` invariant.
+
 - Objective: the auditor independently verifies that a decision is provable
   and may veto on audit failure (its reserved severity), per the design docs.
 - Checks (each returns pass/fail + detail, assembled into `payload.findings`):
