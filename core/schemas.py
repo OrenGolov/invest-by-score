@@ -1,7 +1,74 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Any
+from enum import Enum
+from typing import Any, Iterable
+
+
+class AgentStatus(str, Enum):
+    """Failure-state taxonomy for every agent contract (W4).
+
+    Mapping rules:
+    - OK: the agent ran on eligible data with no material degradation.
+    - UNAVAILABLE: provider unconfigured or empty response (e.g. the news
+      stub until a verified provider connects).
+    - STALE: the newest eligible input is too old versus as_of (freshness
+      factor below the risk-policy threshold).
+    - INCOMPLETE: data quality below the governance threshold or critical
+      fields missing (close, valuation metrics).
+    - CONTRADICTORY: reserved for same-domain sources disagreeing beyond
+      tolerance (activates with the Sprint N adapters).
+    - INVALID: timestamp violations (future-dated payload), schema
+      violations, or impossible values — the data cannot be trusted.
+    - VETO: governance posture for risk/auditor agents that blocked the
+      decision (not a data state).
+
+    STATUS_POSTURE drives propagation: INVALID and CONTRADICTORY force
+    NO_TRADE; UNAVAILABLE, STALE and INCOMPLETE force the ANALYSIS_ONLY
+    floor; OK permits PAPER subject to all other governance gates.
+    """
+
+    OK = "OK"
+    UNAVAILABLE = "UNAVAILABLE"
+    STALE = "STALE"
+    INCOMPLETE = "INCOMPLETE"
+    CONTRADICTORY = "CONTRADICTORY"
+    INVALID = "INVALID"
+    VETO = "VETO"
+
+
+STATUS_POSTURE = {
+    AgentStatus.OK: "PAPER",
+    AgentStatus.UNAVAILABLE: "ANALYSIS_ONLY",
+    AgentStatus.STALE: "ANALYSIS_ONLY",
+    AgentStatus.INCOMPLETE: "ANALYSIS_ONLY",
+    AgentStatus.CONTRADICTORY: "NO_TRADE",
+    AgentStatus.INVALID: "NO_TRADE",
+    AgentStatus.VETO: "NO_TRADE",
+}
+
+_AGENT_STATUS_SEVERITY = {
+    AgentStatus.OK: 0,
+    AgentStatus.UNAVAILABLE: 1,
+    AgentStatus.INCOMPLETE: 2,
+    AgentStatus.STALE: 3,
+    AgentStatus.CONTRADICTORY: 4,
+    AgentStatus.INVALID: 5,
+    AgentStatus.VETO: 5,
+}
+
+
+def status_posture(status: str) -> str:
+    """Return the worst decision posture a single agent status permits."""
+    return STATUS_POSTURE[AgentStatus(status)]
+
+
+def worst_status(statuses: Iterable[str]) -> str:
+    """Combine agent statuses into the most severe one (empty -> OK)."""
+    values = list(statuses)
+    if not values:
+        return AgentStatus.OK.value
+    return max((AgentStatus(status) for status in values), key=lambda status: _AGENT_STATUS_SEVERITY[status]).value
 
 
 @dataclass

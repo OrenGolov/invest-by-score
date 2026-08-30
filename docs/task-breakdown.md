@@ -121,6 +121,15 @@ backtest) compounds on this fault line. Close it first.
 
 ### W4. Failure-state taxonomy across every contract
 
+- Status: **implemented** — `AgentStatus` enum (OK/UNAVAILABLE/STALE/
+  INCOMPLETE/CONTRADICTORY/INVALID + VETO for governance agents) in
+  `core/schemas.py` with `STATUS_POSTURE` propagation and `worst_status`
+  combiner; `AgentContract.__post_init__` rejects unknown statuses;
+  `_derive_agent_statuses` (orchestrator) maps raw signals onto the
+  taxonomy reusing risk-policy thresholds; worst data-agent posture
+  propagates (`INVALID/CONTRADICTORY → agent_status_no_trade veto`,
+  `STALE/INCOMPLETE → ANALYSIS_ONLY floor`).
+
 - Objective: one vocabulary for degraded data, replacing ad-hoc strings.
 - Design: `AgentStatus` (str-Enum) in `core/schemas.py`:
   `OK, UNAVAILABLE, STALE, INCOMPLETE, CONTRADICTORY, INVALID`.
