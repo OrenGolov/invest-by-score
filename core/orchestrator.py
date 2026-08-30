@@ -92,9 +92,9 @@ def orchestrate_score(ticker: str, as_of: str, timestamp: str | None = None) -> 
     """Run the typed, point-in-time agent contract layer for a requested as_of snapshot."""
     snapshot = fetch_market_snapshot(ticker, as_of, timestamp)
     fundamental_snapshot = fetch_fundamental_snapshot(ticker, as_of, use_cache=True)
-    technical_score = score_technical(snapshot)
     score_result = build_score(ticker, as_of, timestamp)
     probe_result = build_score(ticker, as_of, timestamp, persist_audit=False)
+    technical_score = score_technical(snapshot, score_result.news_snapshot)
 
     source_record_ids = [
         str(snapshot.get("source_contract", {}).get("source_id", "yahoo_finance_chart")),

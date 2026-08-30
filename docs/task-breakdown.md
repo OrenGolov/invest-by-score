@@ -153,6 +153,14 @@ backtest) compounds on this fault line. Close it first.
 
 ### W5. Single technical truth
 
+- Status: **implemented** — `agents/technical_agent.py` is now a thin adapter
+  over the canonical scorers (`_score_current_time`/`_score_long_term`);
+  the independent formula is deleted, as is `score_engine`'s dead import of
+  it (which had created a circular-import hazard). The orchestrator passes
+  the decision's real news snapshot so the agent view matches the ensemble's
+  embedded-news view. Invariant test: agent score equals the rounded blend
+  of the raw views within the 2-dp rounding envelope.
+
 - Objective: eliminate the split-brain where `agents/technical_agent.py::
   score_technical` feeds the technical AgentContract while the headline score
   comes from `_score_current_time`/`_score_long_term` with different
