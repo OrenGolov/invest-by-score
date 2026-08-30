@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from core.schemas import AgentStatus
+
 
 @dataclass
 class AgentContract:
@@ -19,6 +21,15 @@ class AgentContract:
     warnings: list[str] = field(default_factory=list)
     payload: dict[str, Any] = field(default_factory=dict)
     source_record_id: str = ""
+
+    def __post_init__(self) -> None:
+        """Validate status against the failure-state taxonomy (W4)."""
+        try:
+            AgentStatus(self.status)
+        except ValueError as exc:
+            raise ValueError(
+                f"AgentContract.status {self.status!r} is not a valid AgentStatus"
+            ) from exc
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

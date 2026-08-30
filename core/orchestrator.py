@@ -4,7 +4,9 @@ from agents.market_data_agent import fetch_market_snapshot
 from agents.technical_agent import score_technical
 from core.agent_contracts import AgentContract, NoTradeDecision, OrchestrationDecision
 from core.audit_policy import evaluate_audit_policy, stable_hash
+from core.config import RISK_POLICY_V2
 from core.risk_policy import evaluate_risk_policy
+from core.schemas import STATUS_POSTURE, AgentStatus, status_posture, worst_status
 from core.score_engine import build_score
 from fetch_data import fetch_fundamental_snapshot
 
@@ -44,6 +46,48 @@ def _select_mode(action: str, veto_rule_ids: list[str], risk_gate_passed: bool) 
     return "NO_TRADE"
 
 
+def _derive_agent_statuses(snapshot: dict, fundamental_snapshot: dict, score_result) -> dict[str, str]:
+    """Map raw decision signals onto the AgentStatus taxonomy (W4).
+
+    Thresholds are re-read from the risk policy table so degradation levels
+    are defined in exactly one place. Pure and deterministic.
+    """
+    freshness_threshold = float(RISK_POLICY_V2["freshness_degraded"]["minimum_freshness_factor"])
+    quality_threshold = float(RISK_POLICY_V2["data_quality_below_threshold"]["minimum_market_data_quality"])
+    freshness = next(
+        (
+            float(factor["value"])
+            for factor in (score_result.confidence_breakdown or {}).get("factors", [])
+            if factor.get("name") == "freshness" and factor.get("value") is not None
+        ),
+        None,
+    )
+    market_quality_value = snapshot.get("data_quality", {}).get("score")
+    market_quality = float(market_quality_value) if market_quality_value is not None else None
+    timestamp_valid = bool(snapshot.get("source_contract", {}).get("timestamp_valid", True))
+
+    if not timestamp_valid:
+        market_status = AgentStatus.INVALID.value
+    elif freshness is not None and freshness < freshness_threshold:
+        market_status = AgentStatus.STALE.value
+    elif market_quality is None or market_quality < quality_threshold:
+        market_status = AgentStatus.INCOMPLETE.value
+    else:
+        market_status = AgentStatus.OK.value
+
+    fundamental_pit_valid = bool(fundamental_snapshot.get("point_in_time_valid", True))
+    fundamental_status = AgentStatus.OK.value if fundamental_pit_valid else AgentStatus.INVALID.value
+
+    news_status = str((score_result.news_snapshot or {}).get("status", "UNAVAILABLE"))
+
+    return {
+        "market_data": market_status,
+        "technical_analysis": AgentStatus.OK.value,
+        "fundamental_analysis": fundamental_status,
+        "news_intelligence": news_status,
+    }
+
+
 def orchestrate_score(ticker: str, as_of: str, timestamp: str | None = None) -> OrchestrationDecision:
     """Run the typed, point-in-time agent contract layer for a requested as_of snapshot."""
     snapshot = fetch_market_snapshot(ticker, as_of, timestamp)
@@ -59,6 +103,7 @@ def orchestrate_score(ticker: str, as_of: str, timestamp: str | None = None) -> 
     snapshot_hash = _stable_hash(snapshot)
     replay_hash = _stable_hash({"ticker": ticker.upper(), "as_of": snapshot["as_of"], "market": snapshot, "fundamentals": fundamental_snapshot})
     risk_evaluation = evaluate_risk_policy(_build_risk_context(snapshot, fundamental_snapshot, score_result))
+    agent_statuses = _derive_agent_statuses(snapshot, fundamental_snapshot, score_result)
 
     market_payload = {
         "status": "OK",
@@ -71,7 +116,7 @@ def orchestrate_score(ticker: str, as_of: str, timestamp: str | None = None) -> 
         agent="market_data",
         ticker=ticker.upper(),
         as_of=snapshot["as_of"],
-        status="OK",
+        status=agent_statuses["market_data"],
         score=round(float(snapshot.get("data_quality", {}).get("score", 0.0)) / 10.0, 2),
         confidence=float(snapshot.get("source_confidence", 0.0)),
         uncertainty={"lower": 0.2, "upper": 0.8},
@@ -115,7 +160,7 @@ def orchestrate_score(ticker: str, as_of: str, timestamp: str | None = None) -> 
         agent="fundamental_analysis",
         ticker=ticker.upper(),
         as_of=snapshot["as_of"],
-        status="OK" if fundamental_snapshot.get("point_in_time_valid", True) else "UNAVAILABLE",
+        status=agent_statuses["fundamental_analysis"],
         score=float(score_result.fundamental_score),
         confidence=float(fundamental_snapshot.get("source_confidence", 0.0)),
         uncertainty={"lower": 0.1, "upper": 0.9},
@@ -236,7 +281,13 @@ def orchestrate_score(ticker: str, as_of: str, timestamp: str | None = None) -> 
     veto_reasons = list(risk_evaluation["veto_rule_ids"])
     if audit_evaluation["veto"]:
         veto_reasons.append("auditor_veto")
-    mode = _select_mode(score_result.action, veto_reasons, bool(score_result.governance.get("risk_gate_passed")))
+    data_agent_posture = status_posture(worst_status(
+        agent_statuses[name] for name in ("market_data", "technical_analysis", "fundamental_analysis", "news_intelligence")
+    ))
+    if data_agent_posture == "NO_TRADE":
+        veto_reasons.append("agent_status_no_trade")
+    effective_action = "ANALYSIS_ONLY" if data_agent_posture == "ANALYSIS_ONLY" else score_result.action
+    mode = _select_mode(effective_action, veto_reasons, bool(score_result.governance.get("risk_gate_passed")))
     action = score_result.action
     if mode == "ANALYSIS_ONLY":
         action = "ANALYSIS_ONLY"

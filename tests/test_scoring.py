@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pandas as pd
@@ -10,7 +11,8 @@ from core import config as core_config
 from core.agent_contracts import AgentContract, OrchestrationDecision
 from core.audit_store import get_audit_events, get_decision_by_replay_hash, get_decision_by_ticker_and_as_of, persist_decision_audit
 from core.audit_policy import evaluate_audit_policy, stable_hash
-from core.orchestrator import _select_mode, orchestrate_score
+from core.orchestrator import _derive_agent_statuses, _select_mode, orchestrate_score
+from core.schemas import STATUS_POSTURE, AgentStatus, status_posture, worst_status
 from core.risk_policy import evaluate_risk_policy
 from core.score_engine import _compute_confidence, _ensemble_blend, build_score
 from fetch_data import fetch_fundamental_snapshot, get_provider_health_matrix, resolve_fundamental_provider
@@ -831,6 +833,113 @@ class AuditPolicyTests(unittest.TestCase):
 
     def test_auditor_veto_blocks_paper(self):
         self.assertNotEqual(_select_mode("PAPER", ["auditor_veto"], True), "PAPER")
+
+
+class StatusTaxonomyTests(unittest.TestCase):
+    """W4: failure-state taxonomy — validation, posture mapping, propagation."""
+
+    @staticmethod
+    def _score_result_stub(confidence_breakdown=None, news_status="UNAVAILABLE"):
+        factors = confidence_breakdown or {"factors": [{"name": "freshness", "value": 1.0}]}
+        return SimpleNamespace(
+            confidence_breakdown=factors,
+            news_snapshot={"status": news_status},
+        )
+
+    @staticmethod
+    def _snapshot(**over):
+        snapshot = {
+            "data_quality": {"score": 85.0},
+            "source_contract": {"timestamp_valid": True},
+        }
+        snapshot.update(over)
+        return snapshot
+
+    @staticmethod
+    def _fundamental(pit_valid=True):
+        return {"point_in_time_valid": pit_valid}
+
+    def test_agent_contract_rejects_unknown_status(self):
+        with self.assertRaises(ValueError):
+            AgentContract(agent="x", ticker="X", as_of="t", status="BANANA")
+
+    def test_agent_contract_accepts_every_taxonomy_status(self):
+        for status in AgentStatus:
+            with self.subTest(status=status.value):
+                contract = AgentContract(agent="x", ticker="X", as_of="t", status=status.value)
+                self.assertEqual(contract.status, status.value)
+
+    def test_status_posture_table(self):
+        expected = {
+            "OK": "PAPER",
+            "UNAVAILABLE": "ANALYSIS_ONLY",
+            "STALE": "ANALYSIS_ONLY",
+            "INCOMPLETE": "ANALYSIS_ONLY",
+            "CONTRADICTORY": "NO_TRADE",
+            "INVALID": "NO_TRADE",
+            "VETO": "NO_TRADE",
+        }
+        self.assertEqual(STATUS_POSTURE, {AgentStatus(status): posture for status, posture in expected.items()})
+        for status, posture in expected.items():
+            with self.subTest(status=status):
+                self.assertEqual(status_posture(status), posture)
+
+    def test_worst_status_ordering(self):
+        self.assertEqual(worst_status([]), "OK")
+        self.assertEqual(worst_status(["OK", "OK"]), "OK")
+        self.assertEqual(worst_status(["OK", "STALE"]), "STALE")
+        self.assertEqual(worst_status(["INCOMPLETE", "STALE"]), "STALE")
+        self.assertEqual(worst_status(["STALE", "CONTRADICTORY"]), "CONTRADICTORY")
+        self.assertEqual(worst_status(["CONTRADICTORY", "INVALID"]), "INVALID")
+        self.assertEqual(worst_status(["OK", "INVALID", "STALE"]), "INVALID")
+
+    def test_derive_healthy_snapshot_is_ok(self):
+        statuses = _derive_agent_statuses(self._snapshot(), self._fundamental(), self._score_result_stub())
+        self.assertEqual(statuses["market_data"], "OK")
+        self.assertEqual(statuses["fundamental_analysis"], "OK")
+        self.assertEqual(statuses["technical_analysis"], "OK")
+
+    def test_derive_future_dated_market_data_is_invalid(self):
+        statuses = _derive_agent_statuses(
+            self._snapshot(source_contract={"timestamp_valid": False}),
+            self._fundamental(),
+            self._score_result_stub(),
+        )
+        self.assertEqual(statuses["market_data"], "INVALID")
+
+    def test_derive_stale_freshness(self):
+        stub = self._score_result_stub({"factors": [{"name": "freshness", "value": 0.2}]})
+        statuses = _derive_agent_statuses(self._snapshot(), self._fundamental(), stub)
+        self.assertEqual(statuses["market_data"], "STALE")
+
+    def test_derive_low_quality_is_incomplete(self):
+        statuses = _derive_agent_statuses(
+            self._snapshot(data_quality={"score": 50.0}),
+            self._fundamental(),
+            self._score_result_stub(),
+        )
+        self.assertEqual(statuses["market_data"], "INCOMPLETE")
+
+    def test_derive_missing_quality_is_incomplete(self):
+        statuses = _derive_agent_statuses(
+            self._snapshot(data_quality={}),
+            self._fundamental(),
+            self._score_result_stub(),
+        )
+        self.assertEqual(statuses["market_data"], "INCOMPLETE")
+
+    def test_derive_future_dated_fundamentals_are_invalid(self):
+        statuses = _derive_agent_statuses(self._snapshot(), self._fundamental(pit_valid=False), self._score_result_stub())
+        self.assertEqual(statuses["fundamental_analysis"], "INVALID")
+
+    def test_posture_propagation_blocks_paper_on_invalid_agent(self):
+        self.assertNotEqual(_select_mode("PAPER", ["agent_status_no_trade"], True), "PAPER")
+
+    def test_orchestrator_statuses_are_valid_taxonomy_values(self):
+        decision = orchestrate_score("MSFT", "2024-01-02")
+        for agent in decision.agent_outputs:
+            with self.subTest(agent=agent.agent):
+                AgentStatus(agent.status)  # raises on unknown status
 
 
 if __name__ == "__main__":
