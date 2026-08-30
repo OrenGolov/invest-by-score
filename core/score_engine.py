@@ -806,8 +806,13 @@ def _build_replay_metadata(ticker: str, as_of: str, snapshot: dict, fundamental_
     }
 
 
-def build_score(ticker: str, as_of: str, timestamp: str | None = None) -> ScoreResult:
-    """Build a current-time and long-term score for a ticker at a given point-in-time."""
+def build_score(ticker: str, as_of: str, timestamp: str | None = None, persist_audit: bool = True) -> ScoreResult:
+    """Build a current-time and long-term score for a ticker at a given point-in-time.
+
+    persist_audit=False runs the identical scoring path without writing an
+    audit event — used by the orchestrator's determinism probe so a decision
+    produces exactly one audit event.
+    """
     snapshot = fetch_market_snapshot(ticker, as_of, timestamp)
     fundamental_snapshot = fetch_fundamental_snapshot(ticker, as_of)
     news_snapshot = fetch_news_snapshot(ticker, snapshot["as_of"])
@@ -969,15 +974,16 @@ def build_score(ticker: str, as_of: str, timestamp: str | None = None) -> ScoreR
         news_snapshot=news_snapshot,
     )
 
-    audit_event = persist_decision_audit({
-        "ticker": result.ticker,
-        "as_of": result.as_of,
-        "mode": governance.get("mode", "ANALYSIS_ONLY"),
-        "action": result.action,
-        "score": result.score,
-        "confidence": result.confidence,
-        "source_quality": source_quality,
-        "replay_hash": replay_metadata["replay_hash"],
-    })
-    result.replay_metadata["audit_event_id"] = audit_event["event_id"]
+    if persist_audit:
+        audit_event = persist_decision_audit({
+            "ticker": result.ticker,
+            "as_of": result.as_of,
+            "mode": governance.get("mode", "ANALYSIS_ONLY"),
+            "action": result.action,
+            "score": result.score,
+            "confidence": result.confidence,
+            "source_quality": source_quality,
+            "replay_hash": replay_metadata["replay_hash"],
+        })
+        result.replay_metadata["audit_event_id"] = audit_event["event_id"]
     return result

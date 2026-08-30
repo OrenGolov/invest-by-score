@@ -9,6 +9,7 @@ from agents.market_data_agent import _pct_change, fetch_market_snapshot
 from core import config as core_config
 from core.agent_contracts import AgentContract, OrchestrationDecision
 from core.audit_store import get_audit_events, get_decision_by_replay_hash, get_decision_by_ticker_and_as_of, persist_decision_audit
+from core.audit_policy import evaluate_audit_policy, stable_hash
 from core.orchestrator import _select_mode, orchestrate_score
 from core.risk_policy import evaluate_risk_policy
 from core.score_engine import _compute_confidence, _ensemble_blend, build_score
@@ -677,6 +678,159 @@ class RiskPolicyTests(unittest.TestCase):
             self.assertIsInstance(rule["triggered"], bool)
             self.assertTrue(rule["detail"])
         self.assertEqual(decision.veto_reasons, payload["veto_rule_ids"])
+
+
+class AuditPolicyTests(unittest.TestCase):
+    """W3: auditor as an independent evidence/replay validator."""
+
+    @staticmethod
+    def _agents(**tamper):
+        names = ["market_data", "technical_analysis", "fundamental_analysis", "news_intelligence", "risk_management"]
+        agents = []
+        for name in names:
+            agent = {
+                "agent": name,
+                "status": "OK",
+                "evidence": [{"source_record_id": f"{name}_source", "reason": "ok"}],
+                "input_hash": "a" * 64,
+            }
+            if name in tamper:
+                agent.update(tamper[name])
+            agents.append(agent)
+        return agents
+
+    @staticmethod
+    def _fake_result(**overrides):
+        result = {
+            "ticker": "MSFT",
+            "as_of": "2026-08-27 00:00:00",
+            "score": 7.0,
+            "current_time_score": 7.5,
+            "long_term_score": 6.5,
+            "confidence": 0.8,
+            "confidence_breakdown": {"value": 0.8, "calculation_version": "evidence-confidence-v2"},
+            "ensemble_breakdown": {
+                "current_time_score": 7.5,
+                "long_term_score": 6.5,
+                "no_eligible_agents": False,
+                "agents": {
+                    "technical_analysis": {"effective_weight_current": 1.0, "effective_weight_long": 1.0},
+                },
+            },
+            "governance": {"risk_gate_passed": True},
+            "evidence_ledger": {"status": "ready"},
+            "replay_metadata": {"audit_event_id": "evt-1"},
+        }
+        result.update(overrides)
+        return result
+
+    def _context(self, **overrides):
+        snapshot = overrides.pop("snapshot", {"ticker": "MSFT", "close": 100.0})
+        context = {
+            "ticker": "MSFT",
+            "as_of": "2026-08-27 00:00:00",
+            "agents": self._agents(),
+            "expected_input_hashes": {
+                "market_data": "a" * 64,
+                "technical_analysis": "a" * 64,
+                "fundamental_analysis": "a" * 64,
+                "news_intelligence": "a" * 64,
+                "risk_management": "a" * 64,
+            },
+            "snapshot": snapshot,
+            "snapshot_hash": stable_hash(snapshot),
+            "replay_hash": "r" * 64,
+            "first_result": self._fake_result(),
+            "second_result": self._fake_result(),
+            "confidence": 0.8,
+            "confidence_breakdown": {"value": 0.8, "calculation_version": "evidence-confidence-v2"},
+            "ensemble_breakdown": self._fake_result()["ensemble_breakdown"],
+            "current_time_score": 7.5,
+            "long_term_score": 6.5,
+            "governance": {"risk_gate_passed": True},
+            "evidence_ledger": {"status": "ready"},
+        }
+        context.update(overrides)
+        return context
+
+
+    def test_clean_context_passes_all_checks(self):
+        evaluation = evaluate_audit_policy(self._context())
+        self.assertFalse(evaluation["veto"])
+        self.assertEqual(evaluation["veto_check_ids"], [])
+        self.assertEqual(evaluation["policy_version"], "audit-policy-v1")
+        self.assertTrue(all(finding["passed"] for finding in evaluation["findings"]))
+
+    def test_tampered_agent_hash_vetoes(self):
+        evaluation = evaluate_audit_policy(self._context(
+            agents=self._agents(technical_analysis={"input_hash": "b" * 64}),
+        ))
+        self.assertTrue(evaluation["veto"])
+        self.assertIn("agent_input_hash_integrity", evaluation["veto_check_ids"])
+
+    def test_tampered_snapshot_hash_vetoes(self):
+        evaluation = evaluate_audit_policy(self._context(snapshot_hash="deadbeef"))
+        self.assertTrue(evaluation["veto"])
+        self.assertIn("snapshot_hash_integrity", evaluation["veto_check_ids"])
+
+    def test_determinism_mismatch_vetoes_with_path(self):
+        evaluation = evaluate_audit_policy(self._context(
+            second_result=self._fake_result(score=9.9),
+        ))
+        self.assertTrue(evaluation["veto"])
+        self.assertIn("determinism_probe", evaluation["veto_check_ids"])
+        probe = next(f for f in evaluation["findings"] if f["check_id"] == "determinism_probe")
+        self.assertIn("$.score", probe["detail"])
+
+    def test_missing_probe_build_fails_closed(self):
+        evaluation = evaluate_audit_policy(self._context(second_result=None))
+        self.assertTrue(evaluation["veto"])
+        self.assertIn("determinism_probe", evaluation["veto_check_ids"])
+
+    def test_calibration_out_of_band_vetoes(self):
+        evaluation = evaluate_audit_policy(self._context(confidence=0.99))
+        self.assertTrue(evaluation["veto"])
+        self.assertIn("calibration_sanity", evaluation["veto_check_ids"])
+
+    def test_calibration_breakdown_disagreement_vetoes(self):
+        evaluation = evaluate_audit_policy(self._context(
+            confidence_breakdown={"value": 0.5, "calculation_version": "evidence-confidence-v2"},
+        ))
+        self.assertTrue(evaluation["veto"])
+        self.assertIn("calibration_sanity", evaluation["veto_check_ids"])
+
+    def test_ensemble_inconsistency_vetoes(self):
+        evaluation = evaluate_audit_policy(self._context(
+            ensemble_breakdown=self._fake_result(ensemble_breakdown={})["ensemble_breakdown"],
+        ))
+        self.assertTrue(evaluation["veto"])
+        self.assertIn("ensemble_consistency", evaluation["veto_check_ids"])
+
+    def test_evidence_sufficiency_vetoes(self):
+        evaluation = evaluate_audit_policy(self._context(
+            agents=self._agents(market_data={"evidence": []}),
+        ))
+        self.assertTrue(evaluation["veto"])
+        self.assertIn("evidence_sufficiency", evaluation["veto_check_ids"])
+
+    def test_ledger_mismatch_is_warning_only(self):
+        evaluation = evaluate_audit_policy(self._context(
+            governance={"risk_gate_passed": False},
+        ))
+        self.assertFalse(evaluation["veto"])
+        self.assertIn("evidence_ledger_consistency", evaluation["warning_check_ids"])
+
+    def test_orchestrator_audit_agent_passes_on_clean_run(self):
+        decision = orchestrate_score("MSFT", "2024-01-02")
+        audit_agent = next(agent for agent in decision.agent_outputs if agent.agent == "performance_auditor")
+        self.assertEqual(audit_agent.status, "OK")
+        self.assertEqual(audit_agent.payload["policy_version"], "audit-policy-v1")
+        self.assertFalse(audit_agent.payload["veto"])
+        self.assertNotIn("auditor_veto", decision.veto_reasons)
+        self.assertTrue(all(finding["passed"] for finding in audit_agent.payload["findings"]))
+
+    def test_auditor_veto_blocks_paper(self):
+        self.assertNotEqual(_select_mode("PAPER", ["auditor_veto"], True), "PAPER")
 
 
 if __name__ == "__main__":
