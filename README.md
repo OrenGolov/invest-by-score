@@ -1,5 +1,7 @@
 ﻿# Investment Project
 
+Continuously learn the relationship between information, market context, price/volume behavior, and future stock returns across multiple horizons — while preserving exactly what was knowable at the prediction time.
+
 Point-in-time stock scoring and long-term portfolio analysis platform.
 
 The platform is designed as a governed multi-agent system. It produces an
