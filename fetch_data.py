@@ -30,6 +30,8 @@ from unittest.mock import Mock
 
 import pandas as pd
 
+from core.raw_store import append_raw_records
+
 logger = logging.getLogger(__name__)
 
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
@@ -163,6 +165,26 @@ def fetch_price_history(
         raise TickerFetchError(f"{ticker}: response contained no price bars")
 
     data.index.name = "Date"
+
+    # W6: record exactly what the provider returned, before any cache write.
+    # Append-only; failures are logged (raw_store_write_failed) and never
+    # corrupt scoring.
+    raw_records = [
+        {
+            "bar_time": index.strftime("%Y-%m-%d %H:%M:%S"),
+            "Open": float(row["Open"]),
+            "High": float(row["High"]),
+            "Low": float(row["Low"]),
+            "Close": float(row["Close"]),
+            "Volume": float(row["Volume"]),
+        }
+        for index, row in data.iterrows()
+    ]
+    append_raw_records(
+        source_id="yahoo_finance_chart",
+        request_key=f"{ticker.upper()}_{period}_{interval}",
+        records=raw_records,
+    )
 
     if use_cache:
         _write_cache(data, cache_path)
@@ -441,6 +463,11 @@ def fetch_fundamental_snapshot(
             ),
             "provider_resolution": provider_resolution,
         }
+        append_raw_records(
+            source_id=snapshot["source_contract"]["source_id"],
+            request_key=f"{ticker.upper()}_{target.date()}",
+            records=[snapshot],
+        )
         if use_cache:
             CACHE_DIR.mkdir(parents=True, exist_ok=True)
             with cache_path.open("w", encoding="utf-8") as handle:
@@ -493,6 +520,11 @@ def fetch_fundamental_snapshot(
         ),
         "provider_resolution": provider_resolution,
     }
+    append_raw_records(
+        source_id=snapshot["source_contract"]["source_id"],
+        request_key=f"{ticker.upper()}_{target.date()}",
+        records=[snapshot],
+    )
     if use_cache:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         with cache_path.open("w", encoding="utf-8") as handle:

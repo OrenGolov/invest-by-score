@@ -177,6 +177,18 @@ backtest) compounds on this fault line. Close it first.
 
 ### W6. Append-only raw-record store (Sprint-1 leftover, minimal viable)
 
+- Status: **implemented** — `core/raw_store.py`: `append_raw_records` (one
+  JSONL line per fetch under `data/raw/{source_id}/{YYYY-MM-DD}.jsonl` with
+  `ingested_time`/`payload_sha256`/`schema_version`, fail-soft via the
+  `raw_store_write_failed` warning), `load_raw_records` (request-key
+  filtering, supersede-on-refetch marking older versions with
+  `superseded_by`), and `rebuild_price_frame` (latest-version OHLCV frame
+  reconstruction). Wired into `fetch_price_history` (bars, before cache
+  write) and both `fetch_fundamental_snapshot` return paths (full snapshot
+  payload). Acceptance proven: deleting the VOO parquet cache and
+  rebuilding from raw yields a value- and index-identical frame; the MSFT
+  rebuild-from-raw test reproduces the full snapshot feature-for-feature.
+
 - Objective: satisfy raw immutability / replayability without a database —
   no fetch may leave the system unable to rebuild what it saw.
 - Design:
