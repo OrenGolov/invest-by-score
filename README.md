@@ -10,6 +10,8 @@ outcomes, and remains in analysis or paper-trading mode until strict evidence
 and risk criteria are met. A score is not a promise of return and is not
 financial advice.
 
+<img width="210" height="774" alt="image" src="https://github.com/user-attachments/assets/3132fee0-ed4e-4096-9954-83ecd66a307b" />
+
 ## Current Status
 
 The repository currently contains the first data foundation in
