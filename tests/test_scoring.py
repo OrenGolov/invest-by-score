@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -14,6 +16,7 @@ from agents.technical_agent import score_technical
 from core.audit_policy import evaluate_audit_policy, stable_hash
 from core.orchestrator import _derive_agent_statuses, _select_mode, orchestrate_score
 from core.schemas import STATUS_POSTURE, AgentStatus, status_posture, worst_status
+from core.raw_store import append_raw_records, load_raw_records, rebuild_price_frame
 from core.risk_policy import evaluate_risk_policy
 from core.score_engine import _compute_confidence, _ensemble_blend, _score_current_time, _score_long_term, build_score
 from fetch_data import fetch_fundamental_snapshot, get_provider_health_matrix, resolve_fundamental_provider
@@ -1000,6 +1003,108 @@ class TechnicalTruthTests(unittest.TestCase):
             abs(technical_agent.score - (technical["score_current"] + technical["score_long"]) / 2.0),
             0.005,
         )
+
+
+class RawStoreTests(unittest.TestCase):
+    """W6: append-only raw store — append, supersede, fail-soft, rebuild."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        patcher = patch("core.raw_store.RAW_STORE_DIR", Path(self._tmp.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_append_then_load_round_trip(self):
+        records = [{"bar_time": "2026-08-25 13:30:00", "Close": 100.0}]
+        self.assertTrue(append_raw_records("yahoo_finance_chart", "MSFT_1y_1d", records))
+        entries = load_raw_records("yahoo_finance_chart", "MSFT_1y_1d")
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["record"]["Close"], 100.0)
+        self.assertNotIn("superseded_by", entries[0])
+        for key in ("ingested_time", "payload_sha256", "record"):
+            self.assertIn(key, entries[0])
+
+    def test_request_key_filtering(self):
+        append_raw_records("yahoo_finance_chart", "MSFT_1y_1d", [{"v": 1}])
+        append_raw_records("yahoo_finance_chart", "VOO_6mo_1d", [{"v": 2}])
+        self.assertEqual(len(load_raw_records("yahoo_finance_chart", "MSFT_1y_1d")), 1)
+        self.assertEqual(len(load_raw_records("yahoo_finance_chart", "VOO_6mo_1d")), 1)
+        self.assertEqual(load_raw_records("yahoo_finance_chart", "UNKNOWN"), [])
+
+    def test_supersede_on_refetch_marks_older_versions(self):
+        append_raw_records("yahoo_finance_chart", "K", [{"bar_time": "2026-08-25 13:30:00", "Close": 100.0}])
+        append_raw_records("yahoo_finance_chart", "K", [{"bar_time": "2026-08-25 13:30:00", "Close": 101.0}])
+        entries = load_raw_records("yahoo_finance_chart", "K", record_key_field="bar_time")
+        self.assertEqual(len(entries), 2)
+        superseded = [entry for entry in entries if "superseded_by" in entry]
+        self.assertEqual(len(superseded), 1)
+        self.assertEqual(superseded[0]["record"]["Close"], 100.0)
+        self.assertNotEqual(superseded[0]["payload_sha256"], superseded[0]["superseded_by"])
+
+    def test_write_failure_never_raises(self):
+        blocker = Path(self._tmp.name) / "blocker"
+        blocker.write_text("not a directory")
+        with patch("core.raw_store.RAW_STORE_DIR", blocker):
+            self.assertFalse(append_raw_records("yahoo_finance_chart", "K", [{"v": 1}]))
+
+    def test_rebuild_price_frame_uses_latest_versions(self):
+        append_raw_records("yahoo_finance_chart", "K", [
+            {"bar_time": "2026-08-25 13:30:00", "Open": 1.0, "High": 1.0, "Low": 1.0, "Close": 100.0, "Volume": 10.0},
+            {"bar_time": "2026-08-26 13:30:00", "Open": 1.0, "High": 1.0, "Low": 1.0, "Close": 101.0, "Volume": 11.0},
+        ])
+        append_raw_records("yahoo_finance_chart", "K", [
+            {"bar_time": "2026-08-25 13:30:00", "Open": 1.0, "High": 1.0, "Low": 1.0, "Close": 105.0, "Volume": 12.0},
+        ])
+        frame = rebuild_price_frame("yahoo_finance_chart", "K")
+        self.assertIsNotNone(frame)
+        self.assertEqual(len(frame), 2)
+        self.assertEqual(frame.index.name, "Date")
+        self.assertEqual(float(frame.loc["2026-08-25 13:30:00", "Close"]), 105.0)
+        self.assertEqual(float(frame.loc["2026-08-26 13:30:00", "Close"]), 101.0)
+
+
+class RawStoreRebuildTests(unittest.TestCase):
+    """W6 acceptance: the market snapshot rebuilds purely from raw records."""
+
+    def test_market_snapshot_rebuilds_from_raw_store(self):
+        cache_path = Path("data") / "MSFT_1y_1d.parquet"
+        if not cache_path.exists():
+            self.skipTest("MSFT 1y cache not present on this machine")
+        baseline_frame = pd.read_parquet(cache_path)
+        baseline = fetch_market_snapshot("MSFT", "2026-08-27")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("core.raw_store.RAW_STORE_DIR", Path(tmp)):
+                rows = [
+                    {
+                        "bar_time": index.strftime("%Y-%m-%d %H:%M:%S"),
+                        "Open": float(row["Open"]),
+                        "High": float(row["High"]),
+                        "Low": float(row["Low"]),
+                        "Close": float(row["Close"]),
+                        "Volume": float(row["Volume"]),
+                    }
+                    for index, row in baseline_frame.iterrows()
+                ]
+                self.assertTrue(append_raw_records("yahoo_finance_chart", "MSFT_1y_1d", rows))
+                rebuilt = rebuild_price_frame("yahoo_finance_chart", "MSFT_1y_1d")
+        self.assertIsNotNone(rebuilt)
+        pd.testing.assert_frame_equal(rebuilt, baseline_frame, check_dtype=False, check_freq=False)
+
+        cache_path.unlink()
+        rebuilt.to_parquet(cache_path)
+        rebuilt_snapshot = fetch_market_snapshot("MSFT", "2026-08-27")
+
+        for key in (
+            "close", "rsi", "volatility", "change_1d", "change_5d", "change_20d",
+            "change_60d", "trend_vs_20d_mean", "volume_ratio_20d",
+            "price_vs_ma_50", "price_vs_ma_100", "price_vs_ma_150", "price_vs_ma_200",
+        ):
+            self.assertEqual(baseline[key], rebuilt_snapshot[key], key)
+        self.assertEqual(baseline["moving_averages"], rebuilt_snapshot["moving_averages"])
+        self.assertEqual(baseline["data_quality"]["score"], rebuilt_snapshot["data_quality"]["score"])
+        self.assertEqual(baseline["data_quality"]["flags"], rebuilt_snapshot["data_quality"]["flags"])
 
 
 if __name__ == "__main__":
