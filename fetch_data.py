@@ -262,6 +262,15 @@ SOURCE_REGISTRY = {
         "fallback_rank": 1,
         "domain": "valuation_and_quality",
     },
+    "news": {
+        "provider": "NewsAPI",
+        "source_type": "news",
+        "source_id": "newsapi_news",
+        "base_confidence": 0.75,
+        "status": "provider_key_required",  # until NEWS_PROVIDER_API_KEY resolves (Sprint N1)
+        "fallback_rank": 1,
+        "domain": "news_events",
+    },
 }
 
 
@@ -288,7 +297,10 @@ def get_provider_health_matrix() -> dict[str, dict[str, float | str | list[str]]
     health: dict[str, dict[str, float | str | list[str]]] = {}
     for domain, config in SOURCE_REGISTRY.items():
         confidence = float(config.get("base_confidence", 0.0))
-        health_score = min(1.0, max(0.0, confidence))
+        # A provider whose key has not resolved yet is not healthy, regardless
+        # of its nominal base confidence (e.g. the N1 news entry).
+        status = str(config.get("status", "unknown"))
+        health_score = min(1.0, max(0.0, confidence)) if status == "live_provider" else 0.0
         health[domain] = {
             "provider": config.get("provider", "unknown"),
             "source_id": config.get("source_id", "unknown"),

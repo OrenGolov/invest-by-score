@@ -5,7 +5,7 @@ import json
 from datetime import datetime, timedelta
 
 from agents.market_data_agent import fetch_market_snapshot
-from core.audit_store import persist_decision_audit
+from core.audit_store import AUDIT_SCHEMA_VERSION, persist_decision_audit
 from core.config import (
     CONFIDENCE_CAP,
     CONFIDENCE_FLOOR,
@@ -31,6 +31,9 @@ from core.config import (
     GOVERNANCE_RISK_GATE_PENALTY,
     LONG_TERM_SCORE_VERSION,
     MAX_SCORE,
+    NEWS_LOOKBACK_DAYS,
+    NEWS_SCORE_BASE,
+    NEWS_SCORE_SPAN,
     RISK_FLAG_CONFIDENCE_PENALTIES,
 )
 from core.news_contract import fetch_news_snapshot
@@ -194,13 +197,14 @@ def _build_insights(snapshot: dict, score: float, news_snapshot: dict) -> dict:
     }
 
 
-def _score_current_time(snapshot: dict, news_snapshot: dict) -> float:
+def _score_current_time(snapshot: dict) -> float:
     """Near-term/tactical score.
 
-    Feature group: news/sentiment, 1d/5d/20d movement, RSI, volume, and
-    the 50d/100d moving averages only. Deliberately excludes the 150d/200d
-    averages and any longer-horizon return so this score cannot become an
-    alias of `_score_long_term`, which draws from a disjoint feature set.
+    Feature group: 1d/5d/20d movement, RSI, volume, and the 50d/100d moving
+    averages only. Deliberately excludes the 150d/200d averages and any
+    longer-horizon return so this score cannot become an alias of
+    `_score_long_term`, which draws from a disjoint feature set. News is NOT
+    in this group since N1: it enters through its own ensemble line.
     """
     close = float(snapshot.get("close", 0.0))
     change_1d = float(snapshot.get("change_1d", 0.0))
@@ -212,10 +216,6 @@ def _score_current_time(snapshot: dict, news_snapshot: dict) -> float:
     price_vs_ma_50 = float(snapshot.get("price_vs_ma_50", 0.0))
     ma_50 = float(snapshot.get("moving_averages", {}).get("50d", 0.0))
     ma_100 = float(snapshot.get("moving_averages", {}).get("100d", 0.0))
-
-    news_contribution = 0.0
-    if news_snapshot.get("status") == "OK" and news_snapshot.get("sentiment_score") is not None:
-        news_contribution = max(-1.0, min(1.0, float(news_snapshot["sentiment_score"]) * 1.0))
 
     score = 4.0
     score += max(-1.7, min(1.7, change_1d * 42.0))
@@ -235,7 +235,6 @@ def _score_current_time(snapshot: dict, news_snapshot: dict) -> float:
         score += max(-0.55, min(0.55, ((ma_50 - ma_100) / ma_100) * 22.0))
     score += max(-1.2, min(1.2, ((rsi - 50.0) / 35.0)))
     score += max(-1.0, min(1.0, (volume_ratio - 1.0) * 2.8))
-    score += news_contribution
 
     if close <= 0:
         score = 0.0
@@ -273,7 +272,7 @@ def _score_long_term(snapshot: dict) -> float:
     return round(max(0.0, min(MAX_SCORE, score)), 2)
 
 
-def _build_scoring_breakdown(snapshot: dict, score: float, current_time_score: float, long_term_score: float, news_snapshot: dict) -> dict:
+def _build_scoring_breakdown(snapshot: dict, score: float, current_time_score: float, long_term_score: float) -> dict:
     """Mirror of the live scoring formulas for dashboard explanation.
 
     Every entry uses the same coefficient and clip as the expression that
@@ -281,9 +280,6 @@ def _build_scoring_breakdown(snapshot: dict, score: float, current_time_score: f
     contradict it. Collinear terms retired from the scorers are absent here
     as well, so no fact is displayed (or counted) twice.
     """
-    news_status = news_snapshot.get("status", "UNAVAILABLE")
-    news_contribution = float(news_snapshot.get("sentiment_score") or 0.0) if news_status == "OK" else 0.0
-
     rsi = float(snapshot.get("rsi", 50.0))
     volume_ratio = float(snapshot.get("volume_ratio_20d", 1.0))
     moving_averages = snapshot.get("moving_averages", {})
@@ -301,7 +297,6 @@ def _build_scoring_breakdown(snapshot: dict, score: float, current_time_score: f
         ),
         "rsi_signal": max(-1.2, min(1.2, ((rsi - 50.0) / 35.0))),
         "volume_confirmation": max(-1.0, min(1.0, (volume_ratio - 1.0) * 2.8)),
-        "news_sentiment": max(-1.0, min(1.0, news_contribution)),
     }
     long_terms = {
         "historical_return_60d": max(-1.5, min(1.5, float(snapshot.get("change_60d", 0.0)) * 10.0)),
@@ -322,7 +317,7 @@ def _build_scoring_breakdown(snapshot: dict, score: float, current_time_score: f
             "1d/5d/20d momentum, distance versus the 20d mean, price-vs-MA50, an MA50/MA100 cross tiebreaker, RSI, and volume drive the near-term reading.",
             "The 60-day return and the price-versus-MA150 distance anchor the long-term outlook; volatility discounts it.",
             "Collinear duplicates (price-vs-MA100 at full strength, the MA150/MA200 cross) no longer double-count the same drawdown fact.",
-            "News/sentiment contributes zero weight while no verified provider is connected.",
+            "News enters only through the dedicated news_intelligence ensemble line when a verified provider is connected; it is never inferred from price.",
             "Business quality enters the headline through horizon-specific ensemble weights (see ensemble_breakdown), not an ad-hoc term.",
         ],
         "historical_comparison": "Near-term momentum (1-20d, MA50) and structural trend (60d, MA150) draw from disjoint feature sets; overlapping legacy terms were retired so each fact is counted once.",
@@ -400,7 +395,7 @@ def _build_feature_metadata(snapshot: dict, news_snapshot: dict) -> dict:
             {"name": "relative_strength", "owner_agent": "Technical Agent", "lookback_window": "14d RSI", "calculation": "rsi"},
             {"name": "volume_confirmation", "owner_agent": "Market Data Agent", "lookback_window": "20d volume average", "calculation": "volume_ratio_20d"},
             {"name": "volatility_regime", "owner_agent": "Market Data Agent", "lookback_window": "30d realized volatility", "calculation": "volatility"},
-            {"name": "news_sentiment", "owner_agent": "News Intelligence Agent", "lookback_window": "N/A", "calculation": "unavailable_until_provider_connected"},
+            {"name": "news_intelligence_score", "owner_agent": "News Intelligence Agent", "lookback_window": f"{NEWS_LOOKBACK_DAYS}d news window", "calculation": "ensemble line: 5.0 + 5.0 * aggregated sentiment (N1)"},
         ],
     }
 
@@ -815,14 +810,18 @@ def build_score(ticker: str, as_of: str, timestamp: str | None = None, persist_a
     snapshot = fetch_market_snapshot(ticker, as_of, timestamp)
     fundamental_snapshot = fetch_fundamental_snapshot(ticker, as_of)
     news_snapshot = fetch_news_snapshot(ticker, snapshot["as_of"])
-    technical_current_view = _score_current_time(snapshot, news_snapshot)
+    technical_current_view = _score_current_time(snapshot)
     technical_long_view = _score_long_term(snapshot)
     fundamental_score = _build_fundamental_score(snapshot, fundamental_snapshot)
 
     fundamental_pit_valid = bool(fundamental_snapshot.get("point_in_time_valid", True))
     fundamental_live = str(fundamental_snapshot.get("source_status", "unknown")) == "live_provider"
     market_quality = float(snapshot.get("data_quality", {}).get("score", 0.0))
-    news_ok = news_snapshot.get("status") == "OK" and news_snapshot.get("sentiment_score") is not None
+    news_status = str(news_snapshot.get("status", "UNAVAILABLE"))
+    news_sentiment = news_snapshot.get("sentiment_score")
+    news_score = None
+    if news_status == "OK" and news_sentiment is not None:
+        news_score = round(NEWS_SCORE_BASE + NEWS_SCORE_SPAN * float(news_sentiment), 4)
     contributions = {
         "market_data": {
             "score_current": round(market_quality / 10.0, 4),
@@ -843,10 +842,10 @@ def build_score(ticker: str, as_of: str, timestamp: str | None = None, persist_a
             "note": "live provider" if fundamental_live else "fallback estimates; governance applies the fundamental-weak penalty",
         },
         "news_intelligence": {
-            "score_current": None,
+            "score_current": news_score,
             "score_long": None,
-            "status": "OK" if news_ok else "UNAVAILABLE",
-            "note": "sentiment is currently embedded in the technical current view; a dedicated weight activates with Sprint N1",
+            "status": news_status,
+            "note": "N1 dedicated weight, tactical-only; CONTRADICTORY/INVALID propagate as the agent status",
         },
         "sentiment": {"score_current": None, "score_long": None, "status": "UNAVAILABLE", "note": "not implemented"},
         "macroeconomic": {"score_current": None, "score_long": None, "status": "UNAVAILABLE", "note": "not implemented"},
@@ -883,7 +882,11 @@ def build_score(ticker: str, as_of: str, timestamp: str | None = None, persist_a
         governance_risk_gate_passed=bool(governance["risk_gate_passed"]),
     )
 
-    news_status_note = "verified news sentiment" if news_snapshot.get("status") == "OK" else "no news sentiment (no verified provider connected)"
+    news_status_note = (
+        "verified news sentiment carries its own ensemble weight"
+        if news_snapshot.get("status") == "OK"
+        else "no usable news sentiment; its weight renormalizes across eligible agents"
+    )
     explanation = (
         f"Weighted ensemble ({ENSEMBLE_VERSION}) blending the current-time technical view, the long-term structural "
         f"view, and business quality per horizon weights ({news_status_note}). "
@@ -915,7 +918,7 @@ def build_score(ticker: str, as_of: str, timestamp: str | None = None, persist_a
     latest_financial_report = _build_latest_financial_report(snapshot["as_of"])
     next_expected_report = _build_next_expected_report(snapshot["as_of"])
     insights = _build_insights(snapshot, capped_score, news_snapshot)
-    scoring_breakdown = _build_scoring_breakdown(snapshot, capped_score, current_time_score, long_term_score, news_snapshot)
+    scoring_breakdown = _build_scoring_breakdown(snapshot, capped_score, current_time_score, long_term_score)
     source_reliability = _build_source_reliability()
     technical_features = _build_technical_features(snapshot)
     feature_metadata = _build_feature_metadata(snapshot, news_snapshot)
@@ -983,6 +986,9 @@ def build_score(ticker: str, as_of: str, timestamp: str | None = None, persist_a
             "confidence": result.confidence,
             "source_quality": source_quality,
             "replay_hash": replay_metadata["replay_hash"],
+            "schema_version": AUDIT_SCHEMA_VERSION,
+            "ensemble_version": str(ensemble_breakdown.get("calculation_version", "")),
+            "confidence_breakdown": confidence_breakdown,
         })
         result.replay_metadata["audit_event_id"] = audit_event["event_id"]
     return result

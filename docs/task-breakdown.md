@@ -210,6 +210,15 @@ backtest) compounds on this fault line. Close it first.
 
 ### W7. Audit event enrichment
 
+- Status: **implemented** — events are now `audit-event-v2`: `schema_version`,
+  `ensemble_version`, `model_versions` (agent → version), `agent_statuses`,
+  `veto` (risk rule ids + auditor check ids), and
+  `confidence_breakdown_digest` (hash, not the bulk payload). The enriched
+  write moved to the orchestrator (where statuses/versions/vetoes are all
+  known); the determinism probe uses `persist_audit=False` so a decision
+  still produces exactly one event. `get_events_since(cursor)` added for the
+  timeline API; append-only log with no backfill migration.
+
 - `persist_decision_audit` gains: `schema_version`, `ensemble_version`,
   `model_versions` (agent → version), `veto` object (agent, rule_ids,
   severity), `agent_statuses`, and a `confidence_breakdown_digest` (hash, not

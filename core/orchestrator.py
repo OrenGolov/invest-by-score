@@ -3,6 +3,7 @@ from __future__ import annotations
 from agents.market_data_agent import fetch_market_snapshot
 from agents.technical_agent import score_technical
 from core.agent_contracts import AgentContract, NoTradeDecision, OrchestrationDecision
+from core.audit_store import AUDIT_SCHEMA_VERSION, persist_decision_audit
 from core.audit_policy import evaluate_audit_policy, stable_hash
 from core.config import RISK_POLICY_V2
 from core.risk_policy import evaluate_risk_policy
@@ -92,9 +93,9 @@ def orchestrate_score(ticker: str, as_of: str, timestamp: str | None = None) -> 
     """Run the typed, point-in-time agent contract layer for a requested as_of snapshot."""
     snapshot = fetch_market_snapshot(ticker, as_of, timestamp)
     fundamental_snapshot = fetch_fundamental_snapshot(ticker, as_of, use_cache=True)
-    score_result = build_score(ticker, as_of, timestamp)
+    score_result = build_score(ticker, as_of, timestamp, persist_audit=False)
     probe_result = build_score(ticker, as_of, timestamp, persist_audit=False)
-    technical_score = score_technical(snapshot, score_result.news_snapshot)
+    technical_score = score_technical(snapshot)
 
     source_record_ids = [
         str(snapshot.get("source_contract", {}).get("source_id", "yahoo_finance_chart")),
@@ -205,19 +206,43 @@ def orchestrate_score(ticker: str, as_of: str, timestamp: str | None = None) -> 
     )
 
     news_snapshot = score_result.news_snapshot
+    news_ensemble = (score_result.ensemble_breakdown.get("agents") or {}).get("news_intelligence", {})
+    news_pipeline = news_snapshot.get("pipeline") or {}
+    news_articles = news_snapshot.get("articles") or []
+    news_evidence = [
+        {
+            "source_record_id": str(article.get("source_record_id", "")),
+            "reason": (
+                f"{article.get('category', 'other')}; tone {article.get('tone')}; "
+                f"relevance {article.get('relevance')}; weight {article.get('source_weight')}"
+            ),
+        }
+        for article in news_articles
+    ] or [{
+        "source_record_id": str(news_snapshot.get("source_id", "news_provider_unconfigured")),
+        "reason": str(news_snapshot.get("reason", "")),
+    }]
     news_agent = AgentContract(
         agent="news_intelligence",
         ticker=ticker.upper(),
         as_of=snapshot["as_of"],
         status=news_snapshot.get("status", "UNAVAILABLE"),
-        score=0.0,
-        confidence=float(news_snapshot.get("source_confidence", 0.0)),
+        score=float(news_ensemble.get("score_current") or 0.0),
+        confidence=float(news_snapshot.get("source_confidence", 0.0) or 0.0),
         uncertainty={"lower": 0.0, "upper": 0.0},
-        evidence=[{"source_record_id": news_snapshot.get("source_id", "news_provider_unconfigured"), "reason": news_snapshot.get("reason", "")}],
+        evidence=news_evidence,
         model_version=news_snapshot.get("calculation_version", "news-contract-v1"),
         input_hash=_stable_hash(news_snapshot),
-        warnings=[] if news_snapshot.get("status") == "OK" else ["news_provider_unconfigured"],
-        payload={"status": news_snapshot.get("status", "UNAVAILABLE"), "sentiment_score": news_snapshot.get("sentiment_score")},
+        warnings=[] if news_snapshot.get("status") == "OK" else ["news_not_usable"],
+        payload={
+            "status": news_snapshot.get("status", "UNAVAILABLE"),
+            "sentiment_score": news_snapshot.get("sentiment_score"),
+            "confidence": news_snapshot.get("source_confidence", 0.0),
+            "articles_considered": len(news_articles),
+            "pipeline_version": news_pipeline.get("pipeline_version", ""),
+            "counts": news_pipeline.get("counts", {}),
+            "contradictions": news_pipeline.get("contradictions", []),
+        },
         source_record_id=str(news_snapshot.get("source_id", "news_provider_unconfigured")),
     )
 
@@ -295,6 +320,35 @@ def orchestrate_score(ticker: str, as_of: str, timestamp: str | None = None) -> 
         action = "PAPER"
     elif mode == "NO_TRADE":
         action = "NO_TRADE"
+
+    # W7: exactly one enriched audit event per decision, written here where
+    # agent statuses, model versions, and both governance outcomes are known.
+    audit_event = persist_decision_audit({
+        "ticker": score_result.ticker,
+        "as_of": score_result.as_of,
+        "mode": mode,
+        "action": action,
+        "score": float(score_result.score),
+        "confidence": float(score_result.confidence),
+        "replay_hash": replay_hash,
+        "source_quality": score_result.source_quality,
+        "schema_version": AUDIT_SCHEMA_VERSION,
+        "ensemble_version": str(score_result.ensemble_breakdown.get("calculation_version", "")),
+        "confidence_breakdown": score_result.confidence_breakdown,
+        "model_versions": {
+            agent.agent: agent.model_version
+            for agent in (market_agent, technical_agent, fundamental_agent, news_agent, risk_agent, audit_agent)
+        },
+        "agent_statuses": {
+            agent.agent: agent.status
+            for agent in (market_agent, technical_agent, fundamental_agent, news_agent, risk_agent, audit_agent)
+        },
+        "veto": {
+            "risk_management": {"veto": risk_evaluation["veto"], "rule_ids": risk_evaluation["veto_rule_ids"]},
+            "performance_auditor": {"veto": audit_evaluation["veto"], "check_ids": audit_evaluation["veto_check_ids"]},
+        },
+    })
+    score_result.replay_metadata["audit_event_id"] = audit_event["event_id"]
 
     decision = OrchestrationDecision(
         ticker=ticker.upper(),

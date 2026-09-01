@@ -10,7 +10,9 @@ The disjoint-feature contract still holds and stays test-enforced in
 `tests/test_score_separation.py`: `_score_current_time` never reads
 long-horizon inputs (150d/200d averages, 60d returns) and
 `_score_long_term` never reads short-horizon inputs (1d/5d/20d movement,
-RSI, volume, 50d/100d averages).
+RSI, volume, 50d/100d averages). Since Sprint N1, news sentiment is no
+longer embedded in the current-time view either: it enters the published
+score exclusively through the dedicated `news_intelligence` ensemble line.
 """
 
 from __future__ import annotations
@@ -18,14 +20,14 @@ from __future__ import annotations
 from core.score_engine import _score_current_time, _score_long_term
 
 
-def score_technical(snapshot: dict, news_snapshot: dict | None = None) -> float:
+def score_technical(snapshot: dict) -> float:
     """Blended technical view: (current + long) / 2 from the canonical scorers.
 
-    Passing the decision's real news snapshot keeps this view identical to
-    the one the ensemble consumed (news sentiment is embedded in the
-    current-time view until Sprint N1 gives it a dedicated weight).
+    Takes no news input by design: the news view is the ensemble's
+    `news_intelligence` contribution (N1), not a hidden term inside the
+    technical score. Embedding it here as well would count the same
+    evidence twice.
     """
-    news = news_snapshot if news_snapshot is not None else {"status": "UNAVAILABLE"}
-    current = _score_current_time(snapshot, news)
+    current = _score_current_time(snapshot)
     long_term = _score_long_term(snapshot)
     return round((current + long_term) / 2.0, 2)

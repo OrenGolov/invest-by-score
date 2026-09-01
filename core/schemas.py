@@ -163,10 +163,14 @@ class MarketSnapshot:
 class NewsSnapshot:
     """Point-in-time news/sentiment contract.
 
-    Until a verified news provider is connected, every field stays in an
-    explicit UNAVAILABLE state. This must never be backfilled from price
-    or technical indicators (RSI, momentum, etc.) — that would silently
-    disguise a missing data source as a real signal.
+    Wire format of `core.news_contract.fetch_news_snapshot` (the adapter in
+    `core/news_adapter.py` owns construction). Without a verified provider
+    every field stays in an explicit UNAVAILABLE state, byte-for-byte
+    identical to the pre-N1 placeholder. This must never be backfilled from
+    price or technical indicators (RSI, momentum, etc.) — that would
+    silently disguise a missing data source as a real signal. Non-UNAVAILABLE
+    paths (Sprint N1) add a `pipeline` provenance block on top of these
+    fields; the UNAVAILABLE path never carries one.
     """
 
     ticker: str

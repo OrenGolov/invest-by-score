@@ -4,7 +4,9 @@ DEFAULT_ACTION = "ANALYSIS_ONLY"
 DEFAULT_CONFIDENCE = 0.5
 
 MARKET_FEATURE_VERSION = "market-feature-v1"
-CURRENT_SCORE_VERSION = "current-score-v2"
+# v3: the embedded news term was removed from the current-time view (Sprint N1);
+# news enters the published score exclusively through its own ensemble line.
+CURRENT_SCORE_VERSION = "current-score-v3"
 LONG_TERM_SCORE_VERSION = "long-term-score-v2"
 NEWS_CONTRACT_VERSION = "news-contract-v1"
 
@@ -15,13 +17,17 @@ NEWS_CONTRACT_VERSION = "news-contract-v1"
 # per horizon: business quality matters more to the structural view than to
 # the tactical one. Agents without a live implementation hold an explicit 0.0
 # weight — presence in the dict is the contract; absence fails at import.
-ENSEMBLE_VERSION = "ensemble-v1"
+# v2: news_intelligence is born wired (N1) with a dedicated current-horizon
+# weight. While its status is not OK the weight renormalizes across eligible
+# agents, so the no-provider posture stays degraded-and-flagged — never a
+# silently neutral substitute.
+ENSEMBLE_VERSION = "ensemble-v2"
 
 ENSEMBLE_WEIGHTS_CURRENT = {
     "market_data": 0.0,          # informational only: feeds confidence/gates
-    "technical_analysis": 0.85,  # current-time technical view
-    "fundamental_analysis": 0.15,
-    "news_intelligence": 0.0,    # UNAVAILABLE stub; dedicated weight lands with Sprint N1
+    "technical_analysis": 0.80,  # current-time technical view
+    "fundamental_analysis": 0.10,
+    "news_intelligence": 0.10,   # N1: live whenever the news contract reads OK
     "sentiment": 0.0,            # not implemented
     "macroeconomic": 0.0,        # not implemented
     "market_regime": 0.0,        # not implemented; regime gates via risk policy
@@ -31,7 +37,7 @@ ENSEMBLE_WEIGHTS_LONG = {
     "market_data": 0.0,
     "technical_analysis": 0.75,  # long-term structural technical view
     "fundamental_analysis": 0.25,
-    "news_intelligence": 0.0,
+    "news_intelligence": 0.0,    # tactical-only: news never enters the structural view
     "sentiment": 0.0,
     "macroeconomic": 0.0,
     "market_regime": 0.0,
@@ -176,3 +182,46 @@ GOVERNANCE_RISK_GATE_PENALTY = 0.05
 
 CONFIDENCE_FLOOR = 0.10
 CONFIDENCE_CAP = 0.95
+
+# --- News intelligence adapter (N1) ---------------------------------------------
+# Pipeline: NEWS -> PIT FILTER -> ENTITY RESOLUTION -> EVENT CLASSIFICATION ->
+# SOURCE QUALITY -> RELEVANCE/NOVELTY -> DIRECTION/MAGNITUDE -> CONTRADICTION
+# DETECTION -> EVIDENCE-BACKED OUTPUT. The evaluator lives in
+# core/news_adapter.py; thresholds and versions live here so governance reads
+# them from exactly one place. The no-key path stays the explicit UNAVAILABLE
+# contract (a missing provider is a status, never a neutral score).
+NEWS_CLASSIFIER_VERSION = "news-classifier-v1"
+NEWS_TONE_LEXICON_VERSION = "news-tone-lexicon-v1"
+NEWS_AGGREGATOR_VERSION = "news-aggregator-v1"
+NEWS_PIPELINE_VERSION = "news-pipeline-v1"
+
+NEWS_PROVIDER_API_KEY_ENV = "NEWS_PROVIDER_API_KEY"
+NEWS_PROVIDER_URL = "https://newsapi.org/v2/everything"
+NEWS_PROVIDER_TIMEOUT_SECONDS = 10.0
+
+# Query window: articles with published_time <= as_of, window end at as_of,
+# start at as_of minus this many calendar days.
+NEWS_LOOKBACK_DAYS = 7
+
+# Exponential recency decay half-life, in days. v1 approximates the 3-trading-
+# day half-life with calendar days (deterministic; no market calendar needed),
+# mirroring the calendar-day convention of CONFIDENCE_FRESHNESS_*.
+NEWS_RECENCY_HALF_LIFE_DAYS = 3.0
+
+# Contradiction v1: a same-day, same-category cluster of credible articles whose
+# positive/negative mean tones are opposite-sign with |delta| strictly above
+# this threshold yields status CONTRADICTORY (never a neutral average).
+NEWS_CONTRADICTION_TONE_DELTA = 0.6
+NEWS_CONTRADICTION_CONFIDENCE_FLOOR = 0.10
+
+# Registry base confidence for the news domain (SOURCE_REGISTRY["news"] mirrors
+# this value; the adapter never imports fetch_data to avoid coupling).
+NEWS_BASE_SOURCE_CONFIDENCE = 0.75
+
+# Maximum provider articles considered per request (also the provider page size).
+NEWS_MAX_ARTICLES = 50
+
+# Aggregated sentiment [-1, 1] maps onto the ensemble contribution line as
+# base + span * sentiment, i.e. a 0-10 score like every other agent line.
+NEWS_SCORE_BASE = 5.0
+NEWS_SCORE_SPAN = 5.0
