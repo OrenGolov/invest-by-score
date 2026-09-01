@@ -11,7 +11,14 @@ import pandas as pd
 from agents.market_data_agent import _pct_change, fetch_market_snapshot
 from core import config as core_config
 from core.agent_contracts import AgentContract, OrchestrationDecision
-from core.audit_store import get_audit_events, get_decision_by_replay_hash, get_decision_by_ticker_and_as_of, persist_decision_audit
+from core.audit_store import (
+    AUDIT_SCHEMA_VERSION,
+    get_audit_events,
+    get_decision_by_replay_hash,
+    get_decision_by_ticker_and_as_of,
+    get_events_since,
+    persist_decision_audit,
+)
 from agents.technical_agent import score_technical
 from core.audit_policy import evaluate_audit_policy, stable_hash
 from core.orchestrator import _derive_agent_statuses, _select_mode, orchestrate_score
@@ -1105,6 +1112,68 @@ class RawStoreRebuildTests(unittest.TestCase):
         self.assertEqual(baseline["moving_averages"], rebuilt_snapshot["moving_averages"])
         self.assertEqual(baseline["data_quality"]["score"], rebuilt_snapshot["data_quality"]["score"])
         self.assertEqual(baseline["data_quality"]["flags"], rebuilt_snapshot["data_quality"]["flags"])
+
+
+class AuditStoreEnrichmentTests(unittest.TestCase):
+    """W7: enriched audit events, single-write guarantee, cursor reader."""
+
+    def test_direct_persist_carries_enrichment(self):
+        event = persist_decision_audit({
+            "ticker": "MSFT",
+            "as_of": "2024-01-02 00:00:00",
+            "mode": "ANALYSIS_ONLY",
+            "action": "ANALYSIS_ONLY",
+            "score": 7.0,
+            "confidence": 0.8,
+            "replay_hash": "w7-direct",
+            "schema_version": AUDIT_SCHEMA_VERSION,
+            "ensemble_version": "ensemble-v1",
+            "confidence_breakdown": {"value": 0.8, "calculation_version": "evidence-confidence-v2"},
+            "model_versions": {"technical_analysis": "technical-v1"},
+            "agent_statuses": {"market_data": "OK"},
+            "veto": {"risk_management": {"veto": False, "rule_ids": []}},
+        })
+        self.assertEqual(event["schema_version"], "audit-event-v2")
+        self.assertEqual(event["ensemble_version"], "ensemble-v1")
+        self.assertEqual(event["model_versions"], {"technical_analysis": "technical-v1"})
+        self.assertEqual(event["agent_statuses"], {"market_data": "OK"})
+        self.assertEqual(len(event["confidence_breakdown_digest"]), 64)
+        self.assertIn("replay_hash", get_decision_by_replay_hash("w7-direct")[0])
+
+    def test_orchestrator_event_is_enriched_and_single(self):
+        as_of = "2026-08-27 00:00:00"
+        before = get_decision_by_ticker_and_as_of("MSFT", as_of)
+        decision = orchestrate_score("MSFT", "2026-08-27")
+        after = get_decision_by_ticker_and_as_of("MSFT", as_of)
+        self.assertEqual(len(after) - len(before), 1)  # the probe run must not double-write
+        event = after[-1]
+        self.assertEqual(event["schema_version"], "audit-event-v2")
+        self.assertEqual(event["ensemble_version"], "ensemble-v1")
+        self.assertEqual(len(event["model_versions"]), 6)
+        self.assertEqual(event["model_versions"]["risk_management"], "risk-policy-v2")
+        self.assertEqual(event["model_versions"]["performance_auditor"], "audit-policy-v1")
+        self.assertEqual(len(event["agent_statuses"]), 6)
+        self.assertEqual(len(event["confidence_breakdown_digest"]), 64)
+        self.assertIn("risk_management", event["veto"])
+        self.assertIn("performance_auditor", event["veto"])
+
+    def test_get_events_since_cursor_returns_suffix(self):
+        persist_decision_audit({
+            "ticker": "AAPL", "as_of": "2024-02-01 00:00:00", "mode": "ANALYSIS_ONLY",
+            "action": "ANALYSIS_ONLY", "score": 5.0, "confidence": 0.5,
+            "replay_hash": "since-marker-1",
+        })
+        marker = get_decision_by_replay_hash("since-marker-1")[0]
+        persist_decision_audit({
+            "ticker": "AAPL", "as_of": "2024-02-02 00:00:00", "mode": "ANALYSIS_ONLY",
+            "action": "ANALYSIS_ONLY", "score": 5.1, "confidence": 0.5,
+            "replay_hash": "since-marker-2",
+        })
+        suffix = get_events_since(marker["event_id"])
+        self.assertTrue(suffix)
+        self.assertNotIn(marker["event_id"], [event["event_id"] for event in suffix])
+        self.assertIn("since-marker-2", [event.get("replay_hash") for event in suffix])
+        self.assertEqual(get_events_since("unknown-cursor"), get_events_since(None))
 
 
 if __name__ == "__main__":

@@ -1,31 +1,26 @@
 from __future__ import annotations
 
-from core.config import NEWS_CONTRACT_VERSION
-from core.schemas import NewsSnapshot
+from core.news_adapter import build_news_snapshot
 
 
 def fetch_news_snapshot(ticker: str, as_of: str) -> dict:
     """Return the point-in-time news/sentiment contract for a ticker.
 
-    No verified news provider is connected yet, so this always returns an
-    explicit UNAVAILABLE contract with a null sentiment score. It must
-    never derive a sentiment value from price, RSI, volume, or any other
-    technical indicator — that would present fabricated data as if it
-    were real news coverage. Once a real provider (e.g. a licensed news
-    or filings feed) is wired in, this function is the single place that
-    changes: callers already treat `status` as the source of truth and
-    apply zero weight to the score while it reads UNAVAILABLE.
+    Thin, stable entry point over `core.news_adapter.build_news_snapshot`
+    (Sprint N1). Callers treat `status` as the source of truth:
+
+    - UNAVAILABLE: no provider key configured (byte-for-byte the legacy
+      placeholder), the provider request failed, or it returned no
+      articles. Sentiment is never derived from price, RSI, volume, or any
+      other technical indicator — that would present fabricated data as if
+      it were real news coverage.
+    - OK: verified articles were ingested, PIT-filtered, entity-resolved,
+      classified, weighted, and aggregated inside the point-in-time window.
+    - CONTRADICTORY: credible same-day, same-category articles disagree
+      beyond tolerance — surfaced explicitly, never averaged to neutral.
+    - INVALID: the provider payload violated the timestamp policy
+      (future-dated or unparseable publication times).
+    - INCOMPLETE: articles exist but none are credible and on-entity
+      enough to aggregate.
     """
-    return NewsSnapshot(
-        ticker=ticker.upper(),
-        as_of=str(as_of),
-        status="UNAVAILABLE",
-        source_id="news_provider_unconfigured",
-        source_confidence=0.0,
-        published_time=None,
-        calculation_version=NEWS_CONTRACT_VERSION,
-        lookback_period="N/A",
-        sentiment_score=None,
-        articles=[],
-        reason="No verified news provider is connected. Sentiment is not inferred from price or technical indicators.",
-    ).to_dict()
+    return build_news_snapshot(ticker, as_of)

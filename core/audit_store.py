@@ -6,8 +6,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from core.audit_policy import stable_hash
 
 AUDIT_LOG_PATH = Path(__file__).resolve().parent.parent / "data" / "decision_audit.jsonl"
+AUDIT_SCHEMA_VERSION = "audit-event-v2"
 
 
 def _read_audit_events() -> list[dict[str, Any]]:
@@ -32,6 +34,7 @@ def persist_decision_audit(decision: dict[str, Any]) -> dict[str, Any]:
     event = {
         "event_id": uuid.uuid4().hex,
         "event_type": "score_decision",
+        "schema_version": AUDIT_SCHEMA_VERSION,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "ticker": str(decision.get("ticker", "UNKNOWN")).upper(),
         "as_of": str(decision.get("as_of", "")),
@@ -41,6 +44,15 @@ def persist_decision_audit(decision: dict[str, Any]) -> dict[str, Any]:
         "confidence": float(decision.get("confidence", 0.0) or 0.0),
         "replay_hash": str(decision.get("replay_hash") or decision.get("replay_metadata", {}).get("replay_hash", "")),
         "source_quality": decision.get("source_quality") or {},
+        "ensemble_version": str(decision.get("ensemble_version", "") or ""),
+        "model_versions": dict(decision.get("model_versions") or {}),
+        "agent_statuses": dict(decision.get("agent_statuses") or {}),
+        "veto": dict(decision.get("veto") or {}),
+        "confidence_breakdown_digest": (
+            stable_hash(decision["confidence_breakdown"])
+            if decision.get("confidence_breakdown") is not None
+            else ""
+        ),
         "event_payload": {
             "ticker": str(decision.get("ticker", "UNKNOWN")).upper(),
             "as_of": str(decision.get("as_of", "")),
@@ -60,6 +72,21 @@ def get_audit_events(limit: int | None = None) -> list[dict[str, Any]]:
     events = _read_audit_events()
     if limit is not None:
         return events[-limit:]
+    return events
+
+
+def get_events_since(cursor: str | None = None) -> list[dict[str, Any]]:
+    """Return events strictly after `cursor` (an event_id) in file order.
+
+    A None or unknown cursor returns the full history — the log is
+    append-only, so this is a cheap suffix scan and feeds the timeline API.
+    """
+    events = _read_audit_events()
+    if not cursor:
+        return events
+    for index, event in enumerate(events):
+        if event.get("event_id") == cursor:
+            return events[index + 1:]
     return events
 
 
