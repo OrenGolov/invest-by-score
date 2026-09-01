@@ -190,6 +190,81 @@ class NewsSnapshot:
 
 
 @dataclass
+class SentimentSnapshot:
+    """Point-in-time social/positioning sentiment contract (N2 placeholder).
+
+    Distinct from news tone: this agent is meant to consume retail and
+    institutional positioning signals — social volume, tone trend,
+    disagreement, and manipulation flags. Until a legitimate provider
+    exists, every field stays in an explicit UNAVAILABLE state.
+
+    Anti-proxying rule (Sprint N2): sentiment is never inferred from RSI,
+    price direction, technical indicators, or the news score. `derivation`
+    records the provenance: `"none"` while no value exists, `"provider"`
+    once a legitimate provider connects, and `"derived_from_news"` — with
+    confidence scaled by 0.5 relative to the news evidence consumed — for
+    any explicitly designed news-derived feature. Silent proxying is
+    prohibited; the contract test pins this shape.
+    """
+
+    ticker: str
+    as_of: str
+    status: str
+    source_id: str
+    source_confidence: float
+    published_time: str | None
+    calculation_version: str
+    lookback_period: str
+    sentiment_score: float | None = None
+    derivation: str = "none"
+    intended_inputs: list[str] = field(
+        default_factory=lambda: ["social_volume", "tone_trend", "disagreement", "manipulation_flags"],
+    )
+    reason: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class MacroSnapshot:
+    """Point-in-time macroeconomic context (N3) — vintage-aware, PIT-filtered.
+
+    Economic data is published with a lag (CPI ~month+12d, GDP ~month+30d).
+    This snapshot captures the latest available release for each series
+    *at the decision point* (as_of), never the reference period end.
+    Revisions append as new records in raw_store (W6).
+
+    Every series carries provenance: source record ids, publication timestamp,
+    and status (OK, UNAVAILABLE, or a specific reason for missing data).
+    Missing series degrades confidence via MACRO_MISSING_SERIES_PENALTY,
+    never silently zero-fills to neutral.
+
+    Sector loadings (static GICS mappings per N3) show macro factor exposures
+    for risk-on/off scenario attribution. Per-series contributions track which
+    releases drove the regime classification.
+    """
+
+    ticker: str
+    as_of: str
+    status: str
+    source_id: str
+    source_confidence: float
+    published_time: str | None
+    calculation_version: str
+    regime: str  # "risk_on" | "neutral" | "risk_off"
+    regime_score: float  # [0, 1]: 0 = risk-off, 0.5 = neutral, 1.0 = risk-on
+    series_values: dict[str, float] = field(default_factory=dict)  # logical_id -> value
+    series_credibility: dict[str, dict] = field(default_factory=dict)  # logical_id -> {status, details}
+    sector_loadings: dict[str, float] = field(default_factory=dict)  # "rates" | "energy" | "usd" -> sensitivity
+    per_series_contributions: list[dict] = field(default_factory=list)  # [{series_id, value, credibility, source_record_ids}, ...]
+    reason: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class VetoRecord:
     agent: str
     status: str
@@ -252,6 +327,7 @@ class ScoreResult:
     source_quality: dict[str, object] = field(default_factory=dict)
     replay_metadata: dict[str, object] = field(default_factory=dict)
     news_snapshot: dict[str, object] = field(default_factory=dict)
+    sentiment_snapshot: dict[str, object] = field(default_factory=dict)
     confidence_breakdown: dict[str, object] = field(default_factory=dict)
     ensemble_breakdown: dict[str, object] = field(default_factory=dict)
 
