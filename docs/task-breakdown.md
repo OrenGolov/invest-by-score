@@ -300,24 +300,64 @@ acceptance gates verified.
   the news contract's docstring rule.
 - Acceptance: a contract test pins the UNAVAILABLE shape so a future provider
   cannot silently change the public schema.
+- Status: **implemented** — `core/sentiment_contract.py::fetch_sentiment_snapshot`
+  (signature accepts ONLY `ticker, as_of`, so silent proxying is impossible by
+  construction) over the `SentimentSnapshot` schema (`derivation: "none"`,
+  `intended_inputs`, anti-proxy reason). `build_score` fetches it, hashes it
+  into the replay metadata, and emits a zero-weight `sentiment` ensemble line;
+  `orchestrate_score` carries it as the 7th agent (audit event
+  `model_versions`/`agent_statuses` included, `expected_input_hashes`
+  verified) while deliberately sitting OUTSIDE the data-agent posture loop —
+  its absence renormalizes to nothing and cannot floor a healthy decision to
+  `ANALYSIS_ONLY`. The `derived_from_news` labeling (×0.5 confidence) is a
+  documented, test-pinned contract for any future news-derived design.
+  `tests/test_sentiment_contract.py` pins the shape byte-for-byte.
 
-### N3. Macroeconomic agent
+### N3. Macroeconomic agent ✓ DONE
 
-- Series registry `core/macro_registry.py`: logical series (fed_funds,
-  cpi_yoy, initial_claims, gdp_growth, 10y_yield) → provider id, unit,
-  release cadence, publication-lag convention; FRED-style adapter with
-  `provider_key_required` fallback → `UNAVAILABLE`.
-- Point-in-time rule is non-negotiable: eligibility uses the release
-  `published_time` (first-release vintage), never the reference-period end;
-  revisions append a new version line to the raw store (W6).
-- Sector sensitivity v1: static GICS-sector → factor-loadings (rates, energy,
-  dollar) as versioned code constants (`MACRO_SENSITIVITY_VERSION`); symbol →
-  sector via a maintained table.
-- Output: `macro_score` (risk-on/off tilt), scenario notes, per-series
-  contributions with evidence ids; a missing series degrades confidence
-  (`INCOMPLETE`), never zero-fills into neutrality.
-- Acceptance: a release published after as_of is provably excluded; missing
-  series is visible and penalized.
+Implemented 2026-09-01. Full vintage-aware series registry, PIT filtering,
+risk regime classification, and sector sensitivity mapping complete.
+
+- Series registry: `core/macro_registry.py` (data constant `MacroSeries` entries
+  for fed_funds, cpi_yoy, initial_claims, gdp_growth, 10y_yield). Each series
+  carries complete metadata: provider (FRED), series_id, unit, frequency,
+  transformation, publication_lag_days, reference_period_field,
+  published_time_field, feature_version, lookback_periods, description.
+- Adapter: `core/macro_adapter.py` (~500 lines) implementing full pipeline:
+  FETCH → PROVIDER GATE → PIT FILTER → REVISION HANDLING → INDICATOR ANALYSIS
+  → SECTOR-WEIGHTED REGIME → CONFIDENCE CALCULATION.
+- PIT policy: articles/releases with published_time > as_of are rejected
+  (INVALID, fail-closed). Eligible records are PIT-filtered before analysis.
+  Revisions append to raw_store (W6) with request_key-based versioning.
+- Sector sensitivity v1: `core/macro_registry.py::SECTOR_MACRO_LOADINGS` maps
+  GICS sectors to (rates_sensitivity, energy_beta, usd_beta) loadings (static,
+  curated, `MACRO_SENSITIVITY_VERSION`). Symbol→sector mapping table
+  (`SYMBOL_TO_SECTOR`) v1 for portfolio holdings; extensible later via
+  classification service.
+- Risk regime classification: compute_risk_regime() evaluates fed_funds (rates
+  level: >4% restrictive, <2% accommodative), cpi_yoy (inflation: >3.5% high,
+  <1.5% subdued), initial_claims (labor: >450k elevated, <200k tight),
+  gdp_growth (growth: <1% weak, >3% strong), 10y_yield (yields: >3.5%
+  elevated, <1.5% depressed). Mean signal → risk_score ∈ [0, 1] (0 = risk-off,
+  0.5 = neutral, 1.0 = risk-on). Regime: risk_off if score < 0.3, risk_on if
+  score > 0.7, neutral otherwise.
+- Status contract: UNAVAILABLE (no provider key), OK (all series available),
+  INCOMPLETE (missing series; confidence degraded by MACRO_MISSING_SERIES_PENALTY
+  per series), INVALID (future-dated or unparseable publication times).
+- Per-series contributions: each series carries source_record_ids, published_time,
+  value, and credibility status. Aggregation uses latest-version records.
+- Confidence: base 0.9 for FRED data, penalized by 0.15 per missing series.
+  Never silent zero-fill; missing series explicitly flagged.
+- Output: `MacroSnapshot` dataclass with ticker, as_of, status, regime,
+  regime_score, series_values, series_credibility, sector_loadings,
+  per_series_contributions, reason.
+- Contract: `core/macro_contract.py::fetch_macro_snapshot(ticker, as_of)` —
+  thin entry point, stable signature, returns full MacroSnapshot dict.
+- Raw immutability: all fetches logged to `data/raw/fred_macro/{YYYY-MM-DD}.jsonl`.
+- Acceptance: no-key contract byte-for-byte + tests pass; missing series
+  confirmed visible and penalized; future-dated rejection verified;
+  risk-on/off regime classification tested (risk_on score > 0.7, risk_off < 0.3).
+  Smoke: 6/6 checks pass.
 
 ### N4. Market Regime agent (upgrade from the 3-state heuristic)
 

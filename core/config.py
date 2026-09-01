@@ -9,6 +9,7 @@ MARKET_FEATURE_VERSION = "market-feature-v1"
 CURRENT_SCORE_VERSION = "current-score-v3"
 LONG_TERM_SCORE_VERSION = "long-term-score-v2"
 NEWS_CONTRACT_VERSION = "news-contract-v1"
+SENTIMENT_CONTRACT_VERSION = "sentiment-contract-v1"
 
 # --- Ensemble wiring (W1) ------------------------------------------------------
 # The published score is the weighted product of agent contributions, not an
@@ -225,3 +226,32 @@ NEWS_MAX_ARTICLES = 50
 # base + span * sentiment, i.e. a 0-10 score like every other agent line.
 NEWS_SCORE_BASE = 5.0
 NEWS_SCORE_SPAN = 5.0
+
+# --- Macroeconomic agent (N3) ---------------------------------------------------
+# Vintage-aware economic data with PIT filtering by published_time (first-release
+# semantics). Every series carries provenance: source, publication lag, frequency,
+# transformation, and sector-specific sensitivities. Missing series degrades
+# confidence (INCOMPLETE), never silently zero-fills. Revisions append to
+# raw_store (W6); eligibility gates on published_time <= as_of.
+
+MACRO_CONTRACT_VERSION = "macro-contract-v1"
+MACRO_ADAPTER_VERSION = "macro-adapter-v1"
+
+# Provider configuration (FRED as v1; BLS/CENSUS extensible but not in v1).
+MACRO_PROVIDER_API_KEY_ENV = "FRED_API_KEY"
+MACRO_PROVIDER_TIMEOUT_SECONDS = 10.0
+
+# Fetch parameters: how far back to fetch (enough history for trend/shock detection).
+# FRED returns all available history; we cache and use the last N periods.
+MACRO_LOOKBACK_PERIODS = 120  # ~10 years of monthly (or equivalent weekly/daily)
+
+# Confidence degradation for missing or INCOMPLETE series.
+MACRO_MISSING_SERIES_PENALTY = 0.15
+
+# Macro score range and centering (risk-on/off tilt, 0-10 scale).
+MACRO_SCORE_BASE = 5.0
+MACRO_SCORE_SPAN = 5.0
+
+# Risk-on/off regime thresholds (0.5 = neutral, >0.5 = risk-on tilt).
+MACRO_RISKOFF_THRESHOLD = 0.3
+MACRO_RISKON_THRESHOLD = 0.7
