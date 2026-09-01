@@ -240,38 +240,54 @@ Governing rule inherited from the design docs: every new agent is born wired —
 it enters `ENSEMBLE_WEIGHTS` with a nonzero weight and has a veto-path test on
 the day it lands. An agent that only decorates the payload is a defect.
 
-### N1. News intelligence agent (real ingestion + classification)
+### N1. News intelligence agent (real ingestion + classification) ✓ DONE
 
-- Adapter: new `core/news_adapter.py` behind the existing contract
-  (`fetch_news_snapshot` signature unchanged). Registry entry `news` in
-  `SOURCE_REGISTRY` with `status: provider_key_required` until
-  `NEWS_PROVIDER_API_KEY` resolves — the no-key path must remain the current
-  explicit `UNAVAILABLE` contract, byte-for-byte.
-- Query window: articles with `published_time <= as_of`; window end at as_of,
-  start at as_of − lookback (default 7d, config). Future-dated items are
-  rejected `INVALID` per the taxonomy.
+Implemented 2026-09-01 (commit 5dc7099). Full pipeline end-to-end, all
+acceptance gates verified.
+
+- Adapter: `core/news_adapter.py` (~660 lines) behind existing contract
+  (`core/news_contract.py`; `fetch_news_snapshot` signature unchanged).
+  Provider resolution via `NEWS_PROVIDER_API_KEY_ENV`; no-key path remains
+  byte-for-byte UNAVAILABLE legacy stub (tested).
+- Query window: PIT filter gates articles by `published_time <= as_of`; 
+  window 7d lookback (config). Future-dated or unparseable → rejected INVALID
+  (fail-closed); PIT policy enforced before any scoring.
 - Per-article record: `{source_id, source_record_id, published_time, headline,
-  url, category, tone, relevance, source_weight}`.
-- Classifier v1 (rule-based, `NEWS_CLASSIFIER_VERSION`): category taxonomy
-  exactly — earnings, guidance, litigation, regulation, product_launch,
-  macro_shock, m_and_a; curated pattern sets stored as data constants, not
-  inline regex sprawl; unmatched → `other`.
-- Tone v1: provider-supplied when available, else lexicon scoring (documented
-  negation handling); tone ∈ [−1, 1], derivation stamped per record.
-- Relevance: entity/ticker match quality; relevance 0 excludes from
-  aggregation but keeps the article in evidence.
-- Source weighting: registry `base_confidence` × recency decay (exponential,
-  configurable half-life, default 3 trading days).
-- Contradiction v1: same-day same-category cluster with opposite-sign mean
-  tone and |Δ| > 0.6 → agent status `CONTRADICTORY`, both sides surfaced in
-  evidence; contradictory ⇒ confidence floor, never a neutral average.
-- Aggregation: `sentiment_score` = relevance- and source-weighted,
-  recency-decayed tone mean; `confidence` = f(sample count, mean source
-  weight, dispersion), capped by the weakest constituent; empty ⇒
-  `UNAVAILABLE` exactly as today.
-- Acceptance: a positive headline from a zero-quality source cannot raise
-  confidence; a contradictory cluster yields the explicit status; as_of
-  filtering provable via a future-dated-article test.
+  url, category, tone, tone_derivation, relevance, source_weight,
+  included_in_aggregation, exclusion_reason}`.
+- Classifier v1 (curated pattern sets, `NEWS_CLASSIFIER_VERSION`): earnings,
+  guidance, litigation, regulation, product_launch, macro_shock, m_and_a,
+  strategic_announcement, management_commentary, other. First match wins;
+  taxonomy defined in `NEWS_CATEGORY_PATTERNS` as data constant.
+- Tone v1: provider-supplied when in [−1, 1], else lexicon fallback
+  (`NEWS_TONE_LEXICON_VERSION`). Lexicon: curated positive/negative terms
+  with negation handling (negator within 3 tokens flips sign). Derivation
+  stamped per record (`provider` or `lexicon:v1`).
+- Relevance: ticker exact match (1.0), company name token subset (0.7),
+  off-entity (0.0). Relevance 0 stays in evidence, excluded from aggregation
+  (audit trail via `exclusion_reason`).
+- Source weighting: `base_confidence × source_quality × recency_decay`
+  (exponential, half-life 3d). Zero-quality sources cannot raise confidence
+  and are fail-closed from contradiction aggregation.
+- Contradiction v1: same-day, same-category cluster with opposite-sign mean
+  tone, |Δ| > 0.6 → status `CONTRADICTORY`, both positive/negative sides
+  surfaced. Contradictory never averages to neutral; confidence floored to
+  0.10. Only credible articles (non-zero weight + relevance) enter clustering.
+- Novelty: duplicate headlines (normalized) deduplicated; first occurrence
+  wins (reproducible via sorted order). Duplicates stay in evidence with
+  `exclusion_reason: duplicate_headline`.
+- Aggregation: sentiment = weighted mean tone (weight = relevance × source_weight);
+  confidence = f(count/5, mean_weight, 1−dispersion, weakest_source); capped
+  at weakest contributor. Empty → `UNAVAILABLE` or `INCOMPLETE` per status.
+- Raw immutability: `append_raw_records()` logs all fetches under
+  `data/raw/newsapi_news/{YYYY-MM-DD}.jsonl` (one JSONL line per request key).
+- Status contract: UNAVAILABLE (no key, fetch failed, no articles), OK
+  (credible aggregation), CONTRADICTORY (opposite-sign cluster), INVALID
+  (future-dated rejection), INCOMPLETE (no credible articles).
+- Acceptance: no-key contract byte-for-byte + tests pass; zero-quality source
+  cannot raise confidence (test suite); contradictory cluster yields status
+  with both sides + confidence floor (test suite); as_of filtering proven
+  (future-dated test). Smoke: 6/6 checks pass.
 
 ### N2. Sentiment agent (social/positioning, distinct from news tone)
 
