@@ -30,13 +30,20 @@ from core.config import (
     FUNDAMENTAL_SOURCE_PENALTY,
     GOVERNANCE_RISK_GATE_PENALTY,
     LONG_TERM_SCORE_VERSION,
+    MACRO_SCORE_BASE,
+    MACRO_SCORE_SPAN,
     MAX_SCORE,
     NEWS_LOOKBACK_DAYS,
     NEWS_SCORE_BASE,
     NEWS_SCORE_SPAN,
+    REGIME_RISKOFF_LABEL,
+    REGIME_RISKOFF_MOMENTUM_DAMPING,
     RISK_FLAG_CONFIDENCE_PENALTIES,
 )
 from core.news_contract import fetch_news_snapshot
+from core.sentiment_contract import fetch_sentiment_snapshot
+from core.macro_contract import fetch_macro_snapshot
+from core.regime_contract import fetch_regime_snapshot
 from core.schemas import ScoreResult
 from fetch_data import fetch_fundamental_snapshot
 
@@ -197,7 +204,7 @@ def _build_insights(snapshot: dict, score: float, news_snapshot: dict) -> dict:
     }
 
 
-def _score_current_time(snapshot: dict) -> float:
+def _score_current_time(snapshot: dict, momentum_damping: float = 1.0) -> float:
     """Near-term/tactical score.
 
     Feature group: 1d/5d/20d movement, RSI, volume, and the 50d/100d moving
@@ -205,7 +212,19 @@ def _score_current_time(snapshot: dict) -> float:
     longer-horizon return so this score cannot become an alias of
     `_score_long_term`, which draws from a disjoint feature set. News is NOT
     in this group since N1: it enters through its own ensemble line.
+
+    `momentum_damping` (N4): multiplies the momentum-return coefficients
+    (1d/5d/20d momentum and trend_vs_20d_mean) when the governed regime is
+    risk_off — REGIME_RISKOFF_MOMENTUM_DAMPING from core/config.py; 1.0
+    keeps the canonical weights. RSI, MA distances, and volume confirmation
+    are level/oscillator/confirmation measures, not trailing-return
+    momentum, and are never dampened. The scoring breakdown mirrors exactly
+    this scaling so the explanation cannot contradict the number.
     """
+    if isinstance(momentum_damping, bool) or not isinstance(momentum_damping, (int, float)):
+        raise TypeError("momentum_damping must be a real number")
+    damping = float(momentum_damping)
+
     close = float(snapshot.get("close", 0.0))
     change_1d = float(snapshot.get("change_1d", 0.0))
     change_5d = float(snapshot.get("change_5d", 0.0))
@@ -218,13 +237,13 @@ def _score_current_time(snapshot: dict) -> float:
     ma_100 = float(snapshot.get("moving_averages", {}).get("100d", 0.0))
 
     score = 4.0
-    score += max(-1.7, min(1.7, change_1d * 42.0))
-    score += max(-1.4, min(1.4, change_5d * 18.0))
+    score += max(-1.7, min(1.7, change_1d * 42.0 * damping))
+    score += max(-1.4, min(1.4, change_5d * 18.0 * damping))
     # Momentum gets headroom relative to the static MA-distance terms below
     # so a genuine recovery can lift this score instead of being pinned to
     # the floor by older drawdown features.
-    score += max(-2.0, min(2.0, change_20d * 12.0))
-    score += max(-1.4, min(1.4, trend_vs_20d_mean * 18.0))
+    score += max(-2.0, min(2.0, change_20d * 12.0 * damping))
+    score += max(-1.4, min(1.4, trend_vs_20d_mean * 18.0 * damping))
     # One primary near-term distance measure only. The previous version also
     # added price-versus-MA100 and the MA50/MA100 cross at full strength;
     # those re-counted the same drawdown information and triple-punished
@@ -272,14 +291,23 @@ def _score_long_term(snapshot: dict) -> float:
     return round(max(0.0, min(MAX_SCORE, score)), 2)
 
 
-def _build_scoring_breakdown(snapshot: dict, score: float, current_time_score: float, long_term_score: float) -> dict:
+def _build_scoring_breakdown(
+    snapshot: dict,
+    score: float,
+    current_time_score: float,
+    long_term_score: float,
+    momentum_damping: float = 1.0,
+) -> dict:
     """Mirror of the live scoring formulas for dashboard explanation.
 
     Every entry uses the same coefficient and clip as the expression that
     produced the headline score, so the explanation panel can never
     contradict it. Collinear terms retired from the scorers are absent here
-    as well, so no fact is displayed (or counted) twice.
+    as well, so no fact is displayed (or counted) twice. `momentum_damping`
+    (N4) mirrors the risk_off momentum scaling applied by
+    `_score_current_time` — same factor, same terms, same order.
     """
+    damping = float(momentum_damping)
     rsi = float(snapshot.get("rsi", 50.0))
     volume_ratio = float(snapshot.get("volume_ratio_20d", 1.0))
     moving_averages = snapshot.get("moving_averages", {})
@@ -287,10 +315,10 @@ def _build_scoring_breakdown(snapshot: dict, score: float, current_time_score: f
     ma_100 = float(moving_averages.get("100d", 0.0))
 
     current_terms = {
-        "momentum_1d": max(-1.7, min(1.7, float(snapshot.get("change_1d", 0.0)) * 42.0)),
-        "momentum_5d": max(-1.4, min(1.4, float(snapshot.get("change_5d", 0.0)) * 18.0)),
-        "momentum_20d": max(-2.0, min(2.0, float(snapshot.get("change_20d", 0.0)) * 12.0)),
-        "trend_vs_20d_mean": max(-1.4, min(1.4, float(snapshot.get("trend_vs_20d_mean", 0.0)) * 18.0)),
+        "momentum_1d": max(-1.7, min(1.7, float(snapshot.get("change_1d", 0.0)) * 42.0 * damping)),
+        "momentum_5d": max(-1.4, min(1.4, float(snapshot.get("change_5d", 0.0)) * 18.0 * damping)),
+        "momentum_20d": max(-2.0, min(2.0, float(snapshot.get("change_20d", 0.0)) * 12.0 * damping)),
+        "trend_vs_20d_mean": max(-1.4, min(1.4, float(snapshot.get("trend_vs_20d_mean", 0.0)) * 18.0 * damping)),
         "price_vs_50d_ma": max(-1.8, min(1.8, float(snapshot.get("price_vs_ma_50", 0.0)) * 30.0)),
         "ma_50_100_alignment": (
             max(-0.55, min(0.55, ((ma_50 - ma_100) / ma_100) * 22.0)) if ma_50 and ma_100 else 0.0
@@ -310,6 +338,7 @@ def _build_scoring_breakdown(snapshot: dict, score: float, current_time_score: f
         "long_term_score": round(long_term_score, 2),
         "current_score_version": CURRENT_SCORE_VERSION,
         "long_term_score_version": LONG_TERM_SCORE_VERSION,
+        "regime_momentum_damping": round(damping, 4),
         "weighted_contributions": {name: round(value, 2) for name, value in {**current_terms, **long_terms}.items()},
         "current_time_breakdown": {name: round(value, 2) for name, value in current_terms.items()},
         "long_term_breakdown": {name: round(value, 2) for name, value in long_terms.items()},
@@ -319,7 +348,15 @@ def _build_scoring_breakdown(snapshot: dict, score: float, current_time_score: f
             "Collinear duplicates (price-vs-MA100 at full strength, the MA150/MA200 cross) no longer double-count the same drawdown fact.",
             "News enters only through the dedicated news_intelligence ensemble line when a verified provider is connected; it is never inferred from price.",
             "Business quality enters the headline through horizon-specific ensemble weights (see ensemble_breakdown), not an ad-hoc term.",
-        ],
+        ]
+        + (
+            [
+                "Risk-off regime (N4): the momentum-return coefficients are dampened by "
+                f"{round(damping, 4)} while the market regime stays risk_off; RSI, MA distances, and volume confirmation are not dampened."
+            ]
+            if damping != 1.0
+            else []
+        ),
         "historical_comparison": "Near-term momentum (1-20d, MA50) and structural trend (60d, MA150) draw from disjoint feature sets; overlapping legacy terms were retired so each fact is counted once.",
     }
 
@@ -775,13 +812,27 @@ def _ensemble_blend(
     return current_score, long_score, breakdown
 
 
-def _build_replay_metadata(ticker: str, as_of: str, snapshot: dict, fundamental_snapshot: dict, news_snapshot: dict, score: float, confidence: float) -> dict:
+def _build_replay_metadata(
+    ticker: str,
+    as_of: str,
+    snapshot: dict,
+    fundamental_snapshot: dict,
+    news_snapshot: dict,
+    sentiment_snapshot: dict,
+    macro_snapshot: dict,
+    regime_snapshot: dict,
+    score: float,
+    confidence: float,
+) -> dict:
     payload = {
         "ticker": ticker.upper(),
         "as_of": as_of,
         "market_snapshot_hash": hashlib.sha256(json.dumps(snapshot, sort_keys=True, default=str).encode("utf-8")).hexdigest(),
         "fundamental_snapshot_hash": hashlib.sha256(json.dumps(fundamental_snapshot, sort_keys=True, default=str).encode("utf-8")).hexdigest(),
         "news_snapshot_hash": hashlib.sha256(json.dumps(news_snapshot, sort_keys=True, default=str).encode("utf-8")).hexdigest(),
+        "sentiment_snapshot_hash": hashlib.sha256(json.dumps(sentiment_snapshot, sort_keys=True, default=str).encode("utf-8")).hexdigest(),
+        "macro_snapshot_hash": hashlib.sha256(json.dumps(macro_snapshot, sort_keys=True, default=str).encode("utf-8")).hexdigest(),
+        "regime_snapshot_hash": hashlib.sha256(json.dumps(regime_snapshot, sort_keys=True, default=str).encode("utf-8")).hexdigest(),
         "score": round(float(score), 2),
         "confidence": round(float(confidence), 4),
         "deterministic": True,
@@ -791,11 +842,17 @@ def _build_replay_metadata(ticker: str, as_of: str, snapshot: dict, fundamental_
         "snapshot_hash": payload["market_snapshot_hash"],
         "fundamental_snapshot_hash": payload["fundamental_snapshot_hash"],
         "news_snapshot_hash": payload["news_snapshot_hash"],
+        "sentiment_snapshot_hash": payload["sentiment_snapshot_hash"],
+        "macro_snapshot_hash": payload["macro_snapshot_hash"],
+        "regime_snapshot_hash": payload["regime_snapshot_hash"],
         "deterministic": True,
         "source_record_ids": [
             str(snapshot.get("source_contract", {}).get("source_id", "market_data")),
             str((fundamental_snapshot or {}).get("source_contract", {}).get("source_id", "fundamentals")),
             str(news_snapshot.get("source_id", "news_provider_unconfigured")),
+            str(sentiment_snapshot.get("source_id", "sentiment_provider_unconfigured")),
+            str(macro_snapshot.get("source_id", "macro_provider_unconfigured")),
+            str(regime_snapshot.get("source_id", "regime_source_unavailable")),
         ],
     }
 
@@ -810,7 +867,18 @@ def build_score(ticker: str, as_of: str, timestamp: str | None = None, persist_a
     snapshot = fetch_market_snapshot(ticker, as_of, timestamp)
     fundamental_snapshot = fetch_fundamental_snapshot(ticker, as_of)
     news_snapshot = fetch_news_snapshot(ticker, snapshot["as_of"])
-    technical_current_view = _score_current_time(snapshot)
+    sentiment_snapshot = fetch_sentiment_snapshot(ticker, snapshot["as_of"])
+    macro_snapshot = fetch_macro_snapshot(ticker, snapshot["as_of"])
+    regime_snapshot = fetch_regime_snapshot(ticker, snapshot["as_of"])
+    # N4 governance coupling: RISK_OFF dampens the momentum-return
+    # coefficients of the current-time technical view; every other regime
+    # leaves the canonical weights untouched. The long-term view is
+    # regime-agnostic in v1 (its volatility drag already discounts risk).
+    regime_label = regime_snapshot.get("regime")
+    momentum_damping = (
+        REGIME_RISKOFF_MOMENTUM_DAMPING if regime_label == REGIME_RISKOFF_LABEL else 1.0
+    )
+    technical_current_view = _score_current_time(snapshot, momentum_damping=momentum_damping)
     technical_long_view = _score_long_term(snapshot)
     fundamental_score = _build_fundamental_score(snapshot, fundamental_snapshot)
 
@@ -822,6 +890,11 @@ def build_score(ticker: str, as_of: str, timestamp: str | None = None, persist_a
     news_score = None
     if news_status == "OK" and news_sentiment is not None:
         news_score = round(NEWS_SCORE_BASE + NEWS_SCORE_SPAN * float(news_sentiment), 4)
+    macro_status = str(macro_snapshot.get("status", "UNAVAILABLE"))
+    macro_regime_score = macro_snapshot.get("regime_score")
+    macro_score = None
+    if macro_status == "OK" and macro_regime_score is not None:
+        macro_score = round(MACRO_SCORE_BASE + MACRO_SCORE_SPAN * float(macro_regime_score), 4)
     contributions = {
         "market_data": {
             "score_current": round(market_quality / 10.0, 4),
@@ -847,9 +920,24 @@ def build_score(ticker: str, as_of: str, timestamp: str | None = None, persist_a
             "status": news_status,
             "note": "N1 dedicated weight, tactical-only; CONTRADICTORY/INVALID propagate as the agent status",
         },
-        "sentiment": {"score_current": None, "score_long": None, "status": "UNAVAILABLE", "note": "not implemented"},
-        "macroeconomic": {"score_current": None, "score_long": None, "status": "UNAVAILABLE", "note": "not implemented"},
-        "market_regime": {"score_current": None, "score_long": None, "status": "UNAVAILABLE", "note": "not implemented; regime gates via risk policy"},
+        "sentiment": {
+            "score_current": None,
+            "score_long": None,
+            "status": str(sentiment_snapshot.get("status", "UNAVAILABLE")),
+            "note": "N2 typed placeholder; anti-proxy rule: never inferred from price, technicals, or the news score; weight stays 0.0 until a legitimate provider exists",
+        },
+        "macroeconomic": {
+            "score_current": macro_score,
+            "score_long": macro_score,
+            "status": macro_status,
+            "note": "N3 dedicated weight, both horizons; vintage-aware regime tilt; INCOMPLETE/UNAVAILABLE renormalize",
+        },
+        "market_regime": {
+            "score_current": None,
+            "score_long": None,
+            "status": str(regime_snapshot.get("status", "UNAVAILABLE")),
+            "note": "N4 governance gate: STRESS forces NO_TRADE via the market_regime_stress veto; RISK_OFF dampens momentum coefficients; zero ensemble weight until forecast conditioning lands",
+        },
     }
     current_time_score, long_term_score, ensemble_breakdown = _ensemble_blend(
         contributions, ENSEMBLE_WEIGHTS_CURRENT, ENSEMBLE_WEIGHTS_LONG
@@ -901,6 +989,9 @@ def build_score(ticker: str, as_of: str, timestamp: str | None = None, persist_a
         "price_vs_ma_150": snapshot.get("price_vs_ma_150"),
         "price_vs_ma_200": snapshot.get("price_vs_ma_200"),
         "market_regime": snapshot.get("market_regime"),
+        "governance_regime": regime_snapshot.get("regime"),
+        "governance_regime_status": regime_snapshot.get("status"),
+        "momentum_damping": momentum_damping,
         "trend_vs_20d_mean": snapshot.get("trend_vs_20d_mean"),
         "change_60d": snapshot.get("change_60d"),
     }
@@ -918,7 +1009,9 @@ def build_score(ticker: str, as_of: str, timestamp: str | None = None, persist_a
     latest_financial_report = _build_latest_financial_report(snapshot["as_of"])
     next_expected_report = _build_next_expected_report(snapshot["as_of"])
     insights = _build_insights(snapshot, capped_score, news_snapshot)
-    scoring_breakdown = _build_scoring_breakdown(snapshot, capped_score, current_time_score, long_term_score)
+    scoring_breakdown = _build_scoring_breakdown(
+        snapshot, capped_score, current_time_score, long_term_score, momentum_damping=momentum_damping
+    )
     source_reliability = _build_source_reliability()
     technical_features = _build_technical_features(snapshot)
     feature_metadata = _build_feature_metadata(snapshot, news_snapshot)
@@ -939,7 +1032,7 @@ def build_score(ticker: str, as_of: str, timestamp: str | None = None, persist_a
         "minimum_quality_score": 60.0,
         "provider_resolution": fundamental_snapshot.get("provider_resolution", {}),
     }
-    replay_metadata = _build_replay_metadata(ticker, as_of, snapshot, fundamental_snapshot, news_snapshot, capped_score, confidence)
+    replay_metadata = _build_replay_metadata(ticker, as_of, snapshot, fundamental_snapshot, news_snapshot, sentiment_snapshot, macro_snapshot, regime_snapshot, capped_score, confidence)
 
     result = ScoreResult(
         ticker=snapshot["ticker"],
@@ -974,6 +1067,9 @@ def build_score(ticker: str, as_of: str, timestamp: str | None = None, persist_a
         source_quality=source_quality,
         replay_metadata=replay_metadata,
         news_snapshot=news_snapshot,
+        sentiment_snapshot=sentiment_snapshot,
+        macro_snapshot=macro_snapshot,
+        market_regime_snapshot=regime_snapshot,
     )
 
     if persist_audit:

@@ -265,6 +265,47 @@ class MacroSnapshot:
 
 
 @dataclass
+class RegimeSnapshot:
+    """Versioned five-state market regime classification (Sprint N4).
+
+    `core.regime_agent.build_regime_snapshot` remains the wire format (a
+    plain dict, for JSON serialization). Status semantics:
+
+    - OK: every strict window was populated from eligible PIT bars and the
+      rule chain produced a label from REGIME_LABELS with a probability
+      proxy and trailing transition risk.
+    - INCOMPLETE: eligible history is shorter than the strict windows (30d
+      realized vol, trailing 1y vol percentile, MA200, 60-session drawdown
+      high). `regime` stays None — a partial rule evaluation would make the
+      label depend on data availability rather than the contract.
+    - UNAVAILABLE: the provider fetch failed or returned no eligible bars.
+    - INVALID: the payload violated the schema (missing Close/High columns).
+
+    Governance coupling: STRESS forces NO_TRADE via the W2 veto rule
+    `market_regime_stress`; RISK_OFF dampens momentum coefficients in
+    core/score_engine.py. `regime` is None unless status is OK.
+    """
+
+    ticker: str
+    as_of: str
+    status: str
+    source_id: str
+    source_confidence: float
+    published_time: str | None
+    calculation_version: str
+    lookback_period: str
+    regime: str | None
+    probability_proxy: float | None
+    transition_risk: dict[str, Any] = field(default_factory=dict)
+    inputs: dict[str, Any] = field(default_factory=dict)
+    rule_trace: dict[str, Any] = field(default_factory=dict)
+    reason: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class VetoRecord:
     agent: str
     status: str
@@ -328,6 +369,8 @@ class ScoreResult:
     replay_metadata: dict[str, object] = field(default_factory=dict)
     news_snapshot: dict[str, object] = field(default_factory=dict)
     sentiment_snapshot: dict[str, object] = field(default_factory=dict)
+    macro_snapshot: dict[str, object] = field(default_factory=dict)
+    market_regime_snapshot: dict[str, object] = field(default_factory=dict)
     confidence_breakdown: dict[str, object] = field(default_factory=dict)
     ensemble_breakdown: dict[str, object] = field(default_factory=dict)
 

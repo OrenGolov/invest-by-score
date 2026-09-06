@@ -10,7 +10,7 @@ evaluations, so decisions stay replayable.
 
 from __future__ import annotations
 
-from core.config import RISK_POLICY_VERSION, RISK_POLICY_V2
+from core.config import REGIME_LABELS, REGIME_STRESS_LABEL, RISK_POLICY_VERSION, RISK_POLICY_V2
 
 _SEVERITY_VETO = "veto"
 
@@ -46,7 +46,7 @@ def evaluate_risk_policy(context: dict, policy: dict | None = None) -> dict:
         market_data_quality, market_source_confidence, market_timestamp_valid,
         fundamental_point_in_time_valid, fundamental_source_confidence,
         fundamental_source_status, score, action, confidence,
-        confidence_breakdown
+        confidence_breakdown, market_regime
 
     Returns `{"policy_version", "rules", "veto", "veto_rule_ids",
     "warning_rule_ids"}` where `veto` is True when any veto-severity rule is
@@ -122,6 +122,29 @@ def evaluate_risk_policy(context: dict, policy: dict | None = None) -> dict:
         add("score_below_threshold", True, f"score {score:.2f} < {threshold:.2f}")
     else:
         add("score_below_threshold", False, f"score {score:.2f} >= {threshold:.2f}")
+
+    # market_regime_stress (N4 governance coupling) --------------------------------
+    # STRESS couples to NO_TRADE per governance policy. Fail-closed: a missing
+    # label (regime agent UNAVAILABLE/INCOMPLETE) or a label outside the
+    # versioned five-state set also triggers — a decision without a valid
+    # market-risk context must not trade.
+    regime_label = context.get("market_regime")
+    if regime_label is None:
+        add("market_regime_stress", True, "market regime label missing (fail-closed)")
+    elif str(regime_label) not in REGIME_LABELS:
+        add(
+            "market_regime_stress",
+            True,
+            f"unknown market regime label {str(regime_label)!r} (fail-closed)",
+        )
+    elif str(regime_label) == REGIME_STRESS_LABEL:
+        add(
+            "market_regime_stress",
+            True,
+            "market regime is stress; governance policy couples stress to NO_TRADE",
+        )
+    else:
+        add("market_regime_stress", False, f"market regime is {str(regime_label)}")
 
     # analysis_only_mode ------------------------------------------------------------
     action = context.get("action")

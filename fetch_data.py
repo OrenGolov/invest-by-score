@@ -271,6 +271,15 @@ SOURCE_REGISTRY = {
         "fallback_rank": 1,
         "domain": "news_events",
     },
+    "macro": {
+        "provider": "FRED",
+        "source_type": "macro_observations",
+        "source_id": "fred_macro",
+        "base_confidence": 0.80,
+        "status": "provider_key_required",  # until FRED_API_KEY resolves (Sprint N3)
+        "fallback_rank": 1,
+        "domain": "macro_conditions",
+    },
 }
 
 

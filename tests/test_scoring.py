@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import tempfile
 import unittest
 from pathlib import Path
@@ -454,18 +455,22 @@ class EnsembleBlendTests(unittest.TestCase):
 
     def test_blend_matches_weighted_math(self):
         current, long_term, breakdown = self._blend()
-        self.assertEqual(current, 0.85 * 8.0 + 0.15 * 5.0)
-        self.assertEqual(long_term, 0.75 * 6.0 + 0.25 * 5.0)
+        # N3 weight table: news_intelligence (0.10) and macroeconomic (0.10)
+        # read UNAVAILABLE in the base contributions, so their weights
+        # renormalize across the eligible technical/fundamental lines instead
+        # of counting as silent neutrals.
+        self.assertAlmostEqual(current, (0.70 * 8.0 + 0.10 * 5.0) / 0.80, places=2)
+        self.assertAlmostEqual(long_term, (0.70 * 6.0 + 0.20 * 5.0) / 0.90, places=2)
         self.assertEqual(breakdown["current_time_score"], current)
         self.assertEqual(breakdown["long_term_score"], long_term)
         self.assertFalse(breakdown["no_eligible_agents"])
         technical = breakdown["agents"]["technical_analysis"]
-        self.assertAlmostEqual(technical["effective_weight_current"], 0.85, places=9)
+        self.assertAlmostEqual(technical["effective_weight_current"], 0.70 / 0.80, places=6)
         contributions_sum = (
             technical["contribution_current"]
             + breakdown["agents"]["fundamental_analysis"]["contribution_current"]
         )
-        self.assertAlmostEqual(contributions_sum, current, places=9)
+        self.assertAlmostEqual(contributions_sum, current, places=2)
 
 
     def test_renormalization_when_fundamental_unavailable(self):
@@ -476,7 +481,7 @@ class EnsembleBlendTests(unittest.TestCase):
         self.assertEqual(current, 8.0)
         self.assertEqual(long_term, 6.0)
         fundamental = breakdown["agents"]["fundamental_analysis"]
-        self.assertAlmostEqual(fundamental["raw_weight_current"], 0.15, places=9)
+        self.assertAlmostEqual(fundamental["raw_weight_current"], 0.10, places=9)
         self.assertEqual(fundamental["effective_weight_current"], 0.0)
         self.assertFalse(fundamental["eligible_current"])
         self.assertAlmostEqual(
@@ -505,7 +510,7 @@ class EnsembleBlendTests(unittest.TestCase):
         )
         current, long_term, breakdown = self._blend(contributions)
         self.assertEqual(current, 5.0)  # fundamental alone at effective weight 1.0
-        self.assertEqual(long_term, 0.75 * 6.0 + 0.25 * 5.0)
+        self.assertAlmostEqual(long_term, (0.70 * 6.0 + 0.20 * 5.0) / 0.90, places=2)
         technical = breakdown["agents"]["technical_analysis"]
         self.assertFalse(technical["eligible_current"])
         self.assertTrue(technical["eligible_long"])
@@ -536,7 +541,7 @@ class EnsembleBlendTests(unittest.TestCase):
     def test_build_score_exposes_ensemble_breakdown(self):
         result = build_score("MSFT", "2024-01-02")
         breakdown = result.ensemble_breakdown
-        self.assertEqual(breakdown["calculation_version"], "ensemble-v1")
+        self.assertEqual(breakdown["calculation_version"], "ensemble-v3")
         self.assertFalse(breakdown["no_eligible_agents"])
         self.assertEqual(len(breakdown["agents"]), 7)
         self.assertAlmostEqual(
@@ -577,6 +582,9 @@ class RiskPolicyTests(unittest.TestCase):
             "score": 6.5,
             "action": "PAPER",
             "confidence": 0.8,
+            # N4: the governed regime label is part of the decision context;
+            # a healthy context carries a valid five-state label.
+            "market_regime": "bullish",
             "confidence_breakdown": {
                 "total_penalty": 0.0,
                 "factors": [
@@ -981,22 +989,21 @@ class TechnicalTruthTests(unittest.TestCase):
 
     def test_score_technical_is_canonical_blend(self):
         snapshot = self._snapshot()
-        news = {"status": "UNAVAILABLE"}
-        expected = round((_score_current_time(snapshot, news) + _score_long_term(snapshot)) / 2.0, 2)
-        self.assertEqual(score_technical(snapshot, news), expected)
+        expected = round((_score_current_time(snapshot) + _score_long_term(snapshot)) / 2.0, 2)
+        self.assertEqual(score_technical(snapshot), expected)
 
-    def test_score_technical_defaults_to_unavailable_news(self):
-        snapshot = self._snapshot()
+    def test_technical_view_takes_no_news_input_since_n1(self):
+        # N1: news enters the published score exclusively through its own
+        # ensemble line, so the technical scorers accept only the market
+        # snapshot — the same evidence can never be counted twice.
+        self.assertEqual(list(inspect.signature(score_technical).parameters), ["snapshot"])
+        # N4 adds exactly one parameter to the canonical current-time scorer:
+        # momentum_damping (the risk_off governance coupling). No news or
+        # sentiment input exists.
         self.assertEqual(
-            score_technical(snapshot),
-            score_technical(snapshot, {"status": "UNAVAILABLE"}),
+            list(inspect.signature(_score_current_time).parameters),
+            ["snapshot", "momentum_damping"],
         )
-
-    def test_news_snapshot_flows_through_the_agent_view(self):
-        snapshot = self._snapshot()
-        with_news = score_technical(snapshot, {"status": "OK", "sentiment_score": 1.0})
-        without_news = score_technical(snapshot)
-        self.assertGreater(with_news, without_news)
 
     def test_orchestrator_technical_agent_matches_canonical_blend(self):
         result = build_score("MSFT", "2024-01-02")
@@ -1148,11 +1155,11 @@ class AuditStoreEnrichmentTests(unittest.TestCase):
         self.assertEqual(len(after) - len(before), 1)  # the probe run must not double-write
         event = after[-1]
         self.assertEqual(event["schema_version"], "audit-event-v2")
-        self.assertEqual(event["ensemble_version"], "ensemble-v1")
-        self.assertEqual(len(event["model_versions"]), 6)
+        self.assertEqual(event["ensemble_version"], "ensemble-v3")
+        self.assertEqual(len(event["model_versions"]), 9)
         self.assertEqual(event["model_versions"]["risk_management"], "risk-policy-v2")
         self.assertEqual(event["model_versions"]["performance_auditor"], "audit-policy-v1")
-        self.assertEqual(len(event["agent_statuses"]), 6)
+        self.assertEqual(len(event["agent_statuses"]), 9)
         self.assertEqual(len(event["confidence_breakdown_digest"]), 64)
         self.assertIn("risk_management", event["veto"])
         self.assertIn("performance_auditor", event["veto"])

@@ -7,8 +7,6 @@ from core.news_contract import fetch_news_snapshot
 from core.schemas import MarketSnapshot
 from core.score_engine import _score_current_time, _score_long_term, build_score
 
-NEUTRAL_NEWS = fetch_news_snapshot("TEST", "2024-01-02 00:00:00")
-
 
 def _base_snapshot(**overrides) -> dict:
     snapshot = {
@@ -64,8 +62,8 @@ class FeatureGroupSeparationTests(unittest.TestCase):
             moving_averages={"50d": 100.0, "100d": 100.0, "150d": 140.0, "200d": 70.0},
         )
         self.assertEqual(
-            _score_current_time(_base_snapshot(), NEUTRAL_NEWS),
-            _score_current_time(mutated, NEUTRAL_NEWS),
+            _score_current_time(_base_snapshot()),
+            _score_current_time(mutated),
         )
 
     def test_long_term_score_ignores_current_only_fields(self):
@@ -79,34 +77,34 @@ class FeatureGroupSeparationTests(unittest.TestCase):
 
     def test_scores_are_never_aliases_across_regimes(self):
         for label, snapshot in (("bullish", BULLISH), ("bearish", BEARISH), ("neutral", NEUTRAL)):
-            current = _score_current_time(snapshot, NEUTRAL_NEWS)
+            current = _score_current_time(snapshot)
             long_term = _score_long_term(snapshot)
             self.assertNotEqual(current, long_term, msg=f"{label} case collapsed current/long-term into an alias")
 
     def test_scores_are_not_a_fixed_offset_of_each_other(self):
         diffs = set()
         for snapshot in (BULLISH, BEARISH, NEUTRAL):
-            current = _score_current_time(snapshot, NEUTRAL_NEWS)
+            current = _score_current_time(snapshot)
             long_term = _score_long_term(snapshot)
             diffs.add(round(current - long_term, 4))
         self.assertGreater(len(diffs), 1, "current - long_term was constant across regimes; scores may be a linear alias")
 
     def test_bullish_case_pushes_both_scores_above_neutral_base(self):
-        current = _score_current_time(BULLISH, NEUTRAL_NEWS)
+        current = _score_current_time(BULLISH)
         long_term = _score_long_term(BULLISH)
         self.assertGreater(current, 4.0)
         self.assertGreater(long_term, 4.0)
         self.assertNotEqual(current, long_term)
 
     def test_bearish_case_pushes_both_scores_below_neutral_base(self):
-        current = _score_current_time(BEARISH, NEUTRAL_NEWS)
+        current = _score_current_time(BEARISH)
         long_term = _score_long_term(BEARISH)
         self.assertLess(current, 4.0)
         self.assertLess(long_term, 4.0)
         self.assertNotEqual(current, long_term)
 
     def test_neutral_case_still_diverges_due_to_disjoint_risk_treatment(self):
-        current = _score_current_time(NEUTRAL, NEUTRAL_NEWS)
+        current = _score_current_time(NEUTRAL)
         long_term = _score_long_term(NEUTRAL)
         self.assertNotEqual(current, long_term)
 
@@ -116,7 +114,7 @@ class FeatureGroupSeparationTests(unittest.TestCase):
             rsi=100.0, volume_ratio_20d=10.0, price_vs_ma_50=5.0, price_vs_ma_100=5.0,
             moving_averages={"50d": 600.0, "100d": 100.0, "150d": 100.0, "200d": 100.0},
         )
-        current = _score_current_time(extreme_current_only, NEUTRAL_NEWS)
+        current = _score_current_time(extreme_current_only)
         long_term = _score_long_term(extreme_current_only)
         self.assertEqual(current, MAX_SCORE)
         self.assertLess(long_term, MAX_SCORE - 1.0)
@@ -127,7 +125,7 @@ class FeatureGroupSeparationTests(unittest.TestCase):
             change_60d=5.0, price_vs_ma_150=5.0, price_vs_ma_200=5.0, volatility=0.0,
             moving_averages={"50d": 100.0, "100d": 100.0, "150d": 600.0, "200d": 100.0},
         )
-        current = _score_current_time(extreme_long_term_only, NEUTRAL_NEWS)
+        current = _score_current_time(extreme_long_term_only)
         long_term = _score_long_term(extreme_long_term_only)
         # Ceiling after de-duplication: base 4 + 1.5 (60d momentum) + 2.5
         # (structural distance) - 0 (volatility) = 8.0. The old 10.0 ceiling
@@ -138,7 +136,7 @@ class FeatureGroupSeparationTests(unittest.TestCase):
 
     def test_scores_stay_in_bounds(self):
         for snapshot in (BULLISH, BEARISH, NEUTRAL):
-            current = _score_current_time(snapshot, NEUTRAL_NEWS)
+            current = _score_current_time(snapshot)
             long_term = _score_long_term(snapshot)
             for value in (current, long_term):
                 self.assertGreaterEqual(value, MIN_SCORE)
@@ -166,17 +164,20 @@ class NewsContractTests(unittest.TestCase):
         self.assertEqual(snapshot["source_confidence"], 0.0)
         self.assertIn("source_id", snapshot)
         self.assertIn("calculation_version", snapshot)
+        self.assertNotIn("pipeline", snapshot)
 
     def test_news_contract_is_identical_regardless_of_price_indicators(self):
         first = fetch_news_snapshot("MSFT", "2024-01-02")
         second = fetch_news_snapshot("MSFT", "2024-01-02")
         self.assertEqual(first, second)
 
-    def test_news_contribution_is_zero_while_unavailable(self):
+    def test_news_is_not_embedded_in_the_technical_view_since_n1(self):
+        # N1: the current-time scorer accepts no news input at all — the
+        # ensemble's news_intelligence line is the only path news can move a
+        # score, so no price-derived value can masquerade as news either.
         snapshot = _base_snapshot(rsi=95.0, change_1d=0.2, price_vs_ma_50=0.5)
-        with_news = _score_current_time(snapshot, fetch_news_snapshot("TEST", "2024-01-02"))
-        without_news_field = _score_current_time(snapshot, {"status": "UNAVAILABLE"})
-        self.assertEqual(with_news, without_news_field)
+        with self.assertRaises(TypeError):
+            _score_current_time(snapshot, {"status": "OK", "sentiment_score": 1.0})
 
     def test_score_engine_never_derives_news_from_price(self):
         result = build_score("MSFT", "2024-01-02")

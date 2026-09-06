@@ -84,7 +84,7 @@ MACRO_SERIES_REGISTRY: dict[str, MacroSeries] = {
         unit="percent",
         frequency="monthly",
         transformation="percent_change_yoy",
-        lag_days=12.0,  # Typically released ~month 13 at 8:30 ET
+        lag_days=45.0,  # reference month START + ~45d: CPI for January is released mid-February (~8:30 ET)
         feature_version="macro-feature-cpi_yoy-v1",
         lookback_periods=120,  # 10 years of monthly
         reference_period_field="date",
@@ -101,7 +101,7 @@ MACRO_SERIES_REGISTRY: dict[str, MacroSeries] = {
         unit="thousands",
         frequency="weekly",
         transformation="none",
-        lag_days=3.0,  # Released Thursday morning for prior week
+        lag_days=5.0,  # Released the following Thursday (reference week ends Saturday)
         feature_version="macro-feature-initial_claims-v1",
         lookback_periods=260,  # 5 years of weekly
         reference_period_field="date",
@@ -118,7 +118,7 @@ MACRO_SERIES_REGISTRY: dict[str, MacroSeries] = {
         unit="percent",
         frequency="quarterly",
         transformation="percent_change_yoy",
-        lag_days=30.0,  # Preliminary release ~month after quarter end
+        lag_days=120.0,  # Advance estimate ~28d after quarter END = ~120d after quarter START
         feature_version="macro-feature-gdp_growth-v1",
         lookback_periods=40,  # 10 years of quarterly
         reference_period_field="date",
@@ -152,6 +152,10 @@ MACRO_SERIES_REGISTRY: dict[str, MacroSeries] = {
 # duration-driven multiples compression.
 
 MACRO_SENSITIVITY_VERSION = "macro-sensitivity-v1"
+
+# Version stamp for the series registry itself; bumped whenever a series
+# definition (lag convention, unit, transformation, membership) changes.
+MACRO_REGISTRY_VERSION = "macro-registry-v1"
 
 SECTOR_MACRO_LOADINGS: dict[str, dict[str, float]] = {
     "Energy": {

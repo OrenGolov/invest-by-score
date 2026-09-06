@@ -10,8 +10,10 @@ Governance rules:
 - Provider gate: without FRED_API_KEY or if provider disabled, explicit UNAVAILABLE
   snapshot (no silent neutrality).
 - Point-in-time: only releases with published_time <= as_of are eligible.
-  Future-dated or unparseable publication times invalidate the payload
-  (status INVALID, fail-closed).
+  The registry's lag convention models the release timestamp from the
+  reference date. Future-dated releases are pending (normal for a historical
+  as_of — excluded and counted, never used); unparseable publication times
+  invalidate the payload (status INVALID, fail-closed).
 - Revisions: every fetch appends to raw_store (W6). The adapter uses the
   latest version (append-order defines winner, immune to clock granularity).
 - Missing series: degrades confidence (INCOMPLETE), never zero-fills to neutral.
@@ -115,6 +117,7 @@ def resolve_macro_provider(as_of: str) -> dict:
 def fetch_fred_series(
     series_id: str,
     api_key: str,
+    lag_days: float = 0.0,
     lookback_periods: int = MACRO_LOOKBACK_PERIODS,
     timeout: float = MACRO_PROVIDER_TIMEOUT_SECONDS,
 ) -> dict:
@@ -153,11 +156,20 @@ def fetch_fred_series(
             value = float(value_str)
         except ValueError:
             continue
+        # Publication-time vintages: the reference date describes the period,
+        # it is NOT when the number was known. The registry's lag convention
+        # models the release timestamp; a too-early modeled release would
+        # leak unreleased data into historical decisions (lookahead bias).
+        reference_dt = _parse_timestamp(date_str)
+        if reference_dt is None:
+            continue
+        published_dt = reference_dt + timedelta(days=lag_days)
         records.append({
             "source_record_id": f"{series_id}_{date_str}",
             "series_id": series_id,
             "reference_date": date_str,
-            "published_time": date_str,  # FRED publishes on the date; N3 adapter adds lag
+            "published_time": published_dt.isoformat(),
+            "published_time_source": "lag_convention",
             "value": value,
         })
 
@@ -167,8 +179,10 @@ def fetch_fred_series(
 def pit_filter_macro(records: list[dict], as_of_dt: datetime) -> tuple[list[tuple[dict, datetime]], list[dict]]:
     """PIT FILTER: keep records with published_time <= as_of (inclusive).
 
-    Unparseable and future-dated records are rejected with explicit reasons;
-    their presence in a provider payload invalidates it (status INVALID).
+    Rejections carry explicit reasons: `future_dated` records are NORMAL for
+    a historical as_of (the vintage is not published yet — pending, counted,
+    never used), while `unparseable_published_time` is a payload violation
+    (status INVALID, fail-closed).
     """
     eligible: list[tuple[dict, datetime]] = []
     rejected: list[dict] = []
@@ -353,7 +367,13 @@ def build_macro_snapshot(ticker: str, as_of: str, timeout: float = MACRO_PROVIDE
     has_any_error = False
 
     for logical_id, series in MACRO_SERIES_REGISTRY.items():
-        fetched = fetch_fred_series(series.series_id, api_key, MACRO_LOOKBACK_PERIODS, timeout)
+        fetched = fetch_fred_series(
+            series.series_id,
+            api_key,
+            lag_days=series.lag_days,
+            lookback_periods=MACRO_LOOKBACK_PERIODS,
+            timeout=timeout,
+        )
         if fetched["status"] != "ok":
             LOGGER.warning("macro_fetch_failed: %s (%s)", logical_id, fetched["reason"])
             series_data[logical_id] = []
@@ -371,7 +391,10 @@ def build_macro_snapshot(ticker: str, as_of: str, timeout: float = MACRO_PROVIDE
             records=[record for record, _ in eligible],
         )
 
-        if rejected:
+        # A release published after as_of is NORMAL for a historical decision
+        # (the vintage simply does not exist yet): excluded as pending, never
+        # invalidating. Only unparseable timestamps are payload violations.
+        if any(entry["reason"] == "unparseable_published_time" for entry in rejected):
             has_any_error = True
 
     # Extract latest value from each series (FIFO = latest by append order).
@@ -468,6 +491,10 @@ def build_macro_snapshot(ticker: str, as_of: str, timeout: float = MACRO_PROVIDE
             "provider": resolution,
             "series_count": len(MACRO_SERIES_REGISTRY),
             "missing_series": missing_series,
+            "pending_releases": sum(
+                1 for entries in series_rejected.values() for entry in entries
+                if entry["reason"] == "future_dated"
+            ),
             "regime_reasoning": regime_reasoning,
         }
 

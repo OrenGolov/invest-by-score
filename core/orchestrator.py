@@ -30,6 +30,7 @@ def _build_risk_context(snapshot: dict, fundamental_snapshot: dict, score_result
         "action": score_result.action,
         "confidence": score_result.confidence,
         "confidence_breakdown": score_result.confidence_breakdown,
+        "market_regime": (getattr(score_result, "market_regime_snapshot", None) or {}).get("regime"),
     }
 
 
@@ -80,12 +81,16 @@ def _derive_agent_statuses(snapshot: dict, fundamental_snapshot: dict, score_res
     fundamental_status = AgentStatus.OK.value if fundamental_pit_valid else AgentStatus.INVALID.value
 
     news_status = str((score_result.news_snapshot or {}).get("status", "UNAVAILABLE"))
+    macro_status = str((getattr(score_result, "macro_snapshot", None) or {}).get("status", "UNAVAILABLE"))
+    regime_status = str((getattr(score_result, "market_regime_snapshot", None) or {}).get("status", "UNAVAILABLE"))
 
     return {
         "market_data": market_status,
         "technical_analysis": AgentStatus.OK.value,
         "fundamental_analysis": fundamental_status,
         "news_intelligence": news_status,
+        "macroeconomic": macro_status,
+        "market_regime": regime_status,
     }
 
 
@@ -246,15 +251,140 @@ def orchestrate_score(ticker: str, as_of: str, timestamp: str | None = None) -> 
         source_record_id=str(news_snapshot.get("source_id", "news_provider_unconfigured")),
     )
 
+    # Sprint N2: typed sentiment placeholder. Distinct from news tone, it
+    # holds zero ensemble weight and sits OUTSIDE the data-agent posture
+    # loop: its absence renormalizes to nothing and must not permanently
+    # floor decisions to ANALYSIS_ONLY once the live agents are healthy.
+    sentiment_snapshot = score_result.sentiment_snapshot
+    sentiment_agent = AgentContract(
+        agent="sentiment",
+        ticker=ticker.upper(),
+        as_of=snapshot["as_of"],
+        status=sentiment_snapshot.get("status", "UNAVAILABLE"),
+        score=0.0,
+        confidence=float(sentiment_snapshot.get("source_confidence", 0.0) or 0.0),
+        uncertainty={"lower": 0.0, "upper": 0.0},
+        evidence=[{
+            "source_record_id": str(sentiment_snapshot.get("source_id", "sentiment_provider_unconfigured")),
+            "reason": str(sentiment_snapshot.get("reason", "")),
+        }],
+        model_version=sentiment_snapshot.get("calculation_version", "sentiment-contract-v1"),
+        input_hash=_stable_hash(sentiment_snapshot),
+        warnings=[] if sentiment_snapshot.get("status") == "OK" else ["sentiment_provider_unconfigured"],
+        payload={
+            "status": sentiment_snapshot.get("status", "UNAVAILABLE"),
+            "sentiment_score": sentiment_snapshot.get("sentiment_score"),
+            "derivation": sentiment_snapshot.get("derivation", "none"),
+            "intended_inputs": sentiment_snapshot.get("intended_inputs", []),
+        },
+        source_record_id=str(sentiment_snapshot.get("source_id", "sentiment_provider_unconfigured")),
+    )
+
+    # Sprint N3: born-wired macro agent (vintage-aware regime tilt). It joins
+    # the data-agent posture loop — UNAVAILABLE floors to ANALYSIS_ONLY until
+    # a FRED key connects and INVALID (unparseable release timestamps) forces
+    # NO_TRADE — unlike the zero-weight sentiment placeholder.
+    macro_snapshot = score_result.macro_snapshot
+    macro_ensemble = (score_result.ensemble_breakdown.get("agents") or {}).get("macroeconomic", {})
+    macro_pipeline = macro_snapshot.get("pipeline") or {}
+    macro_agent = AgentContract(
+        agent="macroeconomic",
+        ticker=ticker.upper(),
+        as_of=snapshot["as_of"],
+        status=macro_snapshot.get("status", "UNAVAILABLE"),
+        score=float(macro_ensemble.get("score_current") or 0.0),
+        confidence=float(macro_snapshot.get("source_confidence", 0.0) or 0.0),
+        uncertainty={"lower": 0.0, "upper": 0.0},
+        evidence=[
+            {
+                "source_record_id": str((entry.get("source_record_ids") or [entry.get("series_id", "")])[0]),
+                "reason": (
+                    f"{entry.get('series_id')}: {entry.get('value')}; regime "
+                    f"{macro_snapshot.get('regime')} ({macro_snapshot.get('regime_score')})"
+                ),
+            }
+            for entry in (macro_snapshot.get("per_series_contributions") or [])
+        ] or [{
+            "source_record_id": str(macro_snapshot.get("source_id", "macro_provider_unconfigured")),
+            "reason": str(macro_snapshot.get("reason", "")),
+        }],
+        model_version=macro_snapshot.get("calculation_version", "macro-contract-v1"),
+        input_hash=_stable_hash(macro_snapshot),
+        warnings=[] if macro_snapshot.get("status") == "OK" else ["macro_not_fully_usable"],
+        payload={
+            "status": macro_snapshot.get("status", "UNAVAILABLE"),
+            "regime": macro_snapshot.get("regime"),
+            "regime_score": macro_snapshot.get("regime_score"),
+            "series_values": macro_snapshot.get("series_values", {}),
+            "confidence": macro_snapshot.get("source_confidence", 0.0),
+            "sector_loadings": macro_snapshot.get("sector_loadings", {}),
+            "pipeline_version": macro_pipeline.get("pipeline_version", ""),
+        },
+        source_record_id=str(macro_snapshot.get("source_id", "macro_provider_unconfigured")),
+    )
+
+    # Sprint N4: born-wired regime agent (five-state governance classification).
+    # It joins the data-agent posture loop — UNAVAILABLE/INCOMPLETE floor to
+    # ANALYSIS_ONLY — and its label couples to governance: STRESS forces
+    # NO_TRADE through the market_regime_stress veto rule and RISK_OFF already
+    # dampened the momentum coefficients inside build_score. The agent itself
+    # never votes on the score (zero ensemble weight); it gates.
+    regime_snapshot = getattr(score_result, "market_regime_snapshot", None) or {}
+    regime_pipeline = regime_snapshot.get("pipeline") or {}
+    regime_inputs = regime_snapshot.get("inputs") or {}
+    regime_label = regime_snapshot.get("regime")
+    regime_agent = AgentContract(
+        agent="market_regime",
+        ticker=ticker.upper(),
+        as_of=snapshot["as_of"],
+        status=agent_statuses["market_regime"],
+        score=0.0,
+        confidence=float(regime_snapshot.get("source_confidence", 0.0) or 0.0),
+        uncertainty={"lower": 0.0, "upper": 0.0},
+        evidence=[{
+            "source_record_id": str(regime_snapshot.get("source_id", "regime_source_unavailable")),
+            "reason": (
+                (
+                    f"Regime {regime_label} (proxy {regime_snapshot.get('probability_proxy')}) from "
+                    f"{regime_inputs.get('sessions_used', 0)} eligible sessions; "
+                    f"{(regime_snapshot.get('transition_risk') or {}).get('flips', 0)} regime flip(s) in the trailing "
+                    f"{(regime_snapshot.get('transition_risk') or {}).get('window_sessions', 0)} sessions."
+                )
+                if regime_snapshot.get("status") == "OK"
+                else str(regime_snapshot.get("reason", ""))
+            ),
+        }],
+        model_version=str(regime_snapshot.get("calculation_version", "regime-contract-v1")),
+        input_hash=_stable_hash(regime_snapshot),
+        warnings=[] if regime_snapshot.get("status") == "OK" else ["regime_not_fully_usable"],
+        payload={
+            "status": regime_snapshot.get("status", "UNAVAILABLE"),
+            "regime": regime_label,
+            "probability_proxy": regime_snapshot.get("probability_proxy"),
+            "transition_risk": regime_snapshot.get("transition_risk", {}),
+            "classifier_version": regime_pipeline.get("classifier_version", ""),
+            "inputs": regime_inputs,
+            "rule_trace": regime_snapshot.get("rule_trace", {}),
+            "governance_coupling": (
+                "STRESS -> NO_TRADE via the market_regime_stress veto; "
+                "RISK_OFF dampens momentum coefficients in build_score"
+            ),
+        },
+        source_record_id=str(regime_snapshot.get("source_id", "regime_source_unavailable")),
+    )
+
     audit_evaluation = evaluate_audit_policy({
         "ticker": ticker.upper(),
         "as_of": snapshot["as_of"],
-        "agents": [agent.to_dict() for agent in (market_agent, technical_agent, fundamental_agent, news_agent, risk_agent)],
+        "agents": [agent.to_dict() for agent in (market_agent, technical_agent, fundamental_agent, news_agent, sentiment_agent, macro_agent, regime_agent, risk_agent)],
         "expected_input_hashes": {
             "market_data": snapshot_hash,
             "technical_analysis": snapshot_hash,
             "fundamental_analysis": _stable_hash(fundamental_snapshot),
             "news_intelligence": _stable_hash(news_snapshot),
+            "sentiment": _stable_hash(sentiment_snapshot),
+            "macroeconomic": _stable_hash(macro_snapshot),
+            "market_regime": _stable_hash(regime_snapshot),
             "risk_management": snapshot_hash,
         },
         "snapshot": snapshot,
@@ -307,11 +437,27 @@ def orchestrate_score(ticker: str, as_of: str, timestamp: str | None = None) -> 
     if audit_evaluation["veto"]:
         veto_reasons.append("auditor_veto")
     data_agent_posture = status_posture(worst_status(
-        agent_statuses[name] for name in ("market_data", "technical_analysis", "fundamental_analysis", "news_intelligence")
+        agent_statuses[name] for name in ("market_data", "technical_analysis", "fundamental_analysis", "news_intelligence", "macroeconomic", "market_regime")
     ))
     if data_agent_posture == "NO_TRADE":
         veto_reasons.append("agent_status_no_trade")
-    effective_action = "ANALYSIS_ONLY" if data_agent_posture == "ANALYSIS_ONLY" else score_result.action
+    # W4 propagation: the worst data-agent posture is a floor the engine's own
+    # posture can only worsen. A NO_TRADE-severity status (INVALID,
+    # CONTRADICTORY) must reach the mode even when the engine itself is
+    # analysis-only, otherwise the veto path is decorative.
+    if data_agent_posture == "NO_TRADE":
+        effective_action = "NO_TRADE"
+    elif data_agent_posture == "ANALYSIS_ONLY":
+        effective_action = "ANALYSIS_ONLY"
+    else:
+        effective_action = score_result.action
+    # N4 governance coupling: the market_regime_stress veto (a STRESS label,
+    # or missing/unknown regime evidence) forces the decision to NO_TRADE.
+    # Regime stress is a trade-blocking state per governance policy — not an
+    # analysis-only floor — while threshold vetoes keep their existing
+    # ANALYSIS_ONLY semantics.
+    if "market_regime_stress" in veto_reasons:
+        effective_action = "NO_TRADE"
     mode = _select_mode(effective_action, veto_reasons, bool(score_result.governance.get("risk_gate_passed")))
     action = score_result.action
     if mode == "ANALYSIS_ONLY":
@@ -337,11 +483,11 @@ def orchestrate_score(ticker: str, as_of: str, timestamp: str | None = None) -> 
         "confidence_breakdown": score_result.confidence_breakdown,
         "model_versions": {
             agent.agent: agent.model_version
-            for agent in (market_agent, technical_agent, fundamental_agent, news_agent, risk_agent, audit_agent)
+            for agent in (market_agent, technical_agent, fundamental_agent, news_agent, sentiment_agent, macro_agent, regime_agent, risk_agent, audit_agent)
         },
         "agent_statuses": {
             agent.agent: agent.status
-            for agent in (market_agent, technical_agent, fundamental_agent, news_agent, risk_agent, audit_agent)
+            for agent in (market_agent, technical_agent, fundamental_agent, news_agent, sentiment_agent, macro_agent, regime_agent, risk_agent, audit_agent)
         },
         "veto": {
             "risk_management": {"veto": risk_evaluation["veto"], "rule_ids": risk_evaluation["veto_rule_ids"]},
@@ -359,7 +505,7 @@ def orchestrate_score(ticker: str, as_of: str, timestamp: str | None = None) -> 
         confidence=float(score_result.confidence),
         current_time_score=float(score_result.current_time_score),
         long_term_score=float(score_result.long_term_score),
-        agent_outputs=[market_agent, technical_agent, fundamental_agent, news_agent, risk_agent, audit_agent],
+        agent_outputs=[market_agent, technical_agent, fundamental_agent, news_agent, sentiment_agent, macro_agent, regime_agent, risk_agent, audit_agent],
         summary=(
             "Typed, point-in-time orchestrator run for the requested timestamp. "
             "The system remains analysis-only unless quality and source checks pass."

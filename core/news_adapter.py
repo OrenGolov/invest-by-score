@@ -97,7 +97,7 @@ NEWS_CATEGORY_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
         r"\bcompliance\b", r"\bbanned\b",
     )),
     ("product_launch", (
-        r"\blaunched?\b", r"\blaunching\b", r"\bunveil\w*\b", r"\bdebut\w*\b",
+        r"\blaunche?s?\b", r"\blaunching\b", r"\bunveil\w*\b", r"\bdebut\w*\b",
         r"\bannounces? new (?:product|device|chip|model|service)\b",
         r"\breleas(?:es|ed|ing) (?:the )?new\b",
     )),
@@ -512,6 +512,14 @@ def build_news_snapshot(ticker: str, as_of: str, timeout: float = NEWS_PROVIDER_
         request_key=f"{ticker}_{as_of_dt.date().isoformat()}",
         records=raw_records,
     )
+
+    if not raw_records:
+        return _unavailable_snapshot(
+            ticker,
+            as_of_text,
+            reason="Provider returned no articles inside the point-in-time window.",
+            source_id=NEWS_SOURCE_ID,
+        )
 
     eligible, rejected = pit_filter(raw_records, as_of_dt)
     enriched: list[dict] = []

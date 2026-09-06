@@ -359,24 +359,66 @@ risk regime classification, and sector sensitivity mapping complete.
   risk-on/off regime classification tested (risk_on score > 0.7, risk_off < 0.3).
   Smoke: 6/6 checks pass.
 
-### N4. Market Regime agent (upgrade from the 3-state heuristic)
+### N4. Market Regime agent ✓ DONE
 
-- Extend classification to the doc's full set:
-  `bullish, bearish, range, risk_off, stress` — versioned
-  `REGIME_CLASSIFIER_VERSION`, deterministic rules from existing features:
-  - `range`: |price_vs_ma_50| < 0.02 and |price_vs_ma_200| < 0.02 (exists).
-  - `stress`: 30d realized vol above its own 1y 95th percentile AND drawdown
-    from the 60d high > 15%.
-  - `risk_off`: vol above the 1y 80th percentile, or MA50 < MA200 with
-    aligned negative 20d/60d momentum.
-  - bull/bear as today; `range` takes precedence when flat.
-- Output: `{label, probability_proxy (distance from boundary, scaled),
-  transition_risk (regime flips per trailing 20 sessions)}`.
-- Governance coupling: `stress` forces `NO_TRADE` via a W2 policy rule;
-  `risk_off` applies a documented dampening factor to momentum weights in
-  config.
-- Acceptance: boundary tests at each threshold/percentile; a stress snapshot
-  cannot reach `PAPER` regardless of score.
+Implemented 2026-09-03. Five-state governance classification with STRESS →
+NO_TRADE coupling and RISK_OFF momentum dampening complete.
+
+- Classifier: `core/regime_agent.py` — pipeline FETCH → PIT FILTER → FEATURE
+  SERIES → RULE CHAIN (per session) → LABEL + PROBABILITY PROXY + TRANSITION
+  RISK. States: `bullish, bearish, range, risk_off, stress`
+  (`REGIME_LABELS`, `REGIME_CLASSIFIER_VERSION = regime-classifier-v1`,
+  `REGIME_PIPELINE_VERSION`, `REGIME_CONTRACT_VERSION`).
+- Rule chain v1 (strict precedence stress > risk_off > range > bearish >
+  bullish; every comparison strict): `stress` = 30d realized vol strictly
+  above its trailing 1y 95th percentile AND drawdown from the 60-session
+  high > 15%; `risk_off` = vol strictly above the 1y 80th percentile OR
+  (MA50 < MA200 with 20d AND 60d momentum both negative); `range` = both MA
+  distances strictly inside ±2%; `bearish` = close < MA200 and MA50 < MA200
+  without aligned negative momentum; `bullish` default. Pure scalar core
+  `evaluate_rules` is the boundary-testable unit; `classify_regime` labels
+  every session (transition risk needs per-session labels).
+- Volatility percentiles compare the current session against the PRIOR 252
+  sessions only (never part of its own reference distribution); windows
+  require `REGIME_REQUIRED_SESSIONS = 283` eligible sessions, else INCOMPLETE
+  with `regime` explicitly None (a partial rule evaluation would make the
+  label depend on data availability, not the contract).
+- Output: `{label, probability_proxy (per-label distance from the deciding
+  boundary, scaled by REGIME_TREND_MARGIN_SCALE / REGIME_MOMENTUM_MARGIN_SCALE,
+  clipped [0,1]), transition_risk (flips per trailing 20 sessions, flip_rate,
+  labels)}` plus full `inputs` and `rule_trace` evidence.
+- Failure states are statuses, never neutral labels: UNAVAILABLE (fetch
+  failed / no eligible bars), INVALID (schema violation), INCOMPLETE
+  (history shorter than the strict windows), OK. Future bars are excluded
+  and counted before any feature is computed.
+- Contract: `core/regime_contract.py::fetch_regime_snapshot(ticker, as_of)`.
+  `RegimeSnapshot` dataclass in `core/schemas.py`; `ScoreResult.
+  market_regime_snapshot` carries it; replay metadata adds
+  `regime_snapshot_hash`. The legacy 3-state `market_regime` display
+  heuristic in the market snapshot is untouched and ungoverned.
+- Governance coupling: `market_regime_stress` veto rule (severity `veto`) in
+  `RISK_POLICY_V2`, evaluated by `core/risk_policy.py` (the only evaluator) —
+  triggers on the STRESS label AND fail-closed on a missing/unknown label;
+  the orchestrator couples that veto to `effective_action = "NO_TRADE"`
+  (regime stress blocks trades; threshold vetoes keep their ANALYSIS_ONLY
+  semantics). `risk_off` multiplies the current-time momentum coefficients
+  (momentum_1d/5d/20d, trend_vs_20d_mean) by
+  `REGIME_RISKOFF_MOMENTUM_DAMPING = 0.5` inside `_score_current_time`,
+  mirrored exactly in the scoring breakdown (`regime_momentum_damping` +
+  a score-change driver note) so the explanation cannot contradict the
+  number; RSI/MA-distance/volume terms and the long-term view are not
+  dampened.
+- Born wired: `market_regime` is the ninth decision agent — in
+  `_derive_agent_statuses`, the data-agent posture loop (UNAVAILABLE/
+  INCOMPLETE floors to ANALYSIS_ONLY), the risk context, audit
+  model_versions/agent_statuses, expected_input_hashes, and agent_outputs.
+  Ensemble weight stays 0.0 (gate, not a vote) until forecast conditioning.
+- Acceptance: boundary tests at each threshold/percentile (strict
+  comparisons pinned at and past every boundary); precedence, proxy bounds,
+  transition flips, PIT future-bar exclusion, failure-state statuses,
+  fail-closed veto coupling, dampening mirror, and an orchestrator test
+  proving a stress snapshot cannot reach PAPER regardless of score.
+  Full suite: 236/236 pass.
 
 ### N5. Narrative vs fundamental attribution
 

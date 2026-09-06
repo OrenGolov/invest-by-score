@@ -18,29 +18,28 @@ SENTIMENT_CONTRACT_VERSION = "sentiment-contract-v1"
 # per horizon: business quality matters more to the structural view than to
 # the tactical one. Agents without a live implementation hold an explicit 0.0
 # weight — presence in the dict is the contract; absence fails at import.
-# v2: news_intelligence is born wired (N1) with a dedicated current-horizon
-# weight. While its status is not OK the weight renormalizes across eligible
-# agents, so the no-provider posture stays degraded-and-flagged — never a
-# silently neutral substitute.
-ENSEMBLE_VERSION = "ensemble-v2"
+# v3: macroeconomic is born wired (N3) with a dedicated weight in BOTH
+# horizons; while its status is not OK (no FRED key, failed/empty fetch,
+# partial coverage) the weight renormalizes across eligible agents.
+ENSEMBLE_VERSION = "ensemble-v3"
 
 ENSEMBLE_WEIGHTS_CURRENT = {
     "market_data": 0.0,          # informational only: feeds confidence/gates
-    "technical_analysis": 0.80,  # current-time technical view
+    "technical_analysis": 0.70,  # current-time technical view
     "fundamental_analysis": 0.10,
     "news_intelligence": 0.10,   # N1: live whenever the news contract reads OK
-    "sentiment": 0.0,            # not implemented
-    "macroeconomic": 0.0,        # not implemented
+    "sentiment": 0.0,            # N2 typed placeholder; no legitimate provider yet
+    "macroeconomic": 0.10,       # N3: live whenever the macro contract reads OK
     "market_regime": 0.0,        # not implemented; regime gates via risk policy
 }
 
 ENSEMBLE_WEIGHTS_LONG = {
     "market_data": 0.0,
-    "technical_analysis": 0.75,  # long-term structural technical view
-    "fundamental_analysis": 0.25,
+    "technical_analysis": 0.70,  # long-term structural technical view
+    "fundamental_analysis": 0.20,
     "news_intelligence": 0.0,    # tactical-only: news never enters the structural view
     "sentiment": 0.0,
-    "macroeconomic": 0.0,
+    "macroeconomic": 0.10,       # macro state is horizon-agnostic evidence
     "market_regime": 0.0,
 }
 
@@ -102,6 +101,12 @@ RISK_POLICY_V2 = {
     "score_below_threshold": {
         "severity": "veto",
         "minimum_score": 5.5,
+    },
+    # N4 governance coupling: the STRESS regime forces NO_TRADE. A missing or
+    # unknown regime label also triggers (fail-closed) — a decision without
+    # market-risk context must not trade.
+    "market_regime_stress": {
+        "severity": "veto",
     },
     "analysis_only_mode": {
         "severity": "veto",
@@ -255,3 +260,74 @@ MACRO_SCORE_SPAN = 5.0
 # Risk-on/off regime thresholds (0.5 = neutral, >0.5 = risk-on tilt).
 MACRO_RISKOFF_THRESHOLD = 0.3
 MACRO_RISKON_THRESHOLD = 0.7
+# Risk-on/off regime thresholds (0.5 = neutral, >0.5 = risk-on tilt).
+MACRO_RISKOFF_THRESHOLD = 0.3
+MACRO_RISKON_THRESHOLD = 0.7
+
+# --- Market regime agent (N4) ----------------------------------------------------
+# Five-state governance classification: bullish, bearish, range, risk_off, stress.
+# The classifier lives in core/regime_agent.py and is the ONLY source of the
+# governed regime label; agents/market_data_agent.py keeps its legacy 3-state
+# `market_regime` display heuristic (ungoverned, not the decision regime).
+# Governance coupling: STRESS forces NO_TRADE through the W2 policy rule
+# `market_regime_stress` (severity veto, evaluated in core/risk_policy.py, the
+# only evaluator); RISK_OFF dampens the momentum coefficients of the
+# current-time technical view by REGIME_RISKOFF_MOMENTUM_DAMPING (applied in
+# core/score_engine.py and mirrored in the scoring breakdown so the
+# explanation can never contradict the number).
+
+REGIME_CONTRACT_VERSION = "regime-contract-v1"
+REGIME_PIPELINE_VERSION = "regime-pipeline-v1"
+REGIME_CLASSIFIER_VERSION = "regime-classifier-v1"
+
+REGIME_LABELS = ("bullish", "bearish", "range", "risk_off", "stress")
+REGIME_STRESS_LABEL = "stress"
+REGIME_RISKOFF_LABEL = "risk_off"
+REGIME_RANGE_LABEL = "range"
+
+# Range v1: flat zone — both MA distances strictly inside +/- this band.
+REGIME_RANGE_FLAT_THRESHOLD = 0.02
+
+# Realized volatility: daily-return standard deviation (ddof=0) over this many
+# sessions, matching the market-data agent's `volatility` feature convention.
+REGIME_REALIZED_VOL_WINDOW_SESSIONS = 30
+
+# Volatility is compared against its own trailing history: prior observations
+# (excluding the current session) over a 1y session lookback.
+REGIME_VOL_PERCENTILE_LOOKBACK_SESSIONS = 252
+REGIME_STRESS_VOL_PERCENTILE = 0.95
+REGIME_RISKOFF_VOL_PERCENTILE = 0.80
+
+# Stress requires a second, independent condition: depth below the rolling
+# 60-session high, strictly above this fraction.
+REGIME_DRAWDOWN_HIGH_WINDOW_SESSIONS = 60
+REGIME_STRESS_DRAWDOWN_THRESHOLD = 0.15
+
+# Risk-off trend branch: MA50 < MA200 with 20d AND 60d momentum both negative.
+# Transition risk counts regime flips across this many trailing sessions.
+REGIME_TRANSITION_WINDOW_SESSIONS = 20
+
+# Strict minimum eligible history: the 30d realized vol needs 31 closes and
+# the trailing 1y percentile needs 252 prior vol observations, so the first
+# fully classified session is index 282 (0-based). MA200 and change_60d sit
+# inside that span. Derived constant — do not hand-edit.
+REGIME_REQUIRED_SESSIONS = (
+    REGIME_REALIZED_VOL_WINDOW_SESSIONS + REGIME_VOL_PERCENTILE_LOOKBACK_SESSIONS + 1
+)
+
+# Calendar-day coverage the provider fetch must reach behind as_of
+# (~283 sessions plus a holiday buffer). Selects the fetch period
+# deterministically in core/regime_agent.py.
+REGIME_CALENDAR_COVERAGE_DAYS = 430
+
+# probability_proxy scales: how deep past the deciding boundary, normalized
+# to [0, 1] and clipped. Trend depth uses MA-distance fractions; the risk_off
+# momentum branch uses trailing-return fractions.
+REGIME_TREND_MARGIN_SCALE = 0.10
+REGIME_MOMENTUM_MARGIN_SCALE = 0.05
+
+# RISK_OFF governance coupling: momentum coefficients of the current-time
+# technical view are multiplied by this factor (1.0 = no dampening). The
+# long-term structural view is regime-agnostic in v1; its own volatility drag
+# already discounts regime risk there.
+REGIME_RISKOFF_MOMENTUM_DAMPING = 0.5
