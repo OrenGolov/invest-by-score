@@ -7,6 +7,9 @@ from datetime import datetime, timedelta
 from agents.market_data_agent import fetch_market_snapshot
 from core.audit_store import AUDIT_SCHEMA_VERSION, persist_decision_audit
 from core.config import (
+    ATTRIBUTION_BUCKETS,
+    ATTRIBUTION_SUPPORT_THRESHOLD,
+    ATTRIBUTION_VERSION,
     CONFIDENCE_CAP,
     CONFIDENCE_FLOOR,
     CONFIDENCE_FRESHNESS_DECAY_DAYS,
@@ -812,6 +815,127 @@ def _ensemble_blend(
     return current_score, long_score, breakdown
 
 
+def build_attribution(ensemble_breakdown: dict, blended_score: float) -> dict:
+    """Narrative-vs-fundamental attribution (N5).
+
+    Decomposes the blended score into three governed buckets — operational
+    (fundamental + technical), narrative (news + sentiment), macro_shock
+    (macro + regime) — from the per-agent, per-horizon ensemble
+    contributions. The ensemble breakdown is the single source of
+    contribution math: this block only classifies and aggregates it, so the
+    attribution can never contradict the published score. Pure and
+    deterministic.
+
+    The narrative bucket is intentionally news + sentiment ONLY, so with
+    news at zero weight (ineligible) it reads exactly 0.0 — no phantom
+    narrative (the N5 acceptance criterion). market_data is an
+    informational, zero-weight line and sits outside the buckets.
+
+    Reconciliation mirrors the published score's rounding path exactly:
+    horizon totals accumulate the same 6dp-rounded contributions in the
+    same sorted order, then round per horizon before blending, so
+    `attributed_total` equals the published blended score exactly and
+    `reconciles` is a strict equality flag.
+    """
+    agents = ensemble_breakdown.get("agents") or {}
+    lines: dict[str, dict] = {}
+    bucket_totals = {bucket: 0.0 for bucket in ATTRIBUTION_BUCKETS}
+    informational_total = 0.0
+    current_total = 0.0
+    long_total = 0.0
+    for agent in sorted(agents):
+        entry = agents[agent] or {}
+        contribution_current = float(entry.get("contribution_current") or 0.0)
+        contribution_long = float(entry.get("contribution_long") or 0.0)
+        total = (contribution_current + contribution_long) / 2.0
+        bucket = next(
+            (name for name, members in ATTRIBUTION_BUCKETS.items() if agent in members),
+            None,
+        )
+        if bucket is None:
+            informational_total += total
+        else:
+            bucket_totals[bucket] += total
+        current_total += contribution_current
+        long_total += contribution_long
+        lines[agent] = {
+            "bucket": bucket if bucket is not None else "informational",
+            "contribution_current": round(contribution_current, 4),
+            "contribution_long": round(contribution_long, 4),
+            "total": round(total, 4),
+            "status": str(entry.get("status", "UNAVAILABLE")),
+            "eligible_current": bool(entry.get("eligible_current")),
+            "eligible_long": bool(entry.get("eligible_long")),
+        }
+
+    buckets: dict[str, dict] = {}
+    for bucket in sorted(ATTRIBUTION_BUCKETS):
+        total = round(bucket_totals[bucket], 4)
+        if total > ATTRIBUTION_SUPPORT_THRESHOLD:
+            stance = "supports"
+        elif total < -ATTRIBUTION_SUPPORT_THRESHOLD:
+            stance = "opposes"
+        else:
+            stance = "neutral"
+        buckets[bucket] = {
+            "total": total,
+            "stance": stance,
+            "members": list(ATTRIBUTION_BUCKETS[bucket]),
+        }
+
+    operational_total = buckets["operational"]["total"]
+    narrative_total = buckets["narrative"]["total"]
+    macro_total = buckets["macro_shock"]["total"]
+    operational_supports = operational_total > ATTRIBUTION_SUPPORT_THRESHOLD
+    narrative_supports = narrative_total > ATTRIBUTION_SUPPORT_THRESHOLD
+    if operational_supports and narrative_supports:
+        thesis_support = "operational_and_narrative"
+    elif operational_supports:
+        thesis_support = "operational"
+    elif narrative_supports:
+        thesis_support = "narrative"
+    else:
+        thesis_support = "neither"
+
+    if narrative_total == 0.0:
+        news_line = lines.get("news_intelligence", {})
+        if not news_line.get("eligible_current") and news_line.get("status") == "OK":
+            narrative_note = "narrative status OK but no usable sentiment score"
+        elif not news_line.get("eligible_current"):
+            narrative_note = "no eligible narrative sources"
+        else:
+            narrative_note = "net-zero narrative contribution"
+        summary = (
+            f"Narrative evidence (news + sentiment) contributes exactly 0.0 ({narrative_note}); "
+            f"the thesis is carried by operational evidence (fundamental + technical) "
+            f"{operational_total:+.2f} with macro/regime evidence {macro_total:+.2f}."
+        )
+    else:
+        summary = (
+            f"Operational evidence (fundamental + technical) contributes {operational_total:+.2f} "
+            f"({buckets['operational']['stance']}), narrative evidence (news + sentiment) "
+            f"{narrative_total:+.2f} ({buckets['narrative']['stance']}), macro/regime evidence "
+            f"{macro_total:+.2f} ({buckets['macro_shock']['stance']}); thesis support: {thesis_support}."
+        )
+
+    attributed_total = round(
+        (round(current_total, 2) + round(long_total, 2)) / 2.0, 2
+    )
+    published_score = round(float(blended_score), 2)
+    return {
+        "attribution_version": ATTRIBUTION_VERSION,
+        "score": published_score,
+        "buckets": buckets,
+        "lines": lines,
+        "informational_total": round(informational_total, 4),
+        "attributed_total": attributed_total,
+        "reconciles": attributed_total == published_score,
+        "thesis_support": thesis_support,
+        "support_threshold": ATTRIBUTION_SUPPORT_THRESHOLD,
+        "summary": summary,
+    }
+
+
 def _build_replay_metadata(
     ticker: str,
     as_of: str,
@@ -975,10 +1099,19 @@ def build_score(ticker: str, as_of: str, timestamp: str | None = None, persist_a
         if news_snapshot.get("status") == "OK"
         else "no usable news sentiment; its weight renormalizes across eligible agents"
     )
+    # N5: the attribution decomposes the published score into operational /
+    # narrative / macro_shock contribution lines before the explanation
+    # assembles, so the sentence and the block can never disagree.
+    attribution = build_attribution(ensemble_breakdown, capped_score)
     explanation = (
         f"Weighted ensemble ({ENSEMBLE_VERSION}) blending the current-time technical view, the long-term structural "
         f"view, and business quality per horizon weights ({news_status_note}). "
-        f"Current price is {snapshot['close']:.2f}; 20-day momentum is {snapshot.get('change_20d', 0.0):.2%}; RSI is {snapshot.get('rsi', 50.0):.1f}."
+        f"Current price is {snapshot['close']:.2f}; 20-day momentum is {snapshot.get('change_20d', 0.0):.2%}; RSI is {snapshot.get('rsi', 50.0):.1f}. "
+        f"Attribution ({ATTRIBUTION_VERSION}): operational evidence (fundamental + technical) "
+        f"{attribution['buckets']['operational']['total']:+.2f}, narrative evidence (news + sentiment) "
+        f"{attribution['buckets']['narrative']['total']:+.2f}, macro/regime evidence "
+        f"{attribution['buckets']['macro_shock']['total']:+.2f}; thesis support: {attribution['thesis_support']}. "
+        f"{attribution['summary']}"
     )
 
     market_context = {
@@ -1012,6 +1145,9 @@ def build_score(ticker: str, as_of: str, timestamp: str | None = None, persist_a
     scoring_breakdown = _build_scoring_breakdown(
         snapshot, capped_score, current_time_score, long_term_score, momentum_damping=momentum_damping
     )
+    # N5: the attribution block lives inside the scoring breakdown so the UI
+    # can state why the score moved — narrative vs operational drivers.
+    scoring_breakdown["attribution"] = attribution
     source_reliability = _build_source_reliability()
     technical_features = _build_technical_features(snapshot)
     feature_metadata = _build_feature_metadata(snapshot, news_snapshot)

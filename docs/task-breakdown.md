@@ -420,16 +420,52 @@ NO_TRADE coupling and RISK_OFF momentum dampening complete.
   proving a stress snapshot cannot reach PAPER regardless of score.
   Full suite: 236/236 pass.
 
-### N5. Narrative vs fundamental attribution
+### N5. Narrative vs fundamental attribution ✓ DONE
 
-- Attribution block in the scoring breakdown classifying each weighted
-  contribution: `operational` (fundamental, long-horizon technical),
-  `narrative` (news, sentiment), `macro_shock` (macro, regime transitions).
-- The explanation string assembles from this block so the UI can state *why*
-  the score moved — narrative vs operational drivers, per the sprint's
-  acceptance criterion.
-- Acceptance: with news at zero weight the narrative bucket reads exactly
-  `0.0` — no phantom narrative.
+Implemented 2026-09-03. The published score decomposes into governed
+contribution buckets so the system can state whether a thesis is supported
+by business reality, market narrative, or both.
+
+- Evaluator: `core/score_engine.py::build_attribution` (pure, deterministic,
+  `score-attribution-v1`). It reads the per-agent, per-horizon
+  `contribution_current`/`contribution_long` entries from the ensemble
+  breakdown — the single source of contribution math — and only classifies
+  and aggregates them, so the attribution can never contradict the
+  published score.
+- Buckets (`ATTRIBUTION_BUCKETS`, versioned in `core/config.py` with an
+  import-time partition guard): `operational` = fundamental_analysis +
+  technical_analysis (the long-horizon technical view anchors the bucket;
+  its current-horizon component is tactical but still technical evidence);
+  `narrative` = news_intelligence + sentiment ONLY; `macro_shock` =
+  macroeconomic + market_regime. `market_data` is the zero-weight
+  informational line and sits outside the buckets
+  (`ATTRIBUTION_INFORMATIONAL_LINES`).
+- Block shape: `per-agent lines {bucket, contribution_current,
+  contribution_long, total, status, eligible_current/long}`; `buckets
+  {total, stance, members}` with stance supports/opposes/neutral against
+  `ATTRIBUTION_SUPPORT_THRESHOLD = 0.25`; `thesis_support` ∈
+  {operational, narrative, operational_and_narrative, neither};
+  `attributed_total` + `reconciles` (strict equality against the published
+  score via the same rounding path); `summary` sentence.
+- Acceptance: with news at zero weight (ineligible) the narrative bucket
+  reads exactly `0.0` — no phantom narrative; the summary states WHY
+  (no provider vs provider-OK-but-scoreless). Weight renormalization moves
+  absolute contributions when a line enters/leaves; the pinned invariant is
+  the underlying agent score plus the exact narrative-line equality.
+- Explanation assembly: the `explanation` string appends the attribution
+  sentence (bucket totals + thesis support + summary) built from the same
+  block, so the UI can state why the score moved without ever disagreeing
+  with the numbers.
+- Semantics note: with the current 0-10 weighted-average ensemble every
+  contribution is non-negative, so the `opposes` stance is unreachable
+  through the blend — it is reserved for the signed contribution semantics
+  of forecast decomposition (Sprint F6) and pinned by a synthetic signed
+  breakdown test.
+- Location: `scoring_breakdown["attribution"]` on every `ScoreResult`.
+- Acceptance: 17 new tests (`tests/test_attribution.py`) covering the
+  partition guard, line/bucket math, the zero-narrative criterion, stance
+  and thesis classification, exact reconciliation, explanation assembly,
+  and determinism. Full suite: 253/253 pass.
 
 ### N6. Deferred-but-slotted feature gaps (from the Sprint-2 review)
 

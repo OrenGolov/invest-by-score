@@ -65,6 +65,62 @@ def _validate_ensemble_weights(name: str, weights: dict[str, float]) -> None:
 _validate_ensemble_weights("ENSEMBLE_WEIGHTS_CURRENT", ENSEMBLE_WEIGHTS_CURRENT)
 _validate_ensemble_weights("ENSEMBLE_WEIGHTS_LONG", ENSEMBLE_WEIGHTS_LONG)
 
+# --- Narrative vs fundamental attribution (N5) ----------------------------------
+# Decomposes the blended score into three governed buckets so the system can
+# state whether a thesis is supported by business reality, market narrative,
+# or both. The evaluator lives in core/score_engine.py::build_attribution and
+# only classifies/aggregates the ensemble breakdown's per-agent contributions
+# — the ensemble remains the single source of contribution math, so the
+# attribution can never contradict the published score.
+#
+# Bucket semantics (versioned): operational = fundamental + technical
+# (the long-horizon technical view anchors the bucket; its current-horizon
+# component is tactical but still technical evidence); narrative = news +
+# sentiment ONLY — with news at zero weight the bucket reads exactly 0.0
+# (no phantom narrative, the N5 acceptance criterion); macro_shock = macro
+# + regime. market_data is an informational zero-weight line and sits
+# outside the buckets by design.
+ATTRIBUTION_VERSION = "score-attribution-v1"
+
+ATTRIBUTION_BUCKETS = {
+    "operational": ("fundamental_analysis", "technical_analysis"),
+    "narrative": ("news_intelligence", "sentiment"),
+    "macro_shock": ("macroeconomic", "market_regime"),
+}
+
+# Zero-weight informational lines that stay outside every bucket.
+ATTRIBUTION_INFORMATIONAL_LINES = ("market_data",)
+
+# A bucket "supports" the thesis above this many score points, "opposes"
+# below the negated threshold, and is "neutral" in between (0-10 scale).
+ATTRIBUTION_SUPPORT_THRESHOLD = 0.25
+
+
+def _validate_attribution_buckets() -> None:
+    """Import-time guard: the buckets partition the ensemble lines exactly."""
+    assigned = [
+        agent
+        for members in ATTRIBUTION_BUCKETS.values()
+        for agent in members
+    ]
+    if len(assigned) != len(set(assigned)):
+        raise ValueError("ATTRIBUTION_BUCKETS: an agent line appears in more than one bucket")
+    covered = set(assigned) | set(ATTRIBUTION_INFORMATIONAL_LINES)
+    ensemble_lines = set(ENSEMBLE_WEIGHTS_CURRENT)
+    if covered != ensemble_lines:
+        raise ValueError(
+            "ATTRIBUTION_BUCKETS must partition the ensemble lines exactly: "
+            f"missing={sorted(ensemble_lines - covered)}, unknown={sorted(covered - ensemble_lines)}"
+        )
+    if not 0.0 < ATTRIBUTION_SUPPORT_THRESHOLD <= MAX_SCORE:
+        raise ValueError(
+            f"ATTRIBUTION_SUPPORT_THRESHOLD must be within (0, {MAX_SCORE}], "
+            f"got {ATTRIBUTION_SUPPORT_THRESHOLD!r}"
+        )
+
+
+_validate_attribution_buckets()
+
 # --- Risk policy (W2) -----------------------------------------------------------
 # Single source of truth for every governance threshold. The evaluator lives in
 # core/risk_policy.py and is the only consumer; nothing else may hard-code these
