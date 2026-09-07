@@ -512,23 +512,53 @@ construction. The shared-research contract in `docs/validation.md` is binding:
 the backtester consumes the same feature contracts and scorers as live —
 no side research dataset, ever.
 
-### V1. Outcome label builder
+### V1. Outcome label builder ✓ DONE
 
-- Objective: produce point-in-time-safe labels for every persisted decision.
-- Labels per decision, computed strictly from bars in `(as_of, as_of + h]`:
-  `forward_return_1d/5d/20d/60d`, `adverse_excursion` (worst drawdown from
-  entry close within the 20d window), `label_20d_up` (boolean at a
-  configurable threshold), and a risk-adjusted outcome (return / realized
-  vol over the window).
-- Boundary rule: a label is `null` until the horizon has fully elapsed
-  relative to the data's latest bar; partially-elapsed horizons are never
-  emitted (no partial-window leakage). The builder derives eligibility from
-  the latest bar timestamp, not wall-clock.
+Implemented 2026-09-03. Point-in-time-safe labels for every persisted
+decision, computed strictly from bars in `(as_of, as_of + h]` with h in
+trading sessions.
+
+- Evaluator: `core/labels.py::build_outcome_labels` (pure with respect to
+  the dataset state; `OUTCOME_LABEL_VERSION = outcome-label-v1`).
+  Per-horizon labels: `forward_return` (exit close vs entry close),
+  `realized_vol` (the h close-to-close returns realizing inside the window,
+  the first anchored at the entry close), `risk_adjusted` (return / realized
+  vol — `None` for the 1d horizon where dispersion is undefined and for
+  zero-vol windows, computed from the PUBLISHED rounded values so the block
+  is self-consistent), and for the 20d window: `adverse_excursion` (worst
+  low vs entry close within the window) and `label_20d_up` (strictly greater
+  than `OUTCOME_LABEL_UP_THRESHOLD = 0.0`).
+- Boundary rule: a horizon's label is null until the horizon has fully
+  elapsed RELATIVE TO THE DATA'S LATEST BAR — eligibility is derived from
+  the fetched frame's newest bar, never wall-clock, so the same dataset
+  state always produces the same labels. Partially elapsed horizons are
+  null in the snapshot and NEVER persisted (no partial-window leakage).
+  Horizons are trading-session based; the window is `bars.index > as_of`
+  (an intraday as_of starts the window after the moment).
+- Statuses: OK (all four matured), PARTIAL (some — the spec acceptance:
+  a decision dated 10 sessions ago has 1d/5d labels and 20d/60d null),
+  PENDING (none), UNAVAILABLE (fetch failed / empty / no entry bar at or
+  before as_of). A future as_of raises ValueError (timestamp violation,
+  mirroring the market data agent).
 - Storage: append-only `data/outcomes.jsonl` keyed
-  `{ticker, as_of, horizon, label_version}`; label version stamped
-  (`OUTCOME_LABEL_VERSION`) so threshold changes never rewrite history.
-- Acceptance: a decision dated 10 sessions ago has `5d` labels but `20d =
-  null`; synthetic-bar tests prove off-by-one safety at horizon boundaries.
+  `{ticker, as_of, horizon, label_version}`. Re-appending a byte-identical
+  latest record is a no-op (idempotent recompute); a genuinely different
+  value is appended with `supersedes` pointing at the previous record hash —
+  history preserved, never mutated. `record_hash`/`labels_hash` are
+  canonical SHA-256 digests (labels_hash is the future dataset-hash seed for
+  M2). Malformed lines raise (integrity is loud, never skipped).
+- Single price truth: the same Yahoo close series the scoring path uses; no
+  separate adjustment.
+- Leakage safety is test-pinned with poisoned-frame probes: bars beyond a
+  horizon's window cannot change that horizon's label (or its realized vol);
+  interior window bars change realized vol but not the exit-close-based
+  return; pre-as_of bars other than the entry close change nothing; the
+  labels_hash is stable under all of these.
+- Contract: `OutcomeLabelSet` dataclass in `core/schemas.py`;
+  `build_and_persist_outcome_labels` for the append flow;
+  `latest_outcome_labels` resolves the newest record per horizon.
+- Acceptance: 28 hermetic tests (`tests/test_labels.py`). Full suite:
+  299/299 pass.
 
 ### V2. Walk-forward backtest engine
 

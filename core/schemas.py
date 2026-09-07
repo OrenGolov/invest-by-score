@@ -306,6 +306,44 @@ class RegimeSnapshot:
 
 
 @dataclass
+class OutcomeLabelSet:
+    """Versioned, leakage-safe outcome labels for one decision (Sprint V1).
+
+    `core.labels.build_outcome_labels` remains the wire format (a plain
+    dict, for JSON serialization). Semantics:
+
+    - Labels are computed strictly from bars in (as_of, as_of + h] where h
+      is counted in trading sessions. The entry bar (last bar <= as_of)
+      supplies only the base close.
+    - A horizon's label is null until the horizon has fully elapsed relative
+      to the DATA'S LATEST BAR (never wall-clock); partially elapsed
+      horizons are never emitted and never persisted.
+    - status: OK (all horizons matured), PARTIAL (some), PENDING (none),
+      UNAVAILABLE (fetch failed / no entry bar), INVALID is impossible here
+      (a future as_of raises before any label math, mirroring the market
+      data agent).
+    - labels_hash is the deterministic digest of the matured horizon
+      payloads — the future seed for dataset hashing (Sprint M2).
+    """
+
+    ticker: str
+    as_of: str
+    status: str
+    label_version: str
+    entry_bar: str | None
+    entry_close: float | None
+    latest_bar: str | None
+    horizons: dict[str, Any] = field(default_factory=dict)
+    matured_horizons: list[str] = field(default_factory=list)
+    pending_horizons: list[str] = field(default_factory=list)
+    labels_hash: str = ""
+    reason: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class VetoRecord:
     agent: str
     status: str

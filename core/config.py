@@ -387,3 +387,44 @@ REGIME_MOMENTUM_MARGIN_SCALE = 0.05
 # long-term structural view is regime-agnostic in v1; its own volatility drag
 # already discounts regime risk there.
 REGIME_RISKOFF_MOMENTUM_DAMPING = 0.5
+
+# --- Outcome labels (V1) ---------------------------------------------------------
+# Leakage-safe labels for every persisted decision, computed strictly from
+# bars in (as_of, as_of + h] where h is counted in TRADING SESSIONS (no
+# calendar ambiguity). The evaluator lives in core/labels.py; thresholds and
+# versions live here so governance reads them from exactly one place.
+#
+# Boundary rule: a horizon's label is null until the horizon has fully
+# elapsed RELATIVE TO THE DATA'S LATEST BAR (never wall-clock) — partially
+# elapsed horizons are never emitted, so no partial-window leakage can enter
+# training or evaluation. Labels use the same adjusted close series as the
+# scoring path (single price truth); label thresholds are versioned via
+# OUTCOME_LABEL_VERSION so changing them never rewrites history.
+
+OUTCOME_LABEL_VERSION = "outcome-label-v1"
+
+# Horizon name -> trading-session count after the as_of entry bar.
+LABEL_HORIZON_SESSIONS = {"1d": 1, "5d": 5, "20d": 20, "60d": 60}
+
+# label_20d_up is True when forward_return_20d is STRICTLY greater than this
+# threshold (0.0 = any positive forward return).
+OUTCOME_LABEL_UP_THRESHOLD = 0.0
+
+# Calendar-day coverage the provider fetch must reach AHEAD of as_of (~60
+# sessions of future window plus a holiday buffer) so matured horizons are
+# actually visible in the fetched frame.
+LABEL_CALENDAR_COVERAGE_DAYS = 130
+
+
+def _validate_label_config() -> None:
+    """Import-time guard: horizons are positive sessions, threshold sane."""
+    if not LABEL_HORIZON_SESSIONS:
+        raise ValueError("LABEL_HORIZON_SESSIONS must not be empty")
+    for name, sessions in LABEL_HORIZON_SESSIONS.items():
+        if not isinstance(sessions, int) or sessions < 1:
+            raise ValueError(f"LABEL_HORIZON_SESSIONS[{name!r}] must be a positive int, got {sessions!r}")
+    if OUTCOME_LABEL_UP_THRESHOLD < 0.0:
+        raise ValueError("OUTCOME_LABEL_UP_THRESHOLD must be non-negative")
+
+
+_validate_label_config()
