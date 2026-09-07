@@ -467,13 +467,40 @@ by business reality, market narrative, or both.
   and thesis classification, exact reconciliation, explanation assembly,
   and determinism. Full suite: 253/253 pass.
 
-### N6. Deferred-but-slotted feature gaps (from the Sprint-2 review)
+### N6. Deferred-but-slotted feature gaps ✓ DONE
 
-- ATR(14), 60d trend slope (linear regression of closes), 50/100/150/200d
-  trailing returns — added to the feature contract with full provenance; none
-  may enter a scorer without a weight and a test.
-- Breadth/participation: requires an index-constituent adapter; explicitly
-  deferred with a `breadth` registry placeholder (`provider_key_required`).
+Implemented 2026-09-03. Features are registered with full provenance and
+DEFERRED — none may enter a scorer without a weight and a test (pinned).
+
+- ATR(14): `agents/market_data_agent.py::_average_true_range` — simple mean
+  of true range over the last 14 sessions (not Wilder smoothing; versioned
+  with `MARKET_FEATURE_VERSION`). True range = max(high − low,
+  |high − prev_close|, |low − prev_close|); the first session's TR is
+  explicitly undefined (NaN — high-low never masquerades as a full range).
+  Strict window: `None` until 15 sessions exist; a shorter mean is a
+  different, noisier quantity and must not be published as `atr_14`.
+- 60d trend slope: `_trend_slope` — exact least-squares slope of the last
+  60 closes versus session position (price/session, signed); strict window,
+  `None` until 60 sessions.
+- 50/100/150/200d trailing returns: reuse the anchored `_pct_change` family
+  convention (0.0 until the anchor session exists), matching the existing
+  `change_20d/60d` behavior.
+- All six (`change_50d/100d/150d/200d`, `atr_14`, `trend_slope_60d`) appear
+  as top-level snapshot fields AND provenance-complete feature contracts;
+  `MarketSnapshot.from_dict` canonicalizes them.
+- Scorer neutrality is test-enforced: the names are absent from
+  `CURRENT_SCORE_FEATURES`/`LONG_TERM_SCORE_FEATURES` and mutating the new
+  snapshot fields cannot move `_score_current_time`/`_score_long_term`.
+  Wiring one in later requires a weight and a test by house rule.
+- Breadth/participation: explicitly deferred with a `breadth` entry in
+  `fetch_data.SOURCE_REGISTRY` (`provider_key_required`,
+  `base_confidence: 0.0`, `domain: market_breadth`). Survivorship-safe
+  breadth requires an index-constituent adapter and can never be inferred
+  from price, volume, or technical indicators.
+- Acceptance: 18 hermetic tests (`tests/test_deferred_features.py`) —
+  value correctness against hand-computed/independent definitions, strict
+  windows, provenance, PIT (future bars cannot change features), scorer
+  neutrality, and the breadth placeholder.
 
 ---
 

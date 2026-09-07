@@ -29,6 +29,56 @@ def _pct_change(series: pd.Series, periods: int = 1) -> float:
     return float((series.iloc[-1] / previous) - 1.0)
 
 
+def _average_true_range(history: pd.DataFrame, window: int = 14) -> float | None:
+    """ATR(window): simple mean of true range over the last `window` sessions.
+
+    True range per session: max(high - low, |high - previous close|,
+    |low - previous close|). The first session has no previous close, so its
+    true range is undefined (NaN — high-low must never masquerade as a full
+    range) and the mean only exists once `window` true ranges exist, i.e.
+    `window + 1` sessions. Strict window: None until then, because a mean
+    over fewer sessions is a different, noisier quantity that must not be
+    published under the atr_14 name (no silent redefinition). v1 uses a
+    simple mean, not Wilder smoothing; that choice is versioned with
+    MARKET_FEATURE_VERSION.
+    """
+    if len(history) < window + 1:
+        return None
+    high = history["High"].astype(float)
+    low = history["Low"].astype(float)
+    prev_close = history["Close"].astype(float).shift(1)
+    true_range = pd.concat(
+        [high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1
+    ).max(axis=1)
+    true_range.iloc[0] = float("nan")
+    atr = true_range.rolling(window=window, min_periods=window).mean().iloc[-1]
+    if pd.isna(atr):
+        return None
+    return round(float(atr), 4)
+
+
+def _trend_slope(close: pd.Series, window: int = 60) -> float | None:
+    """Least-squares slope of the last `window` closes versus session position.
+
+    Units: price per session, signed. Strict window: None until `window`
+    sessions exist — a shorter fit is a different quantity under the same
+    name (no silent redefinition).
+    """
+    if len(close) < window:
+        return None
+    window_closes = close.iloc[-window:].astype(float)
+    mean_position = (window - 1) / 2.0
+    mean_close = float(window_closes.mean())
+    numerator = sum(
+        (position - mean_position) * (float(value) - mean_close)
+        for position, value in zip(range(window), window_closes)
+    )
+    denominator = sum((position - mean_position) ** 2 for position in range(window))
+    if denominator == 0:
+        return None
+    return round(float(numerator / denominator), 6)
+
+
 # Calendar days that must pass without a session before the data is treated
 # as having a coverage hole. Weekends (2 days) and most holiday clusters (3-4)
 # are normal exchange closures; stalls of five or more calendar days indicate
@@ -115,6 +165,18 @@ def fetch_market_snapshot(ticker: str, as_of: str, timestamp: str | None = None)
     change_5d = _pct_change(history["Close"], 5)
     change_20d = _pct_change(history["Close"], 20)
     change_60d = _pct_change(history["Close"], 60)
+    # Sprint N6 slotted features: registered with full provenance below but
+    # deliberately NOT consumed by any scorer — none may enter a scorer
+    # without a weight and a test (test_deferred_features.py pins that).
+    # Trailing returns reuse the anchored _pct_change family convention
+    # (0.0 until the anchor session exists); ATR and the slope are
+    # strict-window features and stay None until their full window exists.
+    change_50d = _pct_change(history["Close"], 50)
+    change_100d = _pct_change(history["Close"], 100)
+    change_150d = _pct_change(history["Close"], 150)
+    change_200d = _pct_change(history["Close"], 200)
+    atr_14 = _average_true_range(history, window=14)
+    trend_slope_60d = _trend_slope(close, window=60)
     trend_vs_20d_mean = float(latest_close / close_20d_mean - 1.0) if close_20d_mean else 0.0
 
     bars_available = len(history)
@@ -185,6 +247,13 @@ def fetch_market_snapshot(ticker: str, as_of: str, timestamp: str | None = None)
         "change_5d": _feature("change_5d", change_5d, "5d"),
         "change_20d": _feature("change_20d", change_20d, "20d"),
         "change_60d": _feature("change_60d", change_60d, "60d"),
+        # Sprint N6 slotted features: provenance-complete, scorer-deferred.
+        "change_50d": _feature("change_50d", change_50d, "50d"),
+        "change_100d": _feature("change_100d", change_100d, "100d"),
+        "change_150d": _feature("change_150d", change_150d, "150d"),
+        "change_200d": _feature("change_200d", change_200d, "200d"),
+        "atr_14": _feature("atr_14", atr_14, "14d"),
+        "trend_slope_60d": _feature("trend_slope_60d", trend_slope_60d, "60d"),
         "trend_vs_20d_mean": _feature("trend_vs_20d_mean", trend_vs_20d_mean, "20d"),
         "rsi": _feature("rsi", round(float(rsi), 2), "14d"),
         "volatility": _feature("volatility", round(float(volatility), 4), "30d"),
@@ -237,6 +306,12 @@ def fetch_market_snapshot(ticker: str, as_of: str, timestamp: str | None = None)
         "change_5d": change_5d,
         "change_20d": change_20d,
         "change_60d": change_60d,
+        "change_50d": change_50d,
+        "change_100d": change_100d,
+        "change_150d": change_150d,
+        "change_200d": change_200d,
+        "atr_14": atr_14,
+        "trend_slope_60d": trend_slope_60d,
         "high_20d": float(recent_20["High"].max()),
         "low_20d": float(recent_20["Low"].min()),
         "trend_vs_20d_mean": trend_vs_20d_mean,

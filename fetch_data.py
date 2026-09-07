@@ -54,6 +54,51 @@ PORTFOLIO_TICKERS = [
     "VRT",
     "ANET",
     "CAT",
+    "PLTR",
+    "AAPL",
+    "AMZN",
+    "TSLA",
+    "META",
+    "TASE",
+    "AVGO",
+    "AMD",
+    "INTC",
+    "IREN",
+    "QCOM",
+    "BE",
+    "FTNT",
+    "CRWD",
+    "PANW",
+    "OKTA",
+    "NASA",
+    "SPCX",
+    "ORCL",
+    "NOW",
+    "MRVL",
+    "SOFI",
+    "UBER",
+    "CBRS",
+    "HOOD",
+    "RGTI",
+    "IONQ",
+    "RKLB",
+    "NBIS",
+    "GLW",
+    "NOK",
+    "LRCX",
+    "CGNX",
+    "ONDS",
+    "ISRG",
+    "CEG",
+    "CAT",
+    "LLY",
+    "MP",
+    "MRNA",
+    "DELL",
+    "NU",
+    "MSTR",
+    "KEEL",
+    "OUST"
 ]
 
 
@@ -279,6 +324,20 @@ SOURCE_REGISTRY = {
         "status": "provider_key_required",  # until FRED_API_KEY resolves (Sprint N3)
         "fallback_rank": 1,
         "domain": "macro_conditions",
+    },
+    # Sprint N6: breadth/participation is explicitly DEFERRED, not bolted on.
+    # It requires an index-constituent adapter (membership history is
+    # point-in-time data — survivorship-safe breadth cannot be inferred from
+    # price, volume, or any technical indicator). Zero base confidence until
+    # a real adapter connects.
+    "breadth": {
+        "provider": "Index constituents (deferred)",
+        "source_type": "market_breadth",
+        "source_id": "breadth_provider_required",
+        "base_confidence": 0.0,
+        "status": "provider_key_required",
+        "fallback_rank": 1,
+        "domain": "market_breadth",
     },
 }
 
