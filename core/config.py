@@ -428,3 +428,42 @@ def _validate_label_config() -> None:
 
 
 _validate_label_config()
+
+# --- Walk-forward backtest (V2) --------------------------------------------------
+# Validation infrastructure only — nothing here is a production trading path.
+# Folding: train [t0, t1] -> embargo (>= max label horizon, i.e. 60 sessions)
+# -> validation -> advance; the final frozen configuration is evaluated once
+# on a never-touched tail holdout. The embargo protects both features (PIT
+# eligibility, already enforced) and labels (V1 boundary rule).
+
+BACKTEST_EMBARGO_SESSIONS = 60
+BACKTEST_FOLD_SESSIONS = 120
+BACKTEST_HOLDOUT_SESSIONS = 60
+
+# Versioned harness strategy: decisions at bar t act at bar t+1 open.
+# Enter long when the score is at/above BACKTEST_ENTER_SCORE and the posture
+# is not NO_TRADE; exit when below BACKTEST_EXIT_SCORE; hold in between.
+BACKTEST_STRATEGY_VERSION = "backtest-strategy-v1"
+BACKTEST_ENTER_SCORE = 6.5
+BACKTEST_EXIT_SCORE = 4.5
+
+BACKTEST_INITIAL_CAPITAL = 100_000.0
+BACKTEST_TRADE_NOTIONAL = 50_000.0
+BACKTEST_AVG_DOLLAR_VOLUME_WINDOW = 20
+
+
+def _validate_backtest_config() -> None:
+    """Import-time guard: the embargo must cover the longest label horizon."""
+    max_horizon = max(LABEL_HORIZON_SESSIONS.values())
+    if BACKTEST_EMBARGO_SESSIONS < max_horizon:
+        raise ValueError(
+            f"BACKTEST_EMBARGO_SESSIONS ({BACKTEST_EMBARGO_SESSIONS}) must be >= the max "
+            f"label horizon ({max_horizon}) — walk-forward folds would leak label information."
+        )
+    if BACKTEST_ENTER_SCORE <= BACKTEST_EXIT_SCORE:
+        raise ValueError("BACKTEST_ENTER_SCORE must be above BACKTEST_EXIT_SCORE")
+    if BACKTEST_FOLD_SESSIONS < 1 or BACKTEST_HOLDOUT_SESSIONS < 1:
+        raise ValueError("fold and holdout session counts must be positive")
+
+
+_validate_backtest_config()

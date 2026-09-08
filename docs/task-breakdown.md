@@ -560,31 +560,57 @@ trading sessions.
 - Acceptance: 28 hermetic tests (`tests/test_labels.py`). Full suite:
   299/299 pass.
 
-### V2. Walk-forward backtest engine
+### V2. Walk-forward backtest engine ✓ DONE
 
-- Objective: replay the live scoring path over history with realistic costs
-  and strict temporal hygiene, producing comparable run manifests.
-- Folding: train window `[t0, t1]` → embargo (≥ max horizon, i.e. 60 sessions)
-  → validation `[t1 + embargo, t2]` → advance; final frozen configuration
-  evaluated once on a never-touched tail period. The embargo applies to both
-  features (via PIT eligibility, already enforced) and labels (V1).
-- Execution model: decisions at bar `t` act at bar `t+1` open with costs —
-  spread (bps by liquidity bucket), square-root market-impact slippage as a
-  function of participation, commission — all parameters in a versioned cost
-  table, never inline.
-- Metrics module (pure functions, deterministic): CAGR, Sharpe (annualized,
-  configurable rf), Sortino, Calmar, max drawdown, win rate, profit factor,
-  exposure, turnover, rejection rate. Emit per-fold and aggregate.
-- Run manifest (required, persisted next to results): code commit, feature
-  versions, ensemble version, cost table version, data hashes (raw store
-  digests), random seed if any, config snapshot. A run without a manifest is
-  invalid by definition.
-- Implementation shape: `core/backtest/` package — `engine.py`,
-  `costs.py`, `metrics.py`, `manifest.py`; reuses `fetch_market_snapshot` via
-  a cached-history injection seam so backtests run offline from the raw store.
+Implemented 2026-09-03. Package core/backtest/ — costs.py, metrics.py,
+manifest.py, engine.py — validation infrastructure only (never a
+production trading path).
+
+- Folding (engine.py::build_walk_forward_folds): anchored train
+  [0, t1] → embargo (t1, t1 + e] → validation
+  [t1 + e + 1, t1 + e + fold_sessions] → advance. The embargo is
+  enforced >= the max label horizon (60 sessions) at import time
+  (BACKTEST_EMBARGO_SESSIONS) and again per fold construction; the final
+  BACKTEST_HOLDOUT_SESSIONS tail is excluded from every fold and evaluated
+  once with the frozen configuration (evaluation: holdout_once).
+- Offline replay seam (offline_replay_seam): injects cached price frames
+  into the market-data agent, the regime agent, and the V1 label builder,
+  and forces news/sentiment/macro to their no-key UNAVAILABLE contracts
+  (fundamentals take the documented offline fallback) — the LIVE scoring
+  path (uild_score) replays offline and deterministically. Provider
+  overrides are recorded in the manifest.
+- Execution model (costs.py, COST_TABLE_V1 / acktest-cost-table-v1):
+  decisions at bar t act at bar t+1 open; per-side costs = half spread by
+  liquidity bucket (fail-closed: unknown liquidity pays the widest spread)
+  + square-root market impact (bps = coefficient x sqrt(participation),
+  worst-case participation when unknown) + commission. All parameters in
+  the versioned table, never inline.
+- Metrics (metrics.py, acktest-metrics-v1): pure, deterministic —
+  CAGR, Sharpe (annualized, configurable rf), Sortino, Calmar, max
+  drawdown, win rate, profit factor, exposure, turnover, rejection rate;
+  documented None conventions keep results JSON-safe. Per-fold and
+  aggregate (pooled daily returns/trades/decisions).
+- Run manifest (manifest.py, acktest-manifest-v1): code commit,
+  feature/ensemble/score/label/cost-table/strategy versions, canonical data
+  digest, config snapshot (including the cost table), seed, provider
+  overrides; 
+un_hash is the canonical SHA-256 of all of it.
+  alidate_manifest treats an incomplete manifest as an invalid run;
+  seed: None is legitimate (no randomness).
+- Harness strategy (acktest-strategy-v1): enter long at score >= 6.5
+  when the posture is not NO_TRADE; exit below 4.5; hold between. The final
+  bar's signal cannot execute inside a window (documented boundary).
+- Label alignment: every injected label is verified per decision against
+  the canonical V1 recomputation by 
+ecord_hash; any mismatch aborts the
+  run with BacktestLeakageError (leaked_labels_detected) before any
+  metric exists.
 - Acceptance: a deliberately leaked variant (labels shifted one bar early)
-  is detected and rejected by the harness; identical inputs rerun to
-  identical metrics; cost parameters demonstrably affect results.
+  is detected and rejected by the harness (test); identical inputs rerun to
+  identical results — the full run dict is byte-equal (manifest carries no
+  wall-clock); cost parameters demonstrably change final equity and the run
+  hash (test). 23 tests in 	ests/test_backtest.py. Full suite: 322/322
+  pass.
 
 ### V3. Paper-trading order engine (simulation only)
 

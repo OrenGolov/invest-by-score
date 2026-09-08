@@ -98,7 +98,8 @@ PORTFOLIO_TICKERS = [
     "NU",
     "MSTR",
     "KEEL",
-    "OUST"
+    "OUST",
+    "VST"
 ]
 
 
