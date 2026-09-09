@@ -41,6 +41,9 @@ CACHE_DIR = Path(__file__).parent / "data"
 DEFAULT_CACHE_TTL = timedelta(hours=24)
 
 # Portfolio tracked by this project.
+# Note: one entry per ticker (duplicates double batch fetches and raw-store
+# appends); symbols must resolve on Yahoo's chart API — non-US listings need
+# a suffix (e.g. ".TA" for Tel Aviv) and were never exercised in this pipeline.
 PORTFOLIO_TICKERS = [
     "VOO",
     "CIBR",
@@ -59,8 +62,7 @@ PORTFOLIO_TICKERS = [
     "AMZN",
     "TSLA",
     "META",
-    "TASE",
-    "AVGO",
+    ##"TASE",
     "AMD",
     "INTC",
     "IREN",
@@ -81,8 +83,8 @@ PORTFOLIO_TICKERS = [
     "HOOD",
     "RGTI",
     "IONQ",
-    "RKLB",
     "NBIS",
+    "CRWV",
     "GLW",
     "NOK",
     "LRCX",
@@ -90,16 +92,33 @@ PORTFOLIO_TICKERS = [
     "ONDS",
     "ISRG",
     "CEG",
-    "CAT",
     "LLY",
     "MP",
     "MRNA",
     "DELL",
     "NU",
-    "MSTR",
     "KEEL",
     "OUST",
-    "VST"
+    "VST",
+    "QCOM"
+    "CRWV",
+    "TER",
+    "ARM",
+    "ASML",
+    "KLAC",
+    "CCEP",
+    "AEP",
+    "EXC",
+    "BKR",
+    "ODFL",
+    "ALAB",
+    "ABNB",
+    "VRTX",
+    "AXON",
+    "DDOG",
+    "WBD",
+    "CSCO"
+
 ]
 
 
