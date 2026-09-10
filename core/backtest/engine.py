@@ -34,7 +34,12 @@ from unittest.mock import patch
 
 import pandas as pd
 
-from core.backtest.costs import COST_TABLE_V1, COST_TABLE_VERSION, execution_price
+from core.backtest.costs import (
+    COST_TABLE_V2,
+    COST_TABLE_VERSION,
+    execution_cost_record,
+    realized_vol_daily,
+)
 from core.backtest.manifest import build_manifest, validate_manifest
 from core.backtest.metrics import compute_metrics
 from core.config import (
@@ -204,11 +209,14 @@ def _replay_window(
     position_flags: list[int] = []
     trades: list[dict] = []
     decisions: list[dict] = []
+    executions: list[dict] = []
     open_trade: dict | None = None
     rejected_count = 0
     position_changes = 0
     label_evaluated = 0
     label_hits = 0
+    total_cost_notional = 0.0
+    total_cost_bps_weighted = 0.0
     prev_equity: float | None = None
 
     for t in range(start, end + 1):
@@ -239,9 +247,23 @@ def _replay_window(
             side = "buy" if target == 1 else "sell"
             avg_dollar_volume = _avg_dollar_volume(frame, t)
             participation = (trade_notional / avg_dollar_volume) if avg_dollar_volume else None
-            price = execution_price(
-                float(frame["Open"].iloc[t + 1]), side, participation, avg_dollar_volume, cost_table
+            # V3: realized daily volatility is an explicit impact input — the
+            # square-root law scales with it; None falls back to the neutral
+            # vol factor, and the execution record states which path ran.
+            daily_vol = realized_vol_daily(frame, t)
+            cost_record = execution_cost_record(
+                side=side,
+                open_price=float(frame["Open"].iloc[t + 1]),
+                participation=participation,
+                avg_dollar_volume=avg_dollar_volume,
+                daily_vol=daily_vol,
+                order_notional=trade_notional,
+                table=cost_table,
             )
+            price = cost_record["executed_price"]
+            executions.append({"decision_bar": as_of, **cost_record})
+            total_cost_notional += cost_record["cost_notional"]
+            total_cost_bps_weighted += cost_record["total_bps"]
             position_changes += 1
             if side == "buy":
                 shares = int(trade_notional / price)
@@ -250,6 +272,12 @@ def _replay_window(
                     "entry_bar": frame.index[t + 1].strftime("%Y-%m-%d %H:%M:%S"),
                     "entry_price": price,
                     "shares": shares,
+                    "entry_costs": {
+                        key: cost_record[key]
+                        for key in ("bucket", "half_spread_bps", "impact_bps", "vol_factor",
+                                    "commission_bps", "total_bps", "clamped", "cost_notional")
+                        if key in cost_record
+                    },
                 }
                 position = 1
             else:
@@ -259,6 +287,12 @@ def _replay_window(
                     "exit_bar": frame.index[t + 1].strftime("%Y-%m-%d %H:%M:%S"),
                     "exit_price": price,
                     "return": round(price / open_trade["entry_price"] - 1.0, 6),
+                    "exit_costs": {
+                        key: cost_record[key]
+                        for key in ("bucket", "half_spread_bps", "impact_bps", "vol_factor",
+                                    "commission_bps", "total_bps", "clamped", "cost_notional")
+                        if key in cost_record
+                    },
                 })
                 open_trade = None
                 position = 0
@@ -293,12 +327,18 @@ def _replay_window(
         position_changes=position_changes,
         sessions=end - start + 1,
     )
+    execution_count = len(executions)
     return {
         "sessions": end - start + 1,
         "decisions": decisions,
         "rejected_count": rejected_count,
         "position_changes": position_changes,
         "trades": trades,
+        "executions": executions,
+        "execution_count": execution_count,
+        "total_cost_notional": round(total_cost_notional, 2),
+        "avg_execution_cost_bps": round(total_cost_bps_weighted / execution_count, 4) if execution_count else None,
+        "cost_drag": round(total_cost_notional / float(initial_capital), 6) if initial_capital else None,
         "daily_returns": daily_returns,
         "position_flags": position_flags,
         "equity_curve": equity_curve,
@@ -330,7 +370,7 @@ def run_walk_forward_backtest(
     the canonical V1 recomputation; any mismatch aborts the run with
     `BacktestLeakageError` before metrics exist.
     """
-    cost_table = cost_table if cost_table is not None else COST_TABLE_V1
+    cost_table = cost_table if cost_table is not None else COST_TABLE_V2
     initial_capital = initial_capital if initial_capital is not None else BACKTEST_INITIAL_CAPITAL
     trade_notional = trade_notional if trade_notional is not None else BACKTEST_TRADE_NOTIONAL
 
@@ -343,7 +383,7 @@ def run_walk_forward_backtest(
         "current_score": CURRENT_SCORE_VERSION,
         "long_term_score": LONG_TERM_SCORE_VERSION,
         "outcome_label": OUTCOME_LABEL_VERSION,
-        "cost_table": COST_TABLE_VERSION,
+        "cost_table": cost_table["cost_table_version"],
         "strategy": BACKTEST_STRATEGY_VERSION,
         "metrics": "backtest-metrics-v1",
     }
@@ -394,6 +434,9 @@ def run_walk_forward_backtest(
     sessions = 0
     label_evaluated = 0
     label_hits = 0
+    total_cost_notional = 0.0
+    total_cost_bps_weighted = 0.0
+    execution_count = 0
     for fold in fold_results:
         pooled_returns.extend(fold["daily_returns"])
         pooled_trades.extend(trade["return"] for trade in fold["trades"])
@@ -404,6 +447,9 @@ def run_walk_forward_backtest(
         sessions += fold["sessions"]
         label_evaluated += fold["label_evaluated"]
         label_hits += fold["label_hits"]
+        total_cost_notional += fold["total_cost_notional"]
+        total_cost_bps_weighted += (fold["avg_execution_cost_bps"] or 0.0) * fold["execution_count"]
+        execution_count += fold["execution_count"]
     pooled_equity: list[float] = []
     equity = float(initial_capital)
     for value in pooled_returns:
@@ -425,6 +471,10 @@ def run_walk_forward_backtest(
         "decision_count": decision_count,
         "rejected_count": rejected_count,
         "trade_count": len(pooled_trades),
+        "execution_count": execution_count,
+        "total_cost_notional": round(total_cost_notional, 2),
+        "avg_execution_cost_bps": round(total_cost_bps_weighted / execution_count, 4) if execution_count else None,
+        "cost_drag": round(total_cost_notional / float(initial_capital), 6) if initial_capital else None,
         "label_evaluated": label_evaluated,
         "label_hits": label_hits,
         "label_hit_rate": round(label_hits / label_evaluated, 6) if label_evaluated else None,

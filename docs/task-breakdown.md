@@ -612,7 +612,48 @@ ecord_hash; any mismatch aborts the
   hash (test). 23 tests in 	ests/test_backtest.py. Full suite: 322/322
   pass.
 
-### V3. Paper-trading order engine (simulation only)
+### V3. Transaction costs and slippage assumptions made explicit ✓ DONE
+
+Implemented 2026-09-03. The cost model evolved to acktest-cost-table-v2
+(core/backtest/costs.py) — transaction costs and slippage are now
+first-class, versioned, itemized artifacts, never hidden inside a price.
+
+- Volatility-adjusted square-root impact (the classic law made explicit):
+  impact_bps = impact_coefficient_bps * vol_factor * sqrt(participation)
+  with ol_factor = clamp(daily_vol / impact_vol_baseline_daily, min, max)
+  — daily_vol is the realized 20-session close-to-close volatility,
+  computed by the engine for every decision (
+ealized_vol_daily).
+- Explicit floor/cap: 	otal_bps is clamped to
+  [min_total_side_cost_bps, max_total_side_cost_bps] — never a
+  zero-cost fill, never an absurd-cost fill; every record states
+  clamped.
+- Fail-closed fallbacks made explicit: unknown liquidity → widest
+  spread; unknown participation → worst case 1.0; unknown volatility
+  → neutral vol factor 1.0 with ol_available: false stamped on the
+  record (the engine always computes it).
+- Itemized attribution: every execution emits
+  execution_cost_record (side, open/executed price, order notional,
+  participation, average dollar volume, daily vol, bucket, half-spread,
+  impact, vol factor, commission, raw and clamped totals, cost notional);
+  trades carry entry_costs/exit_costs; the aggregate reports
+  	otal_cost_notional, vg_execution_cost_bps, and cost_drag
+  (cost notional / initial capital).
+- Versioning: COST_TABLE_V1 frozen (no vol term, no clamp) so historical
+  runs replay under their original assumptions — V1-shaped records carry
+  no vol fields at all; every table carries its own
+  cost_table_version; the manifest states which table produced the run.
+- Binding documentation: docs/validation.md gains the “Transaction
+  Costs and Slippage Assumptions” section with the full model, every
+  parameter, and the explicitly accepted limitations (no intraday timing,
+  no partial fills, no borrow costs, no fees/rebates/taxes, open-gap risk
+  borne by the strategy, split-adjusted feed).
+- Acceptance: 10 new tests (vol scaling and clip bounds, floor/cap,
+  itemized records, unknown-table-version rejection, V1 backward
+  compatibility, explicit attribution in the engine, expensive table pays
+  more per execution and per unit of capital). Full suite: 332/332 pass.
+
+### V4. Paper-trading order engine (simulation only)
 
 - Objective: simulate the decision → order → fill loop with governance
   intact, producing the trade evidence later sprints consume.
@@ -631,7 +672,7 @@ ecord_hash; any mismatch aborts the
   decision produces an intent-shaped rejection, never a fill; live branch
   raises unconditionally.
 
-### V4. Monitoring foundations
+### V5. Monitoring foundations
 
 - Metrics snapshot per backtest/paper run: score distribution drift
   (population stability index vs trailing window), stale-data rate,
@@ -639,8 +680,6 @@ ecord_hash; any mismatch aborts the
   audit/outcome stores, no dashboard dependency.
 - Acceptance: drift function detects a seeded distribution shift in
   synthetic data; missing data degrades the report explicitly.
-
----
 
 ## Sprint M — ML Layer, Calibration, Model Registry
 

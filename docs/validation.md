@@ -30,6 +30,51 @@ advance the window, and test the final frozen model on untouched data. No
 future labels, revised values, or later source reliability weights may enter a
 prior fold.
 
+## Transaction Costs and Slippage Assumptions
+
+Binding for every backtest and paper fill. The cost model is a versioned
+table (core/backtest/costs.py, acktest-cost-table-v2 is current;
+acktest-cost-table-v1 is frozen for replaying historical assumptions),
+never inline constants.
+
+Model (per side):
+
+`
+total_bps = clamp(
+    half_spread(liquidity_bucket)
+    + impact_coefficient_bps * vol_factor * sqrt(participation)
+    + commission_bps,
+    min_total_side_cost_bps, max_total_side_cost_bps)
+
+vol_factor = clamp(daily_vol / impact_vol_baseline_daily,
+                   impact_vol_factor_min, impact_vol_factor_max)
+`
+
+- liquidity_bucket: micro / small / mid / large from the 20-session
+  average dollar volume. Unknown liquidity is fail-closed: the widest
+  spread applies.
+- participation = order notional / average dollar volume. Unknown
+  participation is fail-closed: worst case 1.0 (the order is the whole
+  day's volume).
+- daily_vol: realized close-to-close volatility of the trailing 20
+  sessions. Unknown volatility falls back to the neutral vol factor 1.0
+  and the execution record states ol_available: false — the engine
+  always computes it for replays.
+- The clamp makes degenerate fills impossible: never a zero-cost fill,
+  never an absurd-cost fill. Every record states clamped.
+- Every execution emits an itemized record (bucket, half-spread, impact,
+  vol factor, commission, raw and clamped totals, cost notional) — costs
+  are never hidden inside a price. The backtest aggregate reports
+  	otal_cost_notional, vg_execution_cost_bps, and cost_drag.
+
+Known limitations (explicitly accepted in v2): no intraday timing inside
+the bar (fills at the next open only), no partial fills, no borrow cost or
+call-loan modeling for shorts, no exchange fees/rebates or taxes, open-gap
+risk between decision and execution is borne by the strategy, and the
+close series is the provider's split-adjusted feed (dividends are not
+reinvested). Any of these becoming load-bearing requires a new cost-table
+version.
+
 ## Source Reliability and Hard Gates
 
 The governance layer enforces a fail-closed quality model.

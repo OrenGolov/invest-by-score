@@ -22,6 +22,7 @@ scoring path replays offline and deterministically. Coverage:
 
 from __future__ import annotations
 
+import math
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -91,6 +92,79 @@ class CostModelTests(unittest.TestCase):
             bt_costs.execution_price(100.0, "hold", 0.001, 50_000_000.0)
         with self.assertRaises(ValueError):
             bt_costs.execution_price(0.0, "buy", 0.001, 50_000_000.0)
+
+
+class CostModelV2Tests(unittest.TestCase):
+    """Sprint V3: the volatility-adjusted, clamped, itemized cost model."""
+
+    def test_version_stamped_tables(self):
+        self.assertEqual(bt_costs.COST_TABLE_VERSION, "backtest-cost-table-v2")
+        self.assertEqual(bt_costs.COST_TABLE_V1["cost_table_version"], "backtest-cost-table-v1")
+        self.assertEqual(bt_costs.COST_TABLE_V2["cost_table_version"], "backtest-cost-table-v2")
+
+    def test_unknown_cost_table_version_is_rejected(self):
+        broken = {**bt_costs.COST_TABLE_V2, "cost_table_version": "backtest-cost-table-vX"}
+        with self.assertRaises(ValueError):
+            bt_costs.total_side_cost_bps(0.001, 100_000_000.0, 0.02, broken)
+
+    def test_impact_scales_with_realized_volatility(self):
+        calm = bt_costs.total_side_cost_bps(0.001, 100_000_000.0, 0.005)
+        wild = bt_costs.total_side_cost_bps(0.001, 100_000_000.0, 0.06)
+        self.assertGreater(wild["impact_bps"], calm["impact_bps"])
+        self.assertAlmostEqual(calm["vol_factor"], 0.25, places=4)   # 0.005/0.02 clipped to the floor
+        self.assertAlmostEqual(wild["vol_factor"], 3.0, places=4)    # 0.06/0.02
+        self.assertFalse(calm["clamped"])
+        self.assertFalse(wild["clamped"])
+
+    def test_vol_factor_clip_bounds(self):
+        floor = bt_costs.total_side_cost_bps(0.001, 100_000_000.0, 0.0001)
+        cap = bt_costs.total_side_cost_bps(0.001, 100_000_000.0, 0.20)
+        self.assertEqual(floor["vol_factor"], bt_costs.COST_TABLE_V2["impact_vol_factor_min"])
+        self.assertEqual(cap["vol_factor"], bt_costs.COST_TABLE_V2["impact_vol_factor_max"])
+
+    def test_missing_volatility_uses_the_documented_neutral_factor(self):
+        costs = bt_costs.total_side_cost_bps(0.001, 100_000_000.0, None)
+        self.assertAlmostEqual(costs["vol_factor"], 1.0, places=9)
+        self.assertFalse(costs["vol_available"])
+
+    def test_floor_and_cap_clamp_the_total(self):
+        table = {**bt_costs.COST_TABLE_V2, "min_total_side_cost_bps": 5.0, "max_total_side_cost_bps": 10.0}
+        floored = bt_costs.total_side_cost_bps(0.00001, 500_000_000.0, 0.001, table)
+        capped = bt_costs.total_side_cost_bps(1.0, 100_000.0, 0.08, table)
+        self.assertEqual(floored["total_bps"], 5.0)
+        self.assertTrue(floored["clamped"])
+        self.assertEqual(capped["total_bps"], 10.0)
+        self.assertTrue(capped["clamped"])
+        unclamped = bt_costs.total_side_cost_bps(0.001, 100_000_000.0, 0.02)
+        self.assertFalse(unclamped["clamped"])
+
+    def test_execution_cost_record_is_fully_itemized(self):
+        record = bt_costs.execution_cost_record(
+            "buy", 100.0, 0.001, 100_000_000.0, 0.02, 50_000.0
+        )
+        for field in ("side", "open_price", "executed_price", "order_notional",
+                      "participation", "avg_dollar_volume", "daily_vol", "bucket",
+                      "half_spread_bps", "impact_bps", "vol_factor", "commission_bps",
+                      "total_bps", "clamped", "cost_notional"):
+            self.assertIn(field, record, field)
+        self.assertAlmostEqual(
+            record["executed_price"],
+            record["open_price"] * (1 + record["total_bps"] / 10_000.0),
+            places=6,
+        )
+        self.assertAlmostEqual(record["cost_notional"], 50_000.0 * record["total_bps"] / 10_000.0, places=2)
+
+    def test_v1_table_still_replays_under_the_historical_assumptions(self):
+        costs = bt_costs.total_side_cost_bps(0.001, 100_000_000.0, 0.08, bt_costs.COST_TABLE_V1)
+        # V1 has no volatility term and no clamp: its record carries no vol
+        # fields at all (no fake neutral), and impact ignores daily_vol.
+        self.assertNotIn("vol_factor", costs)
+        self.assertNotIn("vol_available", costs)
+        self.assertEqual(
+            costs["impact_bps"],
+            round(bt_costs.COST_TABLE_V1["impact_coefficient_bps"] * math.sqrt(0.001), 4),
+        )
+        self.assertFalse(costs["clamped"])
 
 
 class MetricsTests(unittest.TestCase):
@@ -213,7 +287,7 @@ class ReplayWindowTests(unittest.TestCase):
             replay = _replay_window(
                 "TEST", frame, 0, 29,
                 initial_capital=100_000.0, trade_notional=50_000.0,
-                injected_labels=None, cost_table=bt_costs.COST_TABLE_V1,
+                injected_labels=None, cost_table=bt_costs.COST_TABLE_V2,
             )
         # One entry (decision t=3 -> execution t=4 open) and one exit
         # (decision t=20 -> execution t=21 open): a full round trip.
@@ -223,22 +297,42 @@ class ReplayWindowTests(unittest.TestCase):
         self.assertEqual(trade["entry_bar"], frame.index[4].strftime("%Y-%m-%d %H:%M:%S"))
         self.assertEqual(trade["exit_bar"], frame.index[21].strftime("%Y-%m-%d %H:%M:%S"))
         # Position 3: the 20-session volume window doesn't exist yet, so the
-        # engine takes the fail-closed worst-case cost path.
-        expected_entry = bt_costs.execution_price(
-            float(frame["Open"].iloc[4]), "buy", None, None
+        # engine takes the fail-closed worst-case cost path (micro bucket,
+        # participation worst case). Volatility is also unavailable there.
+        expected_entry = bt_costs.execution_cost_record(
+            "buy", float(frame["Open"].iloc[4]), None, None, None, 50_000.0,
+            table=bt_costs.COST_TABLE_V2,
         )
-        expected_exit = bt_costs.execution_price(
-            float(frame["Open"].iloc[21]), "sell",
-            50_000.0 / _avg_dollar_volume(frame, 20), _avg_dollar_volume(frame, 20),
+        # The exit has both volume and volatility history: full v2 model.
+        exit_participation = 50_000.0 / _avg_dollar_volume(frame, 20)
+        expected_exit = bt_costs.execution_cost_record(
+            "sell", float(frame["Open"].iloc[21]), exit_participation,
+            _avg_dollar_volume(frame, 20), bt_costs.realized_vol_daily(frame, 20),
+            50_000.0, table=bt_costs.COST_TABLE_V2,
         )
-        self.assertEqual(trade["entry_price"], expected_entry)
-        self.assertEqual(trade["exit_price"], expected_exit)
+        self.assertEqual(trade["entry_price"], expected_entry["executed_price"])
+        self.assertEqual(trade["exit_price"], expected_exit["executed_price"])
+        self.assertEqual(trade["entry_costs"], {
+            key: expected_entry[key] for key in (
+                "bucket", "half_spread_bps", "impact_bps", "vol_factor",
+                "commission_bps", "total_bps", "clamped", "cost_notional")
+        })
+        self.assertEqual(trade["exit_costs"], {
+            key: expected_exit[key] for key in (
+                "bucket", "half_spread_bps", "impact_bps", "vol_factor",
+                "commission_bps", "total_bps", "clamped", "cost_notional")
+        })
         self.assertGreater(trade["entry_price"], float(frame["Open"].iloc[4]))  # buy pays costs
         self.assertLess(trade["exit_price"], float(frame["Open"].iloc[21]))     # sell receives less
-        self.assertAlmostEqual(trade["return"], expected_exit / expected_entry - 1.0, places=6)
+        self.assertAlmostEqual(trade["return"], expected_exit["executed_price"] / expected_entry["executed_price"] - 1.0, places=6)
         # The final-bar signal (t=29) cannot execute inside the window.
         self.assertEqual(replay["decisions"][-1]["target_position"], 0)
         self.assertEqual(replay["position_changes"], 2)
+        # V3: every execution carries its itemized cost record.
+        self.assertEqual(len(replay["executions"]), 2)
+        self.assertTrue(all(execution["vol_available"] is not None for execution in replay["executions"]))
+        self.assertGreater(replay["total_cost_notional"], 0.0)
+        self.assertIsNotNone(replay["cost_drag"])
 
 
 class WalkForwardEngineTests(unittest.TestCase):
@@ -301,6 +395,48 @@ class WalkForwardEngineTests(unittest.TestCase):
         self.assertNotEqual(
             self.default_run["manifest"]["run_hash"],
             self.expensive_run["manifest"]["run_hash"],
+        )
+
+    def test_costs_are_explicitly_attributed(self):
+        # V3: no cost may hide inside a price — every execution carries its
+        # itemized record, and the aggregate states the total drag.
+        run = self.default_run
+        self.assertGreater(run["aggregate"]["execution_count"], 0)
+        self.assertGreater(run["aggregate"]["total_cost_notional"], 0.0)
+        self.assertIsNotNone(run["aggregate"]["avg_execution_cost_bps"])
+        self.assertIsNotNone(run["aggregate"]["cost_drag"])
+        self.assertGreater(run["aggregate"]["cost_drag"], 0.0)
+        executions = [
+            execution
+            for fold in run["folds"]
+            for execution in fold["executions"]
+        ]
+        self.assertEqual(len(executions), run["aggregate"]["execution_count"])
+        for execution in executions:
+            with self.subTest(bar=execution["decision_bar"], side=execution["side"]):
+                self.assertIn(execution["side"], ("buy", "sell"))
+                self.assertIn("bucket", execution)
+                self.assertIn("half_spread_bps", execution)
+                self.assertIn("impact_bps", execution)
+                self.assertIn("commission_bps", execution)
+                self.assertIn("total_bps", execution)
+                self.assertIn("cost_notional", execution)
+                self.assertAlmostEqual(
+                    execution["executed_price"],
+                    execution["open_price"] * (1 + execution["total_bps"] / 10_000.0)
+                    if execution["side"] == "buy"
+                    else execution["open_price"] * (1 - execution["total_bps"] / 10_000.0),
+                    places=6,
+                )
+
+    def test_expensive_table_pays_more_per_execution(self):
+        self.assertGreater(
+            self.expensive_run["aggregate"]["avg_execution_cost_bps"],
+            self.default_run["aggregate"]["avg_execution_cost_bps"],
+        )
+        self.assertGreater(
+            self.expensive_run["aggregate"]["cost_drag"],
+            self.default_run["aggregate"]["cost_drag"],
         )
 
 

@@ -9,7 +9,16 @@ Modules:
 Simulation only: nothing in this package is a production trading path.
 """
 
-from core.backtest.costs import COST_TABLE_V1, COST_TABLE_VERSION, execution_price, liquidity_bucket, total_side_cost_bps
+from core.backtest.costs import (
+    COST_TABLE_V1,
+    COST_TABLE_V2,
+    COST_TABLE_VERSION,
+    execution_cost_record,
+    execution_price,
+    liquidity_bucket,
+    realized_vol_daily,
+    total_side_cost_bps,
+)
 from core.backtest.engine import (
     BacktestLeakageError,
     build_walk_forward_folds,
@@ -21,15 +30,18 @@ from core.backtest.metrics import compute_metrics
 
 __all__ = [
     "COST_TABLE_V1",
+    "COST_TABLE_V2",
     "COST_TABLE_VERSION",
     "BacktestLeakageError",
     "MANIFEST_VERSION",
     "build_manifest",
     "build_walk_forward_folds",
     "compute_metrics",
+    "execution_cost_record",
     "execution_price",
     "liquidity_bucket",
     "offline_replay_seam",
+    "realized_vol_daily",
     "run_walk_forward_backtest",
     "total_side_cost_bps",
     "validate_manifest",
