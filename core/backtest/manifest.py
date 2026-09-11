@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+from pathlib import Path
 
 MANIFEST_VERSION = "backtest-manifest-v1"
 
@@ -113,3 +114,84 @@ def validate_manifest(manifest: dict) -> list[str]:
             f"unknown manifest_version {manifest.get('manifest_version')!r}"
         )
     return problems
+
+
+# --- Manifest store (Sprint V4) --------------------------------------------------
+# Run manifests are MANDATORY: every backtest persists its manifest to
+# data/backtest_runs.jsonl as part of the run, and a run whose manifest
+# fails validation is refused before any work happens. The store is
+# append-only: identical recomputes are skipped (the run hash is the
+# canonical digest of all inputs), and a record that fails validation
+# on load is an integrity violation, not a warning.
+
+BACKTEST_RUNS_PATH = Path(__file__).resolve().parent.parent / "data" / "backtest_runs.jsonl"
+
+
+def require_valid_manifest(manifest: dict) -> None:
+    """Raise ValueError when the manifest fails validation (mandatory gate)."""
+    problems = validate_manifest(manifest)
+    if problems:
+        raise ValueError(
+            "invalid run manifest — a run without a valid manifest is invalid "
+            f"by definition: {'; '.join(problems)}"
+        )
+
+
+def _read_records(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    records: list[dict] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"backtest run store {path} line {line_number} is not valid JSON "
+                    f"(append-only integrity violated): {exc}"
+                ) from exc
+    return records
+
+
+def persist_run_manifest(manifest: dict, path: str | Path | None = None) -> bool:
+    """Append the manifest to the run store; idempotent per run hash.
+
+    Returns True when a record was appended, False when an identical record
+    for the same run hash already exists (deterministic recompute). The
+    manifest is validated BEFORE it is written — an invalid manifest is
+    never stored. Because the run hash is the canonical digest of all
+    inputs, a same-hash/different-content record would be corruption and
+    raises rather than appending.
+    """
+    require_valid_manifest(manifest)
+    store_path = Path(path) if path is not None else BACKTEST_RUNS_PATH
+    store_path.parent.mkdir(parents=True, exist_ok=True)
+    for record in _read_records(store_path):
+        if record.get("run_hash") == manifest["run_hash"]:
+            if record == manifest:
+                return False  # identical recompute: nothing to append
+            raise ValueError(
+                f"manifest integrity violation: run hash {manifest['run_hash']} "
+                f"already exists with different content — the canonical digest "
+                f"covers all inputs, so this is a corrupted record, not a revision."
+            )
+    with store_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(manifest, sort_keys=True, default=str) + "\n")
+    return True
+
+
+def load_run_manifests(path: str | Path | None = None) -> list[dict]:
+    """Read every persisted manifest, newest last; strict on integrity."""
+    store_path = Path(path) if path is not None else BACKTEST_RUNS_PATH
+    return _read_records(store_path)
+
+
+def load_manifest_by_run_hash(run_hash: str, path: str | Path | None = None) -> dict | None:
+    """Resolve the persisted manifest for one run hash; None when absent."""
+    for record in load_run_manifests(path=path):
+        if record.get("run_hash") == run_hash:
+            return record
+    return None

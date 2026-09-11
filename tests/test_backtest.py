@@ -23,7 +23,9 @@ scoring path replays offline and deterministically. Coverage:
 from __future__ import annotations
 
 import math
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -34,13 +36,21 @@ from core.backtest import costs as bt_costs
 from core.backtest import metrics as bt_metrics
 from core.backtest.engine import (
     BacktestLeakageError,
+    BacktestManifestError,
     _avg_dollar_volume,
     _replay_window,
     build_walk_forward_folds,
     offline_replay_seam,
     run_walk_forward_backtest,
 )
-from core.backtest.manifest import MANIFEST_VERSION, build_manifest, validate_manifest
+from core.backtest.manifest import (
+    MANIFEST_VERSION,
+    build_manifest,
+    load_manifest_by_run_hash,
+    load_run_manifests,
+    persist_run_manifest,
+    validate_manifest,
+)
 from core.labels import _record_hash, build_outcome_labels
 
 
@@ -344,8 +354,14 @@ class WalkForwardEngineTests(unittest.TestCase):
         closes = _ramp(140, step=2.0) + _ramp(140, step=-2.0, base=100.0 + 2.0 * 139)
         cls.frame = _frame(closes)
         cls.geometry_kwargs = dict(fold_sessions=50, embargo_sessions=60, holdout_sessions=40)
-        cls.default_run = run_walk_forward_backtest("TEST", cls.frame, **cls.geometry_kwargs)
-        cls.second_run = run_walk_forward_backtest("TEST", cls.frame, **cls.geometry_kwargs)
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.manifest_store = Path(cls._tmp.name) / "backtest_runs.jsonl"
+        cls.default_run = run_walk_forward_backtest(
+            "TEST", cls.frame, manifest_store_path=cls.manifest_store, **cls.geometry_kwargs
+        )
+        cls.second_run = run_walk_forward_backtest(
+            "TEST", cls.frame, manifest_store_path=cls.manifest_store, **cls.geometry_kwargs
+        )
         expensive_table = {
             **bt_costs.COST_TABLE_V1,
             "spread_bps": {"micro": 250.0, "small": 120.0, "mid": 60.0, "large": 100.0},
@@ -353,8 +369,13 @@ class WalkForwardEngineTests(unittest.TestCase):
             "commission_bps": 5.0,
         }
         cls.expensive_run = run_walk_forward_backtest(
-            "TEST", cls.frame, cost_table=expensive_table, **cls.geometry_kwargs
+            "TEST", cls.frame, cost_table=expensive_table,
+            manifest_store_path=cls.manifest_store, **cls.geometry_kwargs
         )
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
 
     def test_manifest_is_valid_and_complete(self):
         manifest = self.default_run["manifest"]
@@ -443,6 +464,13 @@ class WalkForwardEngineTests(unittest.TestCase):
 class LeakageRejectionTests(unittest.TestCase):
     """A one-bar-early injected label is detected and the run is rejected."""
 
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.manifest_store = Path(self._tmp.name) / "backtest_runs.jsonl"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
     @staticmethod
     def _first_decision(frame):
         return frame.index[110].strftime("%Y-%m-%d %H:%M:%S")
@@ -465,8 +493,16 @@ class LeakageRejectionTests(unittest.TestCase):
                 "TEST", frame,
                 fold_sessions=50, embargo_sessions=60, holdout_sessions=40,
                 injected_labels=injected,
+                manifest_store_path=self.manifest_store,
             )
         self.assertEqual(result["label_alignment"], "verified")
+        # V4: the completed run persisted its manifest.
+        self.assertTrue(result["manifest_persisted"])
+        persisted = load_manifest_by_run_hash(
+            result["manifest"]["run_hash"], path=self.manifest_store
+        )
+        self.assertIsNotNone(persisted)
+        self.assertEqual(validate_manifest(persisted), [])
 
     def test_one_bar_early_label_is_rejected_before_any_metric(self):
         frame = _frame(_ramp(260, step=1.0))
@@ -498,9 +534,123 @@ class LeakageRejectionTests(unittest.TestCase):
                     "TEST", frame,
                     fold_sessions=50, embargo_sessions=60, holdout_sessions=40,
                     injected_labels=injected,
+                    manifest_store_path=self.manifest_store,
                 )
         self.assertIn("leaked_labels_detected", str(ctx.exception))
         self.assertIn("5d", str(ctx.exception))
+        # V4: an aborted run never reaches the manifest store — only
+        # completed runs exist.
+        self.assertEqual(load_run_manifests(path=self.manifest_store), [])
+
+
+class ManifestMandateTests(unittest.TestCase):
+    """V4: run manifests are mandatory — persisted, validated, enforced."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.manifest_store = Path(self._tmp.name) / "backtest_runs.jsonl"
+        self.frame = _frame(_ramp(260, step=1.0))
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _scripted_run(self):
+        """A fast, fully deterministic harness run (scripted scores)."""
+
+        def fake_build_score(ticker, as_of, persist_audit=False, **kwargs):
+            return SimpleNamespace(score=5.0, action="ANALYSIS_ONLY")
+
+        with patch("core.backtest.engine.build_score", fake_build_score):
+            return run_walk_forward_backtest(
+                "TEST", self.frame,
+                fold_sessions=50, embargo_sessions=60, holdout_sessions=40,
+                manifest_store_path=self.manifest_store,
+            )
+
+    def test_every_completed_run_persists_a_valid_manifest(self):
+        result = self._scripted_run()
+        self.assertTrue(result["manifest_persisted"])
+        persisted = load_run_manifests(path=self.manifest_store)
+        self.assertEqual(len(persisted), 1)
+        self.assertEqual(persisted[0], result["manifest"])
+        self.assertEqual(validate_manifest(persisted[0]), [])
+        self.assertEqual(
+            load_manifest_by_run_hash(result["manifest"]["run_hash"], path=self.manifest_store),
+            result["manifest"],
+        )
+        self.assertIsNone(
+            load_manifest_by_run_hash("no-such-hash", path=self.manifest_store)
+        )
+
+    def test_identical_rerun_is_idempotent_in_the_store(self):
+        first = self._scripted_run()
+        second = self._scripted_run()
+        self.assertEqual(first, second)  # byte-identical rerun
+        persisted = load_run_manifests(path=self.manifest_store)
+        self.assertEqual(len(persisted), 1)  # one run hash -> one record
+        self.assertEqual(persisted[0]["run_hash"], first["manifest"]["run_hash"])
+
+    def test_engine_refuses_to_run_without_a_valid_manifest(self):
+        broken = {"manifest_version": MANIFEST_VERSION}  # missing everything else
+        with patch("core.backtest.engine.build_manifest", return_value=broken):
+            with self.assertRaises(BacktestManifestError) as ctx:
+                self._scripted_run()
+        self.assertIn("invalid run manifest", str(ctx.exception))
+        # The refusal happens before any work: nothing was persisted, and
+        # the incomplete manifest was never stored either.
+        self.assertEqual(load_run_manifests(path=self.manifest_store), [])
+
+    def test_store_rejects_same_hash_with_different_content(self):
+        result = self._scripted_run()
+        manifest = result["manifest"]
+        tampered = {**manifest, "code_commit": "tampered"}
+        with self.assertRaises(ValueError) as ctx:
+            persist_run_manifest(tampered, path=self.manifest_store)
+        self.assertIn("integrity violation", str(ctx.exception))
+        # The original record is untouched.
+        self.assertEqual(
+            load_manifest_by_run_hash(manifest["run_hash"], path=self.manifest_store),
+            manifest,
+        )
+
+    def test_store_integrity_is_loud_on_malformed_lines(self):
+        self._scripted_run()
+        with self.manifest_store.open("a", encoding="utf-8") as handle:
+            handle.write("{not json}\n")
+        with self.assertRaises(ValueError):
+            load_run_manifests(path=self.manifest_store)
+
+    def test_aborted_runs_persist_nothing(self):
+        first_decision = self.frame.index[110].strftime("%Y-%m-%d %H:%M:%S")
+        with offline_replay_seam({"TEST": self.frame}):
+            canonical = build_outcome_labels("TEST", first_decision)
+        leaked_5d = dict(canonical["horizons"]["5d"])
+        leaked_5d["exit_bar"] = self.frame.index[114].strftime("%Y-%m-%d %H:%M:%S")
+        leaked_5d["forward_return"] = round(
+            float(self.frame["Close"].iloc[114]) / canonical["entry_close"] - 1.0, 6
+        )
+        leaked_5d["record_hash"] = _record_hash(leaked_5d)
+        injected = {
+            first_decision: {
+                "1d": canonical["horizons"]["1d"],
+                "5d": leaked_5d,
+                "20d": canonical["horizons"]["20d"],
+                "60d": canonical["horizons"]["60d"],
+            }
+        }
+
+        def fake_build_score(ticker, as_of, persist_audit=False, **kwargs):
+            return SimpleNamespace(score=5.0, action="ANALYSIS_ONLY")
+
+        with patch("core.backtest.engine.build_score", fake_build_score):
+            with self.assertRaises(BacktestLeakageError):
+                run_walk_forward_backtest(
+                    "TEST", self.frame,
+                    fold_sessions=50, embargo_sessions=60, holdout_sessions=40,
+                    injected_labels=injected,
+                    manifest_store_path=self.manifest_store,
+                )
+        self.assertEqual(load_run_manifests(path=self.manifest_store), [])
 
 
 if __name__ == "__main__":

@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import os
 from contextlib import contextmanager
+from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
@@ -40,7 +41,11 @@ from core.backtest.costs import (
     execution_cost_record,
     realized_vol_daily,
 )
-from core.backtest.manifest import build_manifest, validate_manifest
+from core.backtest.manifest import (
+    build_manifest,
+    persist_run_manifest,
+    validate_manifest,
+)
 from core.backtest.metrics import compute_metrics
 from core.config import (
     BACKTEST_AVG_DOLLAR_VOLUME_WINDOW,
@@ -66,6 +71,14 @@ from fetch_data import TickerFetchError
 
 class BacktestLeakageError(RuntimeError):
     """Raised when injected labels fail canonical hash verification."""
+
+
+class BacktestManifestError(RuntimeError):
+    """Raised when a run's manifest fails validation (V4: mandatory).
+
+    A run without a valid manifest is invalid by definition, so the engine
+    refuses to start — no fold is replayed and no metric is produced.
+    """
 
 
 @contextmanager
@@ -360,6 +373,7 @@ def run_walk_forward_backtest(
     cost_table: dict | None = None,
     initial_capital: float | None = None,
     trade_notional: float | None = None,
+    manifest_store_path: str | Path | None = None,
 ) -> dict:
     """Run the full walk-forward validation for one ticker over one frame.
 
@@ -369,6 +383,11 @@ def run_walk_forward_backtest(
     -> per-fold + aggregate metrics. Injected labels are verified against
     the canonical V1 recomputation; any mismatch aborts the run with
     `BacktestLeakageError` before metrics exist.
+
+    V4 — manifests are MANDATORY: the manifest is validated before any
+    replay (`BacktestManifestError` on failure) and persisted to the
+    append-only run store (`data/backtest_runs.jsonl` by default) once the
+    run completes. A run without a persisted, valid manifest does not exist.
     """
     cost_table = cost_table if cost_table is not None else COST_TABLE_V2
     initial_capital = initial_capital if initial_capital is not None else BACKTEST_INITIAL_CAPITAL
@@ -409,6 +428,14 @@ def run_walk_forward_backtest(
     }
     manifest = build_manifest(ticker, frame, config_snapshot, versions, provider_overrides)
     manifest_issues = validate_manifest(manifest)
+    if manifest_issues:
+        # V4: manifests are mandatory — a run without a valid manifest is
+        # invalid by definition, so it is refused before any fold is
+        # replayed and before any metric exists.
+        raise BacktestManifestError(
+            "invalid run manifest — a run without a valid manifest is invalid "
+            f"by definition: {'; '.join(manifest_issues)}"
+        )
 
     with offline_replay_seam({str(ticker).upper(): frame}):
         fold_results = []
@@ -481,9 +508,17 @@ def run_walk_forward_backtest(
         "final_equity": pooled_equity[-1] if pooled_equity else round(float(initial_capital), 2),
         "metrics": aggregate_metrics,
     }
+    # V4: the run manifest is persisted as part of the run — a completed run
+    # without a persisted, valid manifest does not exist. persist_run_manifest
+    # either appends the record or confirms an identical one is already
+    # stored (idempotent per run hash); the store raises on same-hash/
+    # different-content corruption. Aborted runs (e.g. leakage rejection)
+    # persist nothing — only completed runs exist in the store.
+    persist_run_manifest(manifest, path=manifest_store_path)
     return {
         "manifest": manifest,
         "manifest_issues": manifest_issues,
+        "manifest_persisted": True,
         "label_alignment": "verified",
         "geometry": {
             "embargo_sessions": geometry["embargo_sessions"],

@@ -653,7 +653,38 @@ ealized_vol_daily).
   compatibility, explicit attribution in the engine, expensive table pays
   more per execution and per unit of capital). Full suite: 332/332 pass.
 
-### V4. Paper-trading order engine (simulation only)
+### V4. Run manifests mandatory for every backtest ✓ DONE
+
+Implemented 2026-09-03. V2 built the manifest builder; this task made
+manifests MANDATORY and PERSISTED — a backtest run without a persisted,
+valid manifest does not exist.
+
+- Mandatory enforcement (`engine.py::BacktestManifestError`): the manifest
+  is validated BEFORE any fold is replayed — a run whose manifest fails
+  validation is refused outright (no decisions, no metrics, no partial
+  results). `manifest_issues` in a returned result is therefore always
+  empty by construction.
+- Persistence (`manifest.py::persist_run_manifest`): every completed run
+  appends its manifest to the append-only `data/backtest_runs.jsonl`
+  (override via `manifest_store_path` for isolation). Idempotent per
+  `run_hash`: a byte-identical recompute appends nothing. A same-hash/
+  different-content record raises an integrity violation — the run hash is
+  the canonical digest of all inputs, so that is corruption, not a
+  revision. Aborted runs (e.g. leakage rejection) persist nothing: only
+  completed runs exist in the store.
+- Integrity on load: `load_run_manifests` / `load_manifest_by_run_hash`
+  raise on malformed lines (loud, never skipped), and
+  `require_valid_manifest` re-validates any manifest on demand.
+- Store mirrors the outcomes/paper-order conventions: JSONL, append-only,
+  `Path`-overridable for hermetic tests.
+- Acceptance: 6 new tests (`ManifestMandateTests`) — every completed run
+  persists a valid manifest; identical reruns are idempotent in the store;
+  the engine refuses an invalid manifest before any work and stores
+  nothing; same-hash/different-content is an integrity violation;
+  malformed lines fail loudly; aborted runs persist nothing. Full suite:
+  338/338 pass.
+
+### V5. Paper-trading order engine (simulation only)
 
 - Objective: simulate the decision → order → fill loop with governance
   intact, producing the trade evidence later sprints consume.
@@ -672,7 +703,7 @@ ealized_vol_daily).
   decision produces an intent-shaped rejection, never a fill; live branch
   raises unconditionally.
 
-### V5. Monitoring foundations
+### V6. Monitoring foundations
 
 - Metrics snapshot per backtest/paper run: score distribution drift
   (population stability index vs trailing window), stale-data rate,
