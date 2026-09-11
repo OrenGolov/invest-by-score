@@ -684,7 +684,30 @@ valid manifest does not exist.
   malformed lines fail loudly; aborted runs persist nothing. Full suite:
   338/338 pass.
 
-### V5. Paper-trading order engine (simulation only)
+### V5. Shared feature/scoring contracts — research == production ✓ DONE
+
+Implemented 2026-09-03. The Shared Research Contract is now an enforced,
+test-pinned invariant — no parallel ad hoc path.
+
+- Toolkit: `core/contract_verification.py`
+  (`shared-contract-verification-v1`) — pure, diff-precise problem lists:
+  `feature_contract_problems` (every feature contract complete + current
+  MARKET_FEATURE_VERSION), `snapshot_field_problems` and
+  `score_identity_problems` (identity across paths, including the N6
+  slotted features and the ensemble/governance layer),
+  `engine_version_problems` (manifest versions must equal the live config
+  constants — drift is a failure), and `parallel_path_problems`
+  (structural scan: research modules must call the canonical producers and
+  must never define `build_score`/scorers/label builders of their own).
+- Identity proof: a direct (production-reference) call and the same call
+  under the offline research seam produce byte-identical market snapshots,
+  score layers, and V1 labels — the seam changes only the data source,
+  never the computation.
+- Acceptance: 11 tests (`tests/test_shared_contracts.py`), including a
+  seeded-violation test proving the parallel-path detector catches a
+  rogue scorer and that removal restores a clean scan.
+
+### V6. Paper-trading order engine (simulation only)
 
 - Objective: simulate the decision → order → fill loop with governance
   intact, producing the trade evidence later sprints consume.
@@ -703,7 +726,7 @@ valid manifest does not exist.
   decision produces an intent-shaped rejection, never a fill; live branch
   raises unconditionally.
 
-### V6. Monitoring foundations
+### V7. Monitoring foundations
 
 - Metrics snapshot per backtest/paper run: score distribution drift
   (population stability index vs trailing window), stale-data rate,

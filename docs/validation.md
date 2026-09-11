@@ -12,6 +12,16 @@ version, model versions, configuration, transaction-cost assumptions, calendar,
 and random seeds. A model version cannot be evaluated without its training data
 cutoff and artifact identity.
 
+The rule is enforced, not aspirational. `core/contract_verification.py`
+is the shared-contract toolkit: feature-contract conformance (complete
+provenance, current `MARKET_FEATURE_VERSION`), diff-precise snapshot and
+score-layer identity between the direct (production) path and the offline
+research seam, manifest-version drift detection against the live config
+constants, and a structural scan proving the research package calls the
+canonical producers (`build_score`, the V1 label builder) and never
+defines parallel implementations. `tests/test_shared_contracts.py` pins
+all of it on every commit; a violation is a build failure.
+
 ## Backtest Protocol
 
 Use walk-forward splits with an embargo around evaluation windows, point-in-time
