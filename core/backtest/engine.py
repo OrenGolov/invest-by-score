@@ -59,12 +59,14 @@ from core.config import (
     BACKTEST_TRADE_NOTIONAL,
     CURRENT_SCORE_VERSION,
     ENSEMBLE_VERSION,
+    FRAMING_VERSION,
     LABEL_HORIZON_SESSIONS,
     LONG_TERM_SCORE_VERSION,
     MARKET_FEATURE_VERSION,
     OUTCOME_LABEL_VERSION,
     UNIVERSE_VERSION,
 )
+from core.framing import build_framing_block, framing_problems, persist_framing_snapshot
 from core.labels import build_outcome_labels
 from core.monitoring import monitoring_snapshot, persist_monitoring_snapshot
 from core.score_engine import build_score
@@ -387,6 +389,7 @@ def run_walk_forward_backtest(
     trade_notional: float | None = None,
     manifest_store_path: str | Path | None = None,
     monitoring_store_path: str | Path | None = None,
+    framing_store_path: str | Path | None = None,
     universe: dict | None = None,
     fetched_tickers: list[str] | None = None,
 ) -> dict:
@@ -423,6 +426,15 @@ def run_walk_forward_backtest(
     (override via `monitoring_store_path`; idempotent per run hash). Runs
     with no decisions degrade every metric explicitly rather than
     fabricating a clean bill.
+
+    V8 — framing: every completed run also carries a versioned framing
+    block (`core.framing`): the canonical statement that this backtest is
+    evidence about historical behavior under the explicit assumptions in
+    the manifest — NOT proof the future behaves the same way. A run whose
+    manifest is missing a required assumption (cost table, price basis,
+    universe, geometry, strategy, data digest) is refused as un-framable
+    before any replay, and the block is persisted idempotently
+    (`framing_store_path`; mirrored from the manifest store by default).
     """
     cost_table = cost_table if cost_table is not None else COST_TABLE_V2
     initial_capital = initial_capital if initial_capital is not None else BACKTEST_INITIAL_CAPITAL
@@ -432,6 +444,8 @@ def run_walk_forward_backtest(
         # the repository's data/ directory; only a run without any store
         # override touches the default monitoring store.
         monitoring_store_path = Path(manifest_store_path).parent / "monitoring.jsonl"
+    if framing_store_path is None and manifest_store_path is not None:
+        framing_store_path = Path(manifest_store_path).parent / "framing.jsonl"
 
     # V6 — survivorship gate: a declared universe must be point-in-time
     # safe (a biased today-snapshot universe is refused before any work);
@@ -490,6 +504,7 @@ def run_walk_forward_backtest(
         "strategy": BACKTEST_STRATEGY_VERSION,
         "metrics": "backtest-metrics-v1",
         "universe": UNIVERSE_VERSION,
+        "framing": FRAMING_VERSION,
     }
     config_snapshot = {
         "ticker": str(ticker).upper(),
@@ -519,10 +534,14 @@ def run_walk_forward_backtest(
     }
     manifest = build_manifest(ticker, frame, config_snapshot, versions, provider_overrides)
     manifest_issues = validate_manifest(manifest)
+    frame_problems = framing_problems(manifest)
+    manifest_issues = manifest_issues + frame_problems
     if manifest_issues:
         # V4: manifests are mandatory — a run without a valid manifest is
         # invalid by definition, so it is refused before any fold is
-        # replayed and before any metric exists.
+        # replayed and before any metric exists. V8: a run whose assumed
+        # surface is incomplete is equally un-framable and refused — a
+        # backtest without its explicit assumptions is not framed evidence.
         raise BacktestManifestError(
             "invalid run manifest — a run without a valid manifest is invalid "
             f"by definition: {'; '.join(manifest_issues)}"
@@ -628,11 +647,23 @@ def run_walk_forward_backtest(
         snapshot=monitoring,
         path=monitoring_store_path,
     )
+    # V8: the framing block is built from the manifest surface (explicit
+    # assumptions) plus the run's decision count — performance can never
+    # change the framing (historical evidence, not future proof) — and is
+    # persisted idempotently next to the manifest and monitoring records.
+    framing = build_framing_block(manifest, aggregate)
+    persist_framing_snapshot(
+        run_type="backtest",
+        run_hash=manifest["run_hash"],
+        snapshot=framing,
+        path=framing_store_path,
+    )
     return {
         "manifest": manifest,
         "manifest_issues": manifest_issues,
         "manifest_persisted": True,
         "monitoring": monitoring,
+        "framing": framing,
         "universe": universe_block,
         "survivorship_warning": survivorship_warning,
         "label_alignment": "verified",

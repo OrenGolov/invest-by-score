@@ -459,6 +459,13 @@ BACKTEST_AVG_DOLLAR_VOLUME_WINDOW = 20
 # from exactly one place (same discipline as every other version constant).
 UNIVERSE_VERSION = "universe-ledger-v1"
 
+# --- Backtest framing (V8) ---------------------------------------------------------
+# A backtest is evidence about historical behavior under explicit assumptions —
+# NOT proof the future behaves the same way. The framing contract lives in
+# core/framing.py; the version lives here so manifests and the shared-contract
+# verifier read it from exactly one place.
+FRAMING_VERSION = "backtest-framing-v1"
+
 
 def _validate_backtest_config() -> None:
     """Import-time guard: the embargo must cover the longest label horizon."""
