@@ -68,7 +68,12 @@ from core.config import (
     UNIVERSE_VERSION,
 )
 from core.framing import build_framing_block, framing_problems, persist_framing_snapshot
-from core.feature_registry import build_default_registry, feature_contract_problems as _fr_problems
+from core.feature_registry import (
+    FeatureRegistry,
+    build_default_registry,
+    feature_contract_problems as _feature_contract_problems,
+    model_feature_problems as _model_feature_problems,
+)
 from core.labels import build_outcome_labels
 from core.monitoring import monitoring_snapshot, persist_monitoring_snapshot
 from core.score_engine import build_score
@@ -95,6 +100,60 @@ class BacktestUniverseError(RuntimeError):
     of tickers) would inflate the run by construction, so it is refused;
     a run whose ticker is not a declared member is refused as well.
     """
+
+
+class BacktestFeatureContractError(RuntimeError):
+    """Raised when a run consumes a feature that is not registry-conformant (M1).
+
+    The canonical feature registry is the only door into a model: a run whose
+    scored model declares an unregistered feature is refused before any fold
+    is replayed, and a score result that exposes a feature surface which is
+    unregistered, version-drifted, lookback-drifted, or source-undeclared is
+    refused the moment it is produced.
+    """
+
+
+def _model_feature_contract_problems(registry: FeatureRegistry | None = None) -> list[str]:
+    """M1 structural gate: the scored model's declared inputs vs the registry.
+
+    The declared feature set is read from `core.score_engine` at call time —
+    one source of truth, never a copy — so adding a feature to a scorer
+    without registering it breaks every run instead of sliding into
+    production.
+    """
+    from core.score_engine import CURRENT_SCORE_FEATURES, LONG_TERM_SCORE_FEATURES
+
+    active = registry if registry is not None else build_default_registry()
+    declared = (*CURRENT_SCORE_FEATURES, *LONG_TERM_SCORE_FEATURES)
+    return _model_feature_problems(declared, active, model_family="technical_analysis")
+
+
+def _exposed_feature_surface(score_result) -> dict:
+    """The feature contracts a score result actually consumed (may be empty).
+
+    `build_score` publishes the feature contracts behind its current-time and
+    long-term views under `feature_metadata`; a test double that exposes no
+    metadata yields an empty surface.
+    """
+    metadata = getattr(score_result, "feature_metadata", None)
+    if not isinstance(metadata, dict):
+        return {}
+    surface: dict = {}
+    for key in ("current_score_features", "long_term_score_features"):
+        for contract in metadata.get(key) or []:
+            if isinstance(contract, dict) and contract.get("name"):
+                surface[str(contract["name"])] = contract
+    return surface
+
+
+def _verify_exposed_feature_surface(surface: dict, registry: FeatureRegistry, as_of: str) -> None:
+    """Refuse a consumed feature surface that is not registry-conformant."""
+    problems = _feature_contract_problems({"features": surface}, registry)
+    if problems:
+        raise BacktestFeatureContractError(
+            f"score result at {as_of} consumed a non-conformant feature surface: "
+            + "; ".join(problems)
+        )
 
 
 @contextmanager
@@ -223,12 +282,17 @@ def _replay_window(
     trade_notional: float,
     injected_labels: dict | None,
     cost_table: dict,
+    registry: FeatureRegistry | None = None,
 ) -> dict:
     """Replay decisions over [start, end] (inclusive session positions).
 
     The caller must hold the offline seam open. Decisions at bar t act at
     bar t+1 open with costs; the final bar's signal cannot execute inside
     the window and is dropped (documented boundary behavior).
+
+    M1: every score result that exposes its consumed feature contracts is
+    checked against the canonical feature registry before its decision is
+    used — an unregistered or drift-affected feature is a hard failure.
     """
     cash = float(initial_capital)
     shares = 0
@@ -247,10 +311,16 @@ def _replay_window(
     total_cost_notional = 0.0
     total_cost_bps_weighted = 0.0
     prev_equity: float | None = None
+    verified_surface_bars = 0
 
     for t in range(start, end + 1):
         as_of = frame.index[t].strftime("%Y-%m-%d %H:%M:%S")
         score_result = build_score(ticker, as_of, persist_audit=False)
+        exposed_surface = _exposed_feature_surface(score_result)
+        if exposed_surface:
+            active_registry = registry if registry is not None else build_default_registry()
+            _verify_exposed_feature_surface(exposed_surface, active_registry, as_of)
+            verified_surface_bars += 1
         score = float(score_result.score)
         action = str(score_result.action)
         is_rejected = action == "NO_TRADE"
@@ -365,6 +435,10 @@ def _replay_window(
         "trades": trades,
         "executions": executions,
         "execution_count": execution_count,
+        "feature_surface": (
+            "verified" if verified_surface_bars else "unexposed_by_score_result"
+        ),
+        "feature_surface_bars": verified_surface_bars,
         "total_cost_notional": round(total_cost_notional, 2),
         "avg_execution_cost_bps": round(total_cost_bps_weighted / execution_count, 4) if execution_count else None,
         "cost_drag": round(total_cost_notional / float(initial_capital), 6) if initial_capital else None,
@@ -539,19 +613,15 @@ def run_walk_forward_backtest(
     manifest_issues = validate_manifest(manifest)
     frame_problems = framing_problems(manifest)
     manifest_issues = manifest_issues + frame_problems
-    # Sprint M1: the feature registry is the contract — a run whose registry
-    # is structurally broken (empty or containing invalid specs) is refused
-    # before any fold is replayed. The per-snapshot enforcement (every feature
-    # must be registered + satisfy the PIT rule) is handled by the contract
-    # verifier's feature_contract_problems, which now delegates to the registry.
+    # Sprint M1: the feature registry is the contract. A run whose registry is
+    # structurally broken (empty, invalid spec, or a producer that does not
+    # exist) is refused before any fold is replayed; so is a run whose scored
+    # model declares an input that is not registered or not declared
+    # compatible with the model family. The per-bar enforcement (every
+    # consumed feature contract must be registered, PIT-valid, version-pinned,
+    # lookback-matched, and from a declared source) runs inside the loop.
     registry = build_default_registry()
-    registry_issues = registry.problems()
-    for spec in registry.all_features().values():
-        from core.feature_registry import spec_problems as _spec_problems
-        registry_issues.extend(
-            f"registry feature {spec.name!r}: {p}" for p in _spec_problems(spec)
-        )
-    manifest_issues = manifest_issues + registry_issues
+    manifest_issues = manifest_issues + registry.problems()
     if manifest_issues:
         # V4: manifests are mandatory — a run without a valid manifest is
         # invalid by definition. V8: a run whose assumed surface is
@@ -561,6 +631,13 @@ def run_walk_forward_backtest(
             "invalid run manifest — a run without a valid manifest is invalid "
             f"by definition: {'; '.join(manifest_issues)}"
         )
+    model_feature_issues = _model_feature_contract_problems(registry)
+    if model_feature_issues:
+        raise BacktestFeatureContractError(
+            "the scored model consumes a feature that is not registry-conformant "
+            f"— an unregistered feature cannot enter a production model: "
+            f"{'; '.join(model_feature_issues)}"
+        )
 
     with offline_replay_seam({str(ticker).upper(): frame}):
         fold_results = []
@@ -569,12 +646,14 @@ def run_walk_forward_backtest(
                 ticker, frame,
                 fold["validation"][0], fold["validation"][1],
                 initial_capital, trade_notional, injected_labels, cost_table,
+                registry=registry,
             )
             fold_results.append({**fold, "evaluation": "validation_fold", **replay})
         holdout_start, holdout_end = geometry["holdout"]
         holdout_replay = _replay_window(
             ticker, frame, holdout_start, holdout_end,
             initial_capital, trade_notional, injected_labels, cost_table,
+            registry=registry,
         )
 
     pooled_returns: list[float] = []

@@ -1,22 +1,40 @@
-"""Canonical feature registry (Sprint M1).
+"""Canonical feature registry (Sprint M1) — the only door into a model.
 
 Every feature that enters a production model must be registered here with
 complete metadata. The registry is the single source of truth for what
-features exist, how they are computed, who owns them, and which models may
-consume them.
+features exist, how they are computed, who owns them, which source data they
+depend on, and which model families may consume them.
+
+Required metadata — all of it validated by `spec_problems`, not aspirational:
+name, owner, domain, formula, version, unit, frequency, lookback, minimum
+history, null policy, PIT rule, source dependencies, feature family, model
+compatibility. The vocabularies are closed: an unknown unit, family, domain,
+frequency, source, null policy, or model family is a rejection, never a
+silent default.
 
 Binding rules (enforced, not aspirational):
 
-- An unregistered feature CANNOT enter a production model. The contract
-  verifier and the backtest engine both refuse a snapshot that carries an
-  unregistered feature — it is a hard failure, not a warning.
-- A feature's producer (owner) must exist. `spec_problems` rejects any
-  feature whose owner is not in KNOWN_PRODUCERS.
-- Future/revised input is rejected. A feature contract whose published_time
-  is after as_of violates the PIT rule and is rejected by
-  `feature_contract_problems`.
-- Each feature carries a deterministic hash over its canonical spec. Any
-  change to the feature's definition produces a different hash.
+- **An unregistered feature cannot enter a production model.** Three gates
+  apply the rule: `model_feature_problems` (a model's declared feature set),
+  `feature_contract_problems` (the feature contracts a producer emitted), and
+  the walk-forward engine, which refuses to start when the scored model's
+  declared inputs are not registry-conformant and refuses mid-run when a
+  score result exposes a non-conformant feature surface.
+- **A producer must exist.** `PRODUCERS` maps every owner to the module and
+  callable that actually produces its features, and `producer_problems`
+  verifies that both exist — a feature cannot name an owner that is only a
+  string. A producer with no registered feature is reported by
+  `unwired_producers` (informational: forward wiring, sprint by sprint).
+- **Future/revised input is rejected.** A contract whose `published_time` is
+  after `as_of` violates the PIT rule; a contract whose `calculation_version`
+  or `lookback_period` disagrees with the registered spec, or that arrives
+  from a source the spec does not declare, is a revised/undeclared input; and
+  re-registering a feature definition without bumping its version is refused
+  by `FeatureRegistry.register`.
+- **Deterministic feature hash.** A spec, the whole registry, a named feature
+  set, and a consumed feature surface each carry a canonical SHA-256, so a
+  definition change is always visible and no two different feature sets share
+  an identity.
 
 Design notes:
 
@@ -30,27 +48,122 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
-from core.config import MARKET_FEATURE_VERSION
+from core.config import FEATURE_REGISTRY_VERSION, MARKET_FEATURE_VERSION
 
-FEATURE_REGISTRY_VERSION = "feature-registry-v1"
 FEATURE_REGISTRY_STORE_PATH = Path(__file__).resolve().parent.parent / "data" / "feature_registry.jsonl"
+_REPO_ROOT = Path(__file__).resolve().parent.parent
 
 FEATURE_DOMAINS: tuple[str, ...] = (
-    "market", "fundamental", "news", "sentiment", "macro", "regime", "technical",
+    "market", "fundamental", "news", "sentiment", "macro", "regime", "technical", "event",
 )
 
 NULL_POLICIES: tuple[str, ...] = ("exclude", "fail", "default", "flag")
 
-FREQUENCIES: tuple[str, ...] = ("daily", "per_bar", "per_session")
-
-KNOWN_PRODUCERS: tuple[str, ...] = (
-    "market_data_agent", "technical_agent", "fundamental_agent",
-    "news_agent", "sentiment_agent", "macro_agent", "regime_agent",
+FREQUENCIES: tuple[str, ...] = (
+    "per_bar", "per_session", "daily", "weekly", "monthly", "quarterly", "event",
 )
+
+KNOWN_UNITS: tuple[str, ...] = (
+    "ratio", "price", "price_per_session", "index", "percent", "count",
+    "sessions", "shares", "currency", "score", "zscore", "bool", "text",
+)
+
+FEATURE_FAMILIES: tuple[str, ...] = (
+    "momentum", "volatility", "trend", "volume", "mean_reversion", "structure",
+    "relative_strength", "liquidity", "breadth", "fundamental", "quality",
+    "valuation", "growth", "news_event", "sentiment", "macro", "regime",
+)
+
+MODEL_FAMILIES: tuple[str, ...] = (
+    "technical_analysis", "baseline_mean", "momentum", "mean_reversion",
+    "linear", "logistic", "tree", "boosting", "sequence",
+)
+
+KNOWN_SOURCES: tuple[str, ...] = (
+    "yahoo_finance_chart", "alpha_vantage_overview", "fred_macro",
+    "newsapi_news", "portfolio_list_snapshot",
+)
+
+FEATURE_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
+LOOKBACK_PATTERN = re.compile(r"^[1-9][0-9]*[dwqmy]$")
+
+
+@dataclass(frozen=True)
+class Producer:
+    """The module + callable that actually produces a feature's raw inputs."""
+
+    name: str
+    module: str
+    callable_name: str
+
+
+PRODUCERS: tuple[Producer, ...] = (
+    Producer("market_data_agent", "agents.market_data_agent", "fetch_market_snapshot"),
+    Producer("technical_agent", "agents.technical_agent", "score_technical"),
+    Producer("fundamental_agent", "core.score_engine", "_build_fundamental_score"),
+    Producer("news_agent", "core.news_adapter", "build_news_snapshot"),
+    Producer("sentiment_agent", "core.sentiment_contract", "fetch_sentiment_snapshot"),
+    Producer("macro_agent", "core.macro_adapter", "build_macro_snapshot"),
+    Producer("regime_agent", "core.regime_agent", "build_regime_snapshot"),
+)
+
+KNOWN_PRODUCERS: tuple[str, ...] = tuple(producer.name for producer in PRODUCERS)
+PRODUCER_BY_NAME: dict[str, Producer] = {producer.name: producer for producer in PRODUCERS}
+
+
+_MODULE_SOURCE_CACHE: dict[str, str] = {}
+
+
+class FeatureContractError(ValueError):
+    """Raised when a feature spec, model feature set, or snapshot violates the registry."""
+
+
+def _module_source(module_path: Path) -> str | None:
+    """Read a module source file once per process (deterministic, cached)."""
+    key = str(module_path)
+    if key not in _MODULE_SOURCE_CACHE:
+        try:
+            _MODULE_SOURCE_CACHE[key] = module_path.read_text(encoding="utf-8")
+        except OSError:
+            return None
+    return _MODULE_SOURCE_CACHE[key]
+
+
+def producer_problems(owner: str) -> list[str]:
+    """Verify a declared producer exists: module file + producer callable on disk.
+
+    The producer must be a real, importable producer — a name in a tuple is not
+    evidence that anything can actually produce the feature.
+    """
+    producer = PRODUCER_BY_NAME.get(owner)
+    if producer is None:
+        return [
+            f"producer {owner!r} is not in the producer registry "
+            f"(known: {sorted(KNOWN_PRODUCERS)})"
+        ]
+    module_path = _REPO_ROOT / Path(*producer.module.split(".")).with_suffix(".py")
+    if not module_path.is_file():
+        return [
+            f"producer {owner!r} declares module {producer.module!r}, which does not "
+            f"exist at {module_path}"
+        ]
+    source = _module_source(module_path)
+    if source is None:
+        return [
+            f"producer {owner!r} declares module {producer.module!r}, which could not "
+            f"be read at {module_path}"
+        ]
+    if f"def {producer.callable_name}(" not in source:
+        return [
+            f"producer {owner!r} declares callable {producer.callable_name!r}, which is "
+            f"not defined in {producer.module}"
+        ]
+    return []
 
 
 @dataclass
@@ -86,14 +199,48 @@ class FeatureRegistry:
 
     def __init__(self) -> None:
         self._features: dict[str, FeatureSpec] = {}
+        self._revisions: list[dict[str, Any]] = []
 
-    def register(self, spec: FeatureSpec) -> None:
+    def register(self, spec: FeatureSpec) -> bool:
+        """Register a spec. Returns True when the registry changed.
+
+        Fail-closed rules:
+        - an invalid spec (any missing/invalid metadata field) is refused;
+        - a declared producer that does not exist is refused;
+        - re-registering an existing feature with the SAME version but a
+          different definition is refused as revised input — changing a
+          feature's meaning requires a version bump (the history is kept).
+        """
         problems = spec_problems(spec)
         if problems:
             raise ValueError(
                 f"invalid feature spec for {spec.name!r}: {'; '.join(problems)}"
             )
+        producer_issues = producer_problems(spec.owner)
+        if producer_issues:
+            raise ValueError(
+                f"invalid feature spec for {spec.name!r}: {'; '.join(producer_issues)}"
+            )
+
+        existing = self._features.get(spec.name)
+        if existing is not None:
+            if existing.canonical_hash() == spec.canonical_hash():
+                return False
+            if existing.version == spec.version:
+                raise ValueError(
+                    f"feature {spec.name!r} is already registered at version "
+                    f"{spec.version!r} with a different definition — revised input "
+                    f"is rejected: bump the version to change a feature"
+                )
+            self._revisions.append({
+                "name": spec.name,
+                "superseded_version": existing.version,
+                "superseded_hash": existing.canonical_hash(),
+                "version": spec.version,
+                "hash": spec.canonical_hash(),
+            })
         self._features[spec.name] = spec
+        return True
 
     def get(self, name: str) -> FeatureSpec | None:
         return self._features.get(name)
@@ -105,21 +252,88 @@ class FeatureRegistry:
         spec = self._features.get(name)
         return spec.canonical_hash() if spec is not None else None
 
+    def feature_names(self) -> list[str]:
+        return sorted(self._features)
+
+    def feature_set_hash(self, names: Iterable[str]) -> str:
+        """Deterministic hash of a named feature set against this registry."""
+        return feature_set_hash(names, self)
+
     def all_features(self) -> dict[str, FeatureSpec]:
         return dict(self._features)
 
+    def revisions(self) -> list[dict]:
+        """Version-bump history (superseded definitions are never deleted)."""
+        return [dict(entry) for entry in self._revisions]
+
     def problems(self) -> list[str]:
+        """Structural registry health: non-empty, every spec valid, producers real."""
         problems: list[str] = []
         if not self._features:
             problems.append("feature registry is empty — no features registered")
+        for name in sorted(self._features):
+            spec = self._features[name]
+            if spec.name != name:
+                problems.append(
+                    f"registry key {name!r} disagrees with spec name {spec.name!r}"
+                )
+            problems.extend(f"feature {name!r}: {p}" for p in spec_problems(spec))
+        problems.extend(registry_producer_problems(self))
         return problems
 
 
+def registry_producer_problems(registry: FeatureRegistry) -> list[str]:
+    """Every producer referenced by the registry must actually exist."""
+    problems: list[str] = []
+    for owner in sorted({spec.owner for spec in registry.all_features().values()}):
+        problems.extend(producer_problems(owner))
+    return problems
+
+
+def unwired_producers(registry: FeatureRegistry) -> list[str]:
+    """Producers that exist but own no registered feature yet (informational).
+
+    Forward wiring is expected to be incremental (news/sentiment/macro/regime
+    features arrive in their own sprints), so this is reported rather than
+    treated as a registry failure.
+    """
+    owned = {spec.owner for spec in registry.all_features().values()}
+    return [producer.name for producer in PRODUCERS if producer.name not in owned]
+
+
+def _lookback_problems(lookback: str) -> list[str]:
+    if not lookback:
+        return ["lookback is empty"]
+    if not LOOKBACK_PATTERN.match(str(lookback)):
+        return [
+            f"lookback {lookback!r} must be a positive integer followed by "
+            f"d|w|m|q|y (e.g. '20d', '3m')"
+        ]
+    return []
+
+
+def _lookback_sessions(lookback: str) -> int | None:
+    """Sessions implied by a day-unit lookback (None for non-day units)."""
+    if not isinstance(lookback, str) or not LOOKBACK_PATTERN.match(lookback):
+        return None
+    if not lookback.endswith("d"):
+        return None
+    return int(lookback[:-1])
+
+
 def spec_problems(spec: FeatureSpec) -> list[str]:
-    """Return the list of problems with a feature spec; empty means valid."""
+    """Return the list of problems with a feature spec; empty means valid.
+
+    Every field the M1 contract requires is checked against a closed
+    vocabulary, so a feature cannot enter a registry with an unspecified unit,
+    an undeclared source, an unknown family, or a compatibility list that no
+    model recognizes.
+    """
     problems: list[str] = []
     if not spec.name:
         problems.append("feature name is empty")
+    elif not FEATURE_NAME_PATTERN.match(str(spec.name)):
+        problems.append(f"feature name {spec.name!r} must be lower_snake_case")
     if spec.owner not in KNOWN_PRODUCERS:
         problems.append(
             f"owner {spec.owner!r} is not a known producer "
@@ -134,22 +348,71 @@ def spec_problems(spec: FeatureSpec) -> list[str]:
         problems.append("formula is empty")
     if not spec.version:
         problems.append("version is empty")
-    if spec.null_policy not in NULL_POLICIES:
+    if not spec.unit:
+        problems.append("unit is empty")
+    elif spec.unit not in KNOWN_UNITS:
         problems.append(
-            f"null_policy {spec.null_policy!r} is not valid "
-            f"(valid: {sorted(NULL_POLICIES)})"
+            f"unit {spec.unit!r} is not a known unit (known: {sorted(KNOWN_UNITS)})"
         )
     if spec.frequency not in FREQUENCIES:
         problems.append(
             f"frequency {spec.frequency!r} is not valid "
             f"(valid: {sorted(FREQUENCIES)})"
         )
-    if spec.minimum_history < 1:
+    problems.extend(_lookback_problems(spec.lookback))
+    if not isinstance(spec.minimum_history, int) or isinstance(spec.minimum_history, bool):
+        problems.append(
+            f"minimum_history must be an int, got {spec.minimum_history!r}"
+        )
+    elif spec.minimum_history < 1:
         problems.append(
             f"minimum_history must be >= 1, got {spec.minimum_history!r}"
         )
+    else:
+        sessions = _lookback_sessions(spec.lookback)
+        if sessions is not None and spec.minimum_history < sessions:
+            problems.append(
+                f"minimum_history {spec.minimum_history} is below the {spec.lookback} "
+                f"lookback — a feature cannot be computed before its own window exists"
+            )
+    if spec.null_policy not in NULL_POLICIES:
+        problems.append(
+            f"null_policy {spec.null_policy!r} is not valid "
+            f"(valid: {sorted(NULL_POLICIES)})"
+        )
     if not spec.pit_rule:
         problems.append("pit_rule is empty")
+    if not spec.source_dependencies:
+        problems.append(
+            "source_dependencies is empty — a feature must declare the source "
+            "data it depends on"
+        )
+    else:
+        for source in spec.source_dependencies:
+            if source not in KNOWN_SOURCES:
+                problems.append(
+                    f"source_dependency {source!r} is not a known source "
+                    f"(known: {sorted(KNOWN_SOURCES)})"
+                )
+    if not spec.feature_family:
+        problems.append("feature_family is empty")
+    elif spec.feature_family not in FEATURE_FAMILIES:
+        problems.append(
+            f"feature_family {spec.feature_family!r} is not a known family "
+            f"(known: {sorted(FEATURE_FAMILIES)})"
+        )
+    if not spec.model_compatibility:
+        problems.append(
+            "model_compatibility is empty — a feature must declare which model "
+            "families may consume it"
+        )
+    else:
+        for family in spec.model_compatibility:
+            if family not in MODEL_FAMILIES:
+                problems.append(
+                    f"model_compatibility {family!r} is not a known model family "
+                    f"(known: {sorted(MODEL_FAMILIES)})"
+                )
     return problems
 
 
@@ -163,6 +426,10 @@ def feature_contract_problems(
     1. Every feature must be registered — unregistered features cannot enter
        a production model.
     2. published_time must be <= as_of — future/revised input is rejected.
+    3. calculation_version must equal the registered version — a changed
+       definition must be registered as a new version.
+    4. lookback_period must equal the registered lookback.
+    5. source_id must be one of the feature's declared source dependencies.
     """
     problems: list[str] = []
     features = snapshot.get("features") or {}
@@ -174,7 +441,13 @@ def feature_contract_problems(
 
     for name in sorted(features):
         contract = features[name]
-        if not registry.is_registered(name):
+        if not isinstance(contract, dict):
+            problems.append(
+                f"feature {name!r} contract is not a dict, got {type(contract).__name__}"
+            )
+            continue
+        spec = registry.get(name)
+        if spec is None:
             problems.append(
                 f"feature {name!r} is not registered — "
                 f"unregistered features cannot enter a production model"
@@ -189,7 +462,122 @@ def feature_contract_problems(
                     f"feature {name!r} published_time {published!r} is after "
                     f"as_of {as_of!r} — future/revised input is rejected by the PIT rule"
                 )
+        version = contract.get("calculation_version")
+        if version is not None and version != spec.version:
+            problems.append(
+                f"feature {name!r} calculation_version {version!r} != registered "
+                f"version {spec.version!r} — a revised definition must be "
+                f"registered as a new version"
+            )
+        lookback = contract.get("lookback_period")
+        if lookback is not None and str(lookback) != spec.lookback:
+            problems.append(
+                f"feature {name!r} lookback_period {lookback!r} != registered "
+                f"lookback {spec.lookback!r}"
+            )
+        source_id = contract.get("source_id")
+        if (
+            source_id is not None
+            and spec.source_dependencies
+            and str(source_id) not in spec.source_dependencies
+        ):
+            problems.append(
+                f"feature {name!r} arrived from source {source_id!r}, which is not a "
+                f"declared source dependency of the feature "
+                f"(declared: {sorted(spec.source_dependencies)})"
+            )
     return problems
+
+
+def feature_set_hash(names: Iterable[str], registry: FeatureRegistry) -> str:
+    """Deterministic hash identifying a named feature set (names + definitions).
+
+    This is the identity a model, dataset, or trial records: two feature sets
+    with different definitions can never share a hash, and an unregistered
+    name hashes as an explicit null so an invalid set is still identifiable.
+    """
+    payload = []
+    for name in sorted({str(entry) for entry in names}):
+        spec = registry.get(name)
+        payload.append([name, spec.canonical_hash() if spec is not None else None])
+    canonical = json.dumps(payload, sort_keys=True, default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def feature_surface_digest(surface: dict, registry: FeatureRegistry) -> str:
+    """Deterministic hash over the feature contracts a model actually consumed."""
+    payload = []
+    for name in sorted(surface or {}):
+        contract = surface[name]
+        contract_dict = contract if isinstance(contract, dict) else {}
+        spec = registry.get(name)
+        payload.append({
+            "name": name,
+            "spec_hash": spec.canonical_hash() if spec is not None else None,
+            "value": contract_dict.get("value"),
+            "as_of": contract_dict.get("as_of"),
+            "published_time": contract_dict.get("published_time"),
+            "calculation_version": contract_dict.get("calculation_version"),
+            "lookback_period": contract_dict.get("lookback_period"),
+            "source_id": contract_dict.get("source_id"),
+        })
+    canonical = json.dumps(payload, sort_keys=True, default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def model_feature_problems(
+    feature_names: Iterable[str],
+    registry: FeatureRegistry,
+    model_family: str | None = None,
+) -> list[str]:
+    """The production-model gate: what a model declares, it must be allowed.
+
+    An unregistered feature cannot enter a production model; a feature that
+    does not declare compatibility with the consuming model family cannot
+    enter that family either.
+    """
+    problems: list[str] = []
+    names = [str(name) for name in feature_names]
+    if not names:
+        problems.append(
+            "a model must declare at least one feature — an empty feature set "
+            "is not a model contract"
+        )
+    if model_family is not None and model_family not in MODEL_FAMILIES:
+        problems.append(
+            f"model_family {model_family!r} is not a known model family "
+            f"(known: {sorted(MODEL_FAMILIES)})"
+        )
+        return problems
+    for name in sorted(set(names)):
+        spec = registry.get(name)
+        if spec is None:
+            problems.append(
+                f"feature {name!r} is not registered — an unregistered feature "
+                f"cannot enter a production model"
+            )
+            continue
+        if model_family is not None and model_family not in spec.model_compatibility:
+            problems.append(
+                f"feature {name!r} does not declare compatibility with model "
+                f"family {model_family!r} (declares {sorted(spec.model_compatibility)})"
+            )
+    return problems
+
+
+def require_model_features(
+    feature_names: Iterable[str],
+    registry: FeatureRegistry,
+    model_family: str | None = None,
+) -> str:
+    """Fail-closed helper: return the feature-set hash or raise."""
+    problems = model_feature_problems(feature_names, registry, model_family)
+    if problems:
+        raise FeatureContractError(
+            "model feature set violates the canonical feature registry: "
+            + "; ".join(problems)
+        )
+    return feature_set_hash(feature_names, registry)
 
 
 def registry_hash(registry: FeatureRegistry) -> str:
@@ -344,7 +732,16 @@ def persist_feature_registry(
     registry: FeatureRegistry,
     path: str | Path | None = None,
 ) -> bool:
-    """Persist the registry to append-only JSONL. Idempotent per registry hash."""
+    """Persist the registry to append-only JSONL. Idempotent per registry hash.
+
+    Fail-closed: an invalid registry (empty, invalid spec, or a producer that
+    does not exist) is never committed to the store.
+    """
+    problems = registry.problems()
+    if problems:
+        raise ValueError(
+            f"refusing to persist an invalid feature registry: {'; '.join(problems)}"
+        )
     store_path = Path(path) if path is not None else FEATURE_REGISTRY_STORE_PATH
     store_path.parent.mkdir(parents=True, exist_ok=True)
 

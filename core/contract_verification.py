@@ -36,6 +36,7 @@ from core.config import (
     BACKTEST_STRATEGY_VERSION,
     CURRENT_SCORE_VERSION,
     ENSEMBLE_VERSION,
+    FEATURE_REGISTRY_VERSION,
     FRAMING_VERSION,
     LONG_TERM_SCORE_VERSION,
     MARKET_FEATURE_VERSION,
@@ -180,6 +181,7 @@ def expected_engine_versions() -> dict:
         "metrics": "backtest-metrics-v1",
         "universe": UNIVERSE_VERSION,
         "framing": FRAMING_VERSION,
+        "feature_registry": FEATURE_REGISTRY_VERSION,
     }
 
 

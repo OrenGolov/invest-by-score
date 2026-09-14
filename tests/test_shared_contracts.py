@@ -180,6 +180,24 @@ class EngineVersionConsistencyTests(unittest.TestCase):
             problems,
         )
 
+    def test_feature_registry_version_is_required_and_drift_detected(self):
+        """M1: the registry version participates in the manifest contract."""
+        problems = engine_version_problems({
+            **core_config.__dict__.copy(),
+            "feature_registry": "feature-registry-v0",
+        })
+        self.assertIn(
+            f"versions[feature_registry]: 'feature-registry-v0' "
+            f"!= '{core_config.FEATURE_REGISTRY_VERSION}'",
+            problems,
+        )
+        missing = engine_version_problems({
+            **core_config.__dict__.copy(),
+            "feature_registry": None,
+        })
+        self.assertTrue(
+            any("versions[feature_registry]" in problem for problem in missing), missing)
+
     def test_expected_versions_come_from_the_live_constants(self):
         from core.contract_verification import expected_engine_versions
 
