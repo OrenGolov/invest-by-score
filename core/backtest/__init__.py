@@ -22,6 +22,7 @@ from core.backtest.costs import (
 from core.backtest.engine import (
     BacktestLeakageError,
     BacktestManifestError,
+    BacktestUniverseError,
     build_walk_forward_folds,
     offline_replay_seam,
     run_walk_forward_backtest,
@@ -44,6 +45,7 @@ __all__ = [
     "COST_TABLE_VERSION",
     "BacktestLeakageError",
     "BacktestManifestError",
+    "BacktestUniverseError",
     "MANIFEST_VERSION",
     "build_manifest",
     "build_walk_forward_folds",

@@ -66,6 +66,7 @@ from core.config import (
 )
 from core.labels import build_outcome_labels
 from core.score_engine import build_score
+from core.universe import universe_block_problems
 from fetch_data import TickerFetchError
 
 
@@ -78,6 +79,15 @@ class BacktestManifestError(RuntimeError):
 
     A run without a valid manifest is invalid by definition, so the engine
     refuses to start — no fold is replayed and no metric is produced.
+    """
+
+
+class BacktestUniverseError(RuntimeError):
+    """Raised when a run's declared universe fails the survivorship gate.
+
+    A universe that drops ledger members listed at as_of (a today-snapshot
+    of tickers) would inflate the run by construction, so it is refused;
+    a run whose ticker is not a declared member is refused as well.
     """
 
 
@@ -374,6 +384,7 @@ def run_walk_forward_backtest(
     initial_capital: float | None = None,
     trade_notional: float | None = None,
     manifest_store_path: str | Path | None = None,
+    universe: dict | None = None,
 ) -> dict:
     """Run the full walk-forward validation for one ticker over one frame.
 
@@ -388,10 +399,52 @@ def run_walk_forward_backtest(
     replay (`BacktestManifestError` on failure) and persisted to the
     append-only run store (`data/backtest_runs.jsonl` by default) once the
     run completes. A run without a persisted, valid manifest does not exist.
+
+    V6 — survivorship: pass a point-in-time universe block
+    (`core.universe.build_universe_block`) to declare the historical
+    membership basis; a `survivorship_biased` verdict (a today-snapshot
+    universe that drops delisted members) is refused with
+    `BacktestUniverseError`, and the block is hashed into the manifest.
+    Without a declared universe the run proceeds but discloses
+    `survivorship_status: unverifiable_no_ledger` and carries an explicit
+    warning — it can never silently claim to be survivorship-safe.
     """
     cost_table = cost_table if cost_table is not None else COST_TABLE_V2
     initial_capital = initial_capital if initial_capital is not None else BACKTEST_INITIAL_CAPITAL
     trade_notional = trade_notional if trade_notional is not None else BACKTEST_TRADE_NOTIONAL
+
+    # V6 — survivorship gate: a declared universe must be point-in-time
+    # safe (a biased today-snapshot universe is refused before any work);
+    # an undeclared universe proceeds but is explicitly disclosed as
+    # unverifiable. The gate runs before the manifest so the block is
+    # hashed into the run identity.
+    if universe is None:
+        universe_block = {
+            "type": "single_ticker_unverified",
+            "ticker": str(ticker).upper(),
+            "survivorship_status": "unverifiable_no_ledger",
+            "disclosure": (
+                "No point-in-time universe was declared for this run; "
+                "survivorship status is unverifiable (no ledger)."
+            ),
+        }
+        survivorship_warning = (
+            "survivorship: no point-in-time universe declared — status "
+            "unverifiable (no ledger); the run cannot claim to be "
+            "survivorship-safe"
+        )
+    else:
+        block_problems = universe_block_problems(universe, ticker)
+        if block_problems:
+            raise BacktestUniverseError(
+                "universe gate refused the run: " + "; ".join(block_problems)
+            )
+        universe_block = universe
+        survivorship_warning = (
+            "survivorship: unverifiable — see the universe block problems"
+            if universe_block.get("survivorship_status") == "unverifiable"
+            else None
+        )
 
     geometry = build_walk_forward_folds(
         len(frame), fold_sessions, embargo_sessions, holdout_sessions
@@ -418,6 +471,7 @@ def run_walk_forward_backtest(
         "trade_notional": trade_notional,
         "avg_dollar_volume_window": BACKTEST_AVG_DOLLAR_VOLUME_WINDOW,
         "cost_table": cost_table,
+        "universe": universe_block,
     }
     provider_overrides = {
         "price_history": "cached_frame_injection",
@@ -519,6 +573,8 @@ def run_walk_forward_backtest(
         "manifest": manifest,
         "manifest_issues": manifest_issues,
         "manifest_persisted": True,
+        "universe": universe_block,
+        "survivorship_warning": survivorship_warning,
         "label_alignment": "verified",
         "geometry": {
             "embargo_sessions": geometry["embargo_sessions"],
