@@ -173,6 +173,28 @@ Initial hard limits are: 1% maximum allocation per position, 20% maximum total
 exposure, 1% daily loss, 3% weekly loss, and 8% monthly drawdown. Breaching any
 limit immediately halts order generation and returns to `ANALYSIS_ONLY`.
 
+## Monitoring Snapshot (V7)
+
+Every completed backtest run stamps a versioned monitoring block
+(`core.monitoring`, `monitoring-v1`) computed by pure functions over the
+run's own decisions — no dashboard dependency — and persists it
+append-only next to the manifest at `data/monitoring.jsonl`
+(`monitoring_store_path` override; idempotent per run hash).
+
+- **Score-distribution drift (PSI):** population stability index between a
+  trailing reference window and the current window, fixed 0-10 bins;
+  `< 0.1` no significant change, `0.1-0.25` moderate, `> 0.25` significant.
+- **Confidence drift:** mean-confidence delta with the same discipline.
+- **Stale-data rate:** fraction of decisions with a `STALE` agent status.
+- **Veto rate by rule:** per-rule veto fractions over decisions carrying
+  veto metadata.
+- **Label coverage:** fraction of decisions with a matured 20d label — the
+  outcome loop's health signal.
+
+Insufficient observations degrade explicitly (`insufficient_data`), and a
+decision without metadata is counted as unknown, never as clean — a run
+without evidence says so instead of claiming health.
+
 ## Monitoring Dashboard
 
 Show ingestion freshness and source health, missingness, drift, agent latency

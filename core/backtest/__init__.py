@@ -6,6 +6,11 @@ Modules:
 - manifest.py mandatory run manifests (a run without one is invalid)
 - engine.py   walk-forward folding + offline replay of the live scoring path
 
+V7: every completed run also stamps and persists a monitoring snapshot
+(`core.monitoring`, monitoring-v1): score-distribution drift (PSI),
+confidence drift, stale-data rate, veto rate by rule, and label coverage —
+computed by pure functions, versioned, append-only stored.
+
 Simulation only: nothing in this package is a production trading path.
 """
 
@@ -37,6 +42,18 @@ from core.backtest.manifest import (
     validate_manifest,
 )
 from core.backtest.metrics import compute_metrics
+from core.monitoring import (
+    MONITORING_VERSION,
+    MONITORING_STORE_PATH,
+    confidence_drift,
+    label_coverage,
+    load_monitoring_snapshots,
+    monitoring_snapshot,
+    persist_monitoring_snapshot,
+    score_drift_psi,
+    stale_data_rate,
+    veto_rate_by_rule,
+)
 
 __all__ = [
     "BACKTEST_RUNS_PATH",
@@ -47,19 +64,28 @@ __all__ = [
     "BacktestManifestError",
     "BacktestUniverseError",
     "MANIFEST_VERSION",
+    "MONITORING_STORE_PATH",
+    "MONITORING_VERSION",
     "build_manifest",
     "build_walk_forward_folds",
     "compute_metrics",
+    "confidence_drift",
     "execution_cost_record",
     "execution_price",
     "load_manifest_by_run_hash",
+    "load_monitoring_snapshots",
     "load_run_manifests",
     "liquidity_bucket",
+    "monitoring_snapshot",
     "offline_replay_seam",
+    "persist_monitoring_snapshot",
     "persist_run_manifest",
     "realized_vol_daily",
     "require_valid_manifest",
     "run_walk_forward_backtest",
+    "score_drift_psi",
+    "stale_data_rate",
     "total_side_cost_bps",
     "validate_manifest",
+    "veto_rate_by_rule",
 ]

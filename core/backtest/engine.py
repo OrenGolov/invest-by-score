@@ -66,6 +66,7 @@ from core.config import (
     UNIVERSE_VERSION,
 )
 from core.labels import build_outcome_labels
+from core.monitoring import monitoring_snapshot, persist_monitoring_snapshot
 from core.score_engine import build_score
 from core.universe import coverage_problems, universe_block_problems
 from fetch_data import TickerFetchError
@@ -385,6 +386,7 @@ def run_walk_forward_backtest(
     initial_capital: float | None = None,
     trade_notional: float | None = None,
     manifest_store_path: str | Path | None = None,
+    monitoring_store_path: str | Path | None = None,
     universe: dict | None = None,
     fetched_tickers: list[str] | None = None,
 ) -> dict:
@@ -414,10 +416,22 @@ def run_walk_forward_backtest(
     fetched for the run) to surface ledger members with no price history —
     delisted names typically 404 on the provider — as an explicit warning
     instead of silently dropping them.
+
+    V7 — monitoring: every completed run stamps a versioned monitoring
+    snapshot (`core.monitoring.monitoring_snapshot`) computed from the
+    run's own decisions and persists it append-only next to the manifest
+    (override via `monitoring_store_path`; idempotent per run hash). Runs
+    with no decisions degrade every metric explicitly rather than
+    fabricating a clean bill.
     """
     cost_table = cost_table if cost_table is not None else COST_TABLE_V2
     initial_capital = initial_capital if initial_capital is not None else BACKTEST_INITIAL_CAPITAL
     trade_notional = trade_notional if trade_notional is not None else BACKTEST_TRADE_NOTIONAL
+    if monitoring_store_path is None and manifest_store_path is not None:
+        # Mirror the manifest's temp store so hermetic tests never write to
+        # the repository's data/ directory; only a run without any store
+        # override touches the default monitoring store.
+        monitoring_store_path = Path(manifest_store_path).parent / "monitoring.jsonl"
 
     # V6 — survivorship gate: a declared universe must be point-in-time
     # safe (a biased today-snapshot universe is refused before any work);
@@ -569,6 +583,18 @@ def run_walk_forward_backtest(
         position_changes=position_changes,
         sessions=sessions,
     )
+    # V7: every run gets a monitoring snapshot next to its metrics. The
+    # snapshot is computed from the run's own decisions; metrics the run
+    # shape cannot support (no agent-status/veto/label evidence at the
+    # decision level yet) degrade explicitly instead of fabricating a
+    # number. Aggregate results remain JSON-safe and deterministic.
+    run_decisions = [
+        decision
+        for fold in fold_results
+        for decision in fold["decisions"]
+    ]
+    monitoring = monitoring_snapshot(run_decisions)
+    aggregate_metrics = {**aggregate_metrics, **monitoring}
     aggregate = {
         "fold_count": len(fold_results),
         "sessions": sessions,
@@ -592,10 +618,21 @@ def run_walk_forward_backtest(
     # different-content corruption. Aborted runs (e.g. leakage rejection)
     # persist nothing — only completed runs exist in the store.
     persist_run_manifest(manifest, path=manifest_store_path)
+    # V7: the monitoring snapshot is persisted alongside the manifest (same
+    # idempotent discipline, mirrored store). A completed run therefore has
+    # both its validity record and its health record; aborted runs persist
+    # neither.
+    persist_monitoring_snapshot(
+        run_type="backtest",
+        run_hash=manifest["run_hash"],
+        snapshot=monitoring,
+        path=monitoring_store_path,
+    )
     return {
         "manifest": manifest,
         "manifest_issues": manifest_issues,
         "manifest_persisted": True,
+        "monitoring": monitoring,
         "universe": universe_block,
         "survivorship_warning": survivorship_warning,
         "label_alignment": "verified",

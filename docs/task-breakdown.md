@@ -726,14 +726,33 @@ test-pinned invariant — no parallel ad hoc path.
   decision produces an intent-shaped rejection, never a fill; live branch
   raises unconditionally.
 
-### V7. Monitoring foundations
+### V7. Monitoring foundations ✓ DONE
 
-- Metrics snapshot per backtest/paper run: score distribution drift
-  (population stability index vs trailing window), stale-data rate,
-  veto-rate by rule, confidence drift — computed by pure functions over the
-  audit/outcome stores, no dashboard dependency.
-- Acceptance: drift function detects a seeded distribution shift in
-  synthetic data; missing data degrades the report explicitly.
+Implemented this sprint. Every backtest run now carries its own health
+evidence, computed by pure functions — no dashboard dependency.
+
+- Toolkit: `core/monitoring.py` (`monitoring-v1`) — pure, deterministic
+  run-health metrics: score-distribution drift (population stability
+  index over fixed 0-10 bins; `< 0.1` no change / `0.1-0.25` moderate /
+  `> 0.25` significant), confidence drift (mean delta), stale-data rate
+  (STALE agent-status fraction; missing status metadata is unknown, never
+  clean), veto rate by rule (over decisions with veto metadata), and label
+  coverage (fraction with a matured 20d label).
+- Engine wiring: `run_walk_forward_backtest` computes a monitoring block
+  from the run's own decisions and persists it append-only next to the
+  manifest (`data/monitoring.jsonl`, `monitoring_store_path` override,
+  idempotent per run hash — same discipline as V4's manifest store). The
+  block is exposed as `run["monitoring"]` and merged into the aggregate
+  metrics for a single-window read.
+- Fail-closed degradation: insufficient observations yield
+  `insufficient_data` (never a fabricated verdict); a missing/malformed
+  store line raises on load (loud, never skipped); a same-hash/
+  different-content record is an integrity violation.
+- Acceptance: drift detects a seeded distribution shift (PSI > 0.25 on
+  split distributions), identical windows show no change, small windows
+  degrade explicitly, corrupt scores raise, engine runs stamp + persist +
+  recompute idempotently (4 new engine-integration tests). Full suite:
+  389/389 pass.
 
 ## Sprint M — ML Layer, Calibration, Model Registry
 

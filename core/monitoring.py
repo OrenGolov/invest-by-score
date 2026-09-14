@@ -5,7 +5,9 @@ Part 1: version constants, score bins, PSI + confidence drift.
 
 from __future__ import annotations
 
+import json
 import math
+from pathlib import Path
 
 MONITORING_VERSION = "monitoring-v1"
 
@@ -272,6 +274,80 @@ def monitoring_snapshot(
         "status": "degraded" if degraded else "ok",
         "degraded_metrics": degraded,
     }
+
+
+# --- Append-only monitoring store --------------------------------------------------
+# One JSONL record per run snapshot. Idempotent per (run type, run hash):
+# a byte-identical recompute appends nothing; a same-key/different-content
+# record is an integrity violation, never a silent revision. Malformed lines
+# raise on load (loud, never skipped).
+
+MONITORING_STORE_PATH = Path(__file__).resolve().parent.parent / "data" / "monitoring.jsonl"
+
+
+def _read_monitoring_records(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    records: list[dict] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"Monitoring store {path} line {line_number} is not valid JSON "
+                    f"(append-only integrity violated): {exc}"
+                ) from exc
+    return records
+
+
+def persist_monitoring_snapshot(
+    run_type: str,
+    run_hash: str,
+    snapshot: dict,
+    path: str | Path | None = None,
+) -> bool:
+    """Append a monitoring snapshot; idempotent per (run_type, run_hash).
+
+    Returns True when a record was appended, False when an identical record
+    exists (deterministic recompute). The same-key record with different
+    content raises — the run hash is the canonical digest of the run's
+    inputs, so diverging metrics are corruption, not a revision.
+    """
+    if not isinstance(run_type, str) or not run_type.strip():
+        raise ValueError("run_type must be a non-empty string")
+    if not isinstance(run_hash, str) or not run_hash.strip():
+        raise ValueError("run_hash must be a non-empty string")
+    if not isinstance(snapshot, dict) or not snapshot:
+        raise ValueError("snapshot must be a non-empty dict")
+    store_path = Path(path) if path is not None else MONITORING_STORE_PATH
+    store_path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "monitoring_version": snapshot.get("monitoring_version", MONITORING_VERSION),
+        "run_type": run_type,
+        "run_hash": run_hash,
+        "snapshot": dict(sorted(snapshot.items())),
+    }
+    for existing in _read_monitoring_records(store_path):
+        if existing.get("run_type") == run_type and existing.get("run_hash") == run_hash:
+            if existing.get("snapshot") == record["snapshot"]:
+                return False  # identical recompute: nothing to append
+            raise ValueError(
+                f"monitoring integrity violation: {run_type} run {run_hash} "
+                f"already exists with different content"
+            )
+    with store_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, sort_keys=True, default=str) + "\n")
+    return True
+
+
+def load_monitoring_snapshots(path: str | Path | None = None) -> list[dict]:
+    """Read every persisted monitoring snapshot, newest last; strict on I/O."""
+    store_path = Path(path) if path is not None else MONITORING_STORE_PATH
+    return _read_monitoring_records(store_path)
 
 
 

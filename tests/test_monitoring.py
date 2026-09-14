@@ -5,13 +5,22 @@ Hermetic: synthetic decisions only (no network, no wall-clock, no I/O).
 
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
+import pandas as pd
+
+from core.backtest.engine import run_walk_forward_backtest
 from core.monitoring import (
     MONITORING_VERSION,
     confidence_drift,
     label_coverage,
+    load_monitoring_snapshots,
     monitoring_snapshot,
+    persist_monitoring_snapshot,
     score_drift_psi,
     stale_data_rate,
     veto_rate_by_rule,
@@ -132,6 +141,84 @@ class SnapshotTests(unittest.TestCase):
             sorted(snapshot["degraded_metrics"]),
             ["confidence_drift", "label_coverage", "score_drift", "stale_data", "veto_rates"],
         )
+
+
+def _frame(closes, start="2022-01-03"):
+    index = pd.date_range(start, periods=len(closes), freq="B")
+    return pd.DataFrame(
+        {
+            "Open": list(closes),
+            "High": list(closes),
+            "Low": list(closes),
+            "Close": list(closes),
+            "Volume": [1_000_000.0] * len(closes),
+        },
+        index=index,
+    )
+
+
+def _ramp(sessions, step=1.0, base=100.0):
+    return [base + step * index for index in range(sessions)]
+
+
+class EngineMonitoringTests(unittest.TestCase):
+    """V7: every completed backtest run carries a persisted monitoring block."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self.tmp.name)
+        self.manifest_store = self.base / "backtest_runs.jsonl"
+        self.monitoring_store = self.base / "monitoring.jsonl"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _run(self):
+        frame = _frame(_ramp(280, step=1.0))
+
+        def fake_build_score(ticker, as_of, persist_audit=False, **kwargs):
+            return SimpleNamespace(score=5.0, action="ANALYSIS_ONLY")
+
+        with patch("core.backtest.engine.build_score", fake_build_score):
+            return run_walk_forward_backtest(
+                "TEST", frame,
+                fold_sessions=50, embargo_sessions=60, holdout_sessions=40,
+                manifest_store_path=self.manifest_store,
+                monitoring_store_path=self.monitoring_store,
+            )
+
+    def test_every_run_stamps_a_versioned_monitoring_block(self):
+        run = self._run()
+        self.assertEqual(run["monitoring"]["monitoring_version"], MONITORING_VERSION)
+        self.assertIn("score_drift", run["monitoring"])
+        self.assertIn("confidence_drift", run["monitoring"])
+        self.assertEqual(run["aggregate"]["metrics"]["monitoring_version"], MONITORING_VERSION)
+
+    def test_snapshot_is_persisted_append_only_and_idempotent(self):
+        first = self._run()
+        run_hash = first["manifest"]["run_hash"]
+        records = load_monitoring_snapshots(path=self.monitoring_store)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["run_type"], "backtest")
+        self.assertEqual(records[0]["run_hash"], run_hash)
+        self.assertEqual(records[0]["snapshot"]["monitoring_version"], MONITORING_VERSION)
+        self.assertFalse(records[0]["snapshot"]["score_drift"]["verdict"] == "significant_shift")
+        # Deterministic recompute appends nothing.
+        self._run()
+        self.assertEqual(len(load_monitoring_snapshots(path=self.monitoring_store)), 1)
+
+    def test_same_hash_different_content_is_integrity_breach(self):
+        snapshot = monitoring_snapshot([])
+        persist_monitoring_snapshot("backtest", "abc123", snapshot, path=self.monitoring_store)
+        tampered = {"monitoring_version": "XXX", "score_drift": {}, "status": "ok", "degraded_metrics": []}
+        with self.assertRaises(ValueError):
+            persist_monitoring_snapshot("backtest", "abc123", tampered, path=self.monitoring_store)
+
+    def test_malformed_store_line_is_loud(self):
+        with self.monitoring_store.open("w", encoding="utf-8") as handle:
+            handle.write("{broken}\n")
+        with self.assertRaises(ValueError):
+            load_monitoring_snapshots(path=self.monitoring_store)
 
 
 if __name__ == "__main__":
