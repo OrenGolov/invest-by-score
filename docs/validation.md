@@ -40,6 +40,49 @@ advance the window, and test the final frozen model on untouched data. No
 future labels, revised values, or later source reliability weights may enter a
 prior fold.
 
+## Historical Universe (Survivorship Discipline)
+
+A universe is a set of point-in-time membership intervals, not a list of
+today's tickers. `core/universe.py` (`universe-ledger-v1`, version owned by
+`core/config.py::UNIVERSE_VERSION`) keeps the append-only ledger at
+`data/universe.jsonl`: each entry is `{ticker, listed_from, listed_to,
+reason, source_id, published_time}` with delisted intervals preserved, so a
+backtest can query who was actually listed at `as_of`.
+
+- Fail-closed construction: `universe_as_of` includes a member only when its
+  interval covers `as_of`; a `null listed_from` means "start unverified" and
+  is flagged, never mistaken for evidence.
+- Detection: `survivorship_problems` flags a candidate universe that drops a
+  ledger member listed at `as_of` as `survivorship_biased` (fatal), and an
+  unknown candidate ticker as `member_unverified` (warning).
+- Engine gate: `run_walk_forward_backtest(..., universe=build_universe_block(...))`
+  refuses a biased universe with `BacktestUniverseError` before any work;
+  a run without a declared universe proceeds but is disclosed as
+  `unverifiable_no_ledger`. Pass `fetched_tickers` so ledger members with no
+  fetched price history (delisted names typically 404) surface as an explicit
+  `member_price_unavailable` warning instead of being silently dropped.
+- The manifest pins `versions.universe`, checked by
+  `core/contract_verification.py` against the live constant — ledger-version
+  drift is a failure, not a warning.
+
+Known limitation: no index-constituent provider is connected yet, so the
+ledger records what is known (seeded portfolio starts are unverified) and
+flags what is not. Connecting a real constituents adapter is the upgrade
+path that fills the ledger with verifiable delisted intervals.
+
+## Corporate Actions (Price Basis)
+
+The return basis is **price return on split-adjusted closes, dividends NOT
+reinvested**. Verified live against the provider (NVDA 10:1 split ex-date
+2024-06-10: pre-split bars arrive at post-split scale, not raw ~1200s), so
+splits need no local adjustment math — and get none, by design. The
+provider's `adjclose` series is intentionally not substituted: it is a
+second, silently-revising price truth that would fork research from
+production. Every run manifest carries this basis in
+`provider_overrides.price_basis`, so no backtest can silently claim total
+return. A dividend-reinvested basis would be a new, versioned price-basis
+change — never a silent substitution.
+
 ## Transaction Costs and Slippage Assumptions
 
 Binding for every backtest and paper fill. The cost model is a versioned

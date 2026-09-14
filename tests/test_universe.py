@@ -17,7 +17,9 @@ scores (no network). Coverage:
 - the engine gate: a biased universe is refused before any work (nothing
   persisted — V4 semantics); a ticker outside the declared universe is
   refused; no declared universe runs with an explicit unverifiable
-  disclosure.
+  disclosure; declared universes surface ledger members with no fetched
+  price history as a warning (never silently dropped); the universe ledger
+  version is pinned to the live config constants in the manifest.
 """
 
 from __future__ import annotations
@@ -39,6 +41,7 @@ from core.universe import (
     STATUS_POINT_IN_TIME_COMPLETE,
     STATUS_SURVIVORSHIP_BIASED,
     STATUS_UNVERIFIABLE,
+    UNIVERSE_VERSION,
     build_universe_block,
     coverage_problems,
     latest_entries_by_ticker,
@@ -77,7 +80,8 @@ class UniverseConstructionTests(unittest.TestCase):
     def setUp(self):
         self.entries = {
             "AAPL": make_entry("AAPL", "initial_member", "test_source",
-                               published_time="2022-01-01"),
+                               published_time="2022-01-01",
+                               listed_from="2010-01-01"),
             "XYZ": make_entry("XYZ", "initial_member", "test_source",
                               published_time="2022-01-01",
                               listed_from="2015-01-01", listed_to="2023-06-01",
@@ -205,7 +209,8 @@ class SurvivorshipDetectionTests(unittest.TestCase):
     def setUp(self):
         self.entries = {
             "AAPL": make_entry("AAPL", "initial_member", "test_source",
-                               published_time="2022-01-01"),
+                               published_time="2022-01-01",
+                               listed_from="2010-01-01"),
             "XYZ": make_entry("XYZ", "delisted_bankruptcy", "test_source",
                               published_time="2022-01-01",
                               listed_from="2015-01-01", listed_to="2023-06-01"),
@@ -226,10 +231,17 @@ class SurvivorshipDetectionTests(unittest.TestCase):
         self.assertEqual(status, STATUS_POINT_IN_TIME_COMPLETE)
 
     def test_unverifiable_candidate_tickers_are_fail_closed(self):
+        problems = survivorship_problems(["AAPL", "XYZ", "TSLA"], self.entries, "2023-01-02")
+        self.assertTrue(any("member_unverified: TSLA" in p for p in problems), problems)
+        status = universe_survivorship_status(["AAPL", "XYZ", "TSLA"], self.entries, "2023-01-02")
+        self.assertEqual(status, STATUS_UNVERIFIABLE)
+
+    def test_bias_takes_precedence_over_unverifiable(self):
         problems = survivorship_problems(["AAPL", "TSLA"], self.entries, "2023-01-02")
+        self.assertTrue(any("survivorship_bias: XYZ" in p for p in problems), problems)
         self.assertTrue(any("member_unverified: TSLA" in p for p in problems), problems)
         status = universe_survivorship_status(["AAPL", "TSLA"], self.entries, "2023-01-02")
-        self.assertEqual(status, STATUS_UNVERIFIABLE)
+        self.assertEqual(status, STATUS_SURVIVORSHIP_BIASED)
 
     def test_member_delisted_before_as_of_is_correctly_absent(self):
         problems = survivorship_problems(["AAPL"], self.entries, "2024-01-02")
@@ -243,3 +255,101 @@ class SurvivorshipDetectionTests(unittest.TestCase):
             any("member_price_unavailable: XYZ" in p for p in problems), problems
         )
         self.assertEqual(coverage_problems(["AAPL"], fetched_tickers=["AAPL"]), [])
+
+
+class EngineCoverageTests(unittest.TestCase):
+    def setUp(self):
+        self.ledger = Path(tempfile.mkdtemp()) / "universe.jsonl"
+        persist_universe_entries(
+            [make_entry("TEST", "added", "test_source",
+                        published_time="2022-01-01", listed_from="2020-01-01"),
+             make_entry("DEAD", "delisted_bankruptcy", "test_source",
+                        published_time="2022-01-01",
+                        listed_from="2015-01-01", listed_to="2023-06-01")],
+            path=self.ledger,
+        )
+
+    def test_declared_universe_with_coverage_gap_warns_but_passes(self):
+        frame = _frame(_ramp(320))
+        store_dir = tempfile.mkdtemp()
+        store = str(Path(store_dir) / "backtest_runs.jsonl")
+
+        def fake_build_score(ticker, as_of, persist_audit=False, **kwargs):
+            return SimpleNamespace(score=5.0, action="ANALYSIS_ONLY")
+
+        block = build_universe_block(
+            ["TEST", "DEAD"], as_of="2023-01-02", path=self.ledger
+        )
+        self.assertEqual(block["survivorship_status"], STATUS_POINT_IN_TIME_COMPLETE)
+        with patch("core.backtest.engine.build_score", fake_build_score):
+            result = run_walk_forward_backtest(
+                "TEST", frame,
+                fold_sessions=50, embargo_sessions=60, holdout_sessions=40,
+                manifest_store_path=store,
+                universe=block,
+                fetched_tickers=["TEST"],
+            )
+        warning = result["survivorship_warning"]
+        self.assertIsNotNone(warning)
+        self.assertIn("member_price_unavailable: DEAD", warning)
+        self.assertIn("TEST", result["universe"]["ledger_members_at_as_of"])
+
+    def test_declared_universe_without_coverage_gap_is_quiet(self):
+        frame = _frame(_ramp(320))
+        store_dir = tempfile.mkdtemp()
+        store = str(Path(store_dir) / "backtest_runs.jsonl")
+
+        def fake_build_score(ticker, as_of, persist_audit=False, **kwargs):
+            return SimpleNamespace(score=5.0, action="ANALYSIS_ONLY")
+
+        block = build_universe_block(
+            ["TEST", "DEAD"], as_of="2023-01-02", path=self.ledger
+        )
+        with patch("core.backtest.engine.build_score", fake_build_score):
+            result = run_walk_forward_backtest(
+                "TEST", frame,
+                fold_sessions=50, embargo_sessions=60, holdout_sessions=40,
+                manifest_store_path=store,
+                universe=block,
+                fetched_tickers=["TEST", "DEAD"],
+            )
+        self.assertIsNone(result["survivorship_warning"])
+
+    def test_universe_version_is_pinned_to_live_constants(self):
+        from core import config as core_config
+
+        self.assertEqual(UNIVERSE_VERSION, core_config.UNIVERSE_VERSION)
+        frame = _frame(_ramp(320))
+        store_dir = tempfile.mkdtemp()
+        store = str(Path(store_dir) / "backtest_runs.jsonl")
+
+        def fake_build_score(ticker, as_of, persist_audit=False, **kwargs):
+            return SimpleNamespace(score=5.0, action="ANALYSIS_ONLY")
+
+        with patch("core.backtest.engine.build_score", fake_build_score):
+            result = run_walk_forward_backtest(
+                "TEST", frame,
+                fold_sessions=50, embargo_sessions=60, holdout_sessions=40,
+                manifest_store_path=store,
+            )
+        self.assertEqual(
+            result["manifest"]["versions"]["universe"], core_config.UNIVERSE_VERSION
+        )
+
+    def test_manifest_discloses_the_price_basis(self):
+        frame = _frame(_ramp(320))
+        store_dir = tempfile.mkdtemp()
+        store = str(Path(store_dir) / "backtest_runs.jsonl")
+
+        def fake_build_score(ticker, as_of, persist_audit=False, **kwargs):
+            return SimpleNamespace(score=5.0, action="ANALYSIS_ONLY")
+
+        with patch("core.backtest.engine.build_score", fake_build_score):
+            result = run_walk_forward_backtest(
+                "TEST", frame,
+                fold_sessions=50, embargo_sessions=60, holdout_sessions=40,
+                manifest_store_path=store,
+            )
+        basis = result["manifest"]["provider_overrides"]["price_basis"]
+        self.assertIn("split-adjusted", basis)
+        self.assertIn("NOT reinvested", basis)

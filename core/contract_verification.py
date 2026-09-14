@@ -39,6 +39,7 @@ from core.config import (
     LONG_TERM_SCORE_VERSION,
     MARKET_FEATURE_VERSION,
     OUTCOME_LABEL_VERSION,
+    UNIVERSE_VERSION,
 )
 
 SHARED_CONTRACT_VERSION = "shared-contract-verification-v1"
@@ -156,6 +157,7 @@ def expected_engine_versions() -> dict:
         "outcome_label": OUTCOME_LABEL_VERSION,
         "strategy": BACKTEST_STRATEGY_VERSION,
         "metrics": "backtest-metrics-v1",
+        "universe": UNIVERSE_VERSION,
     }
 
 

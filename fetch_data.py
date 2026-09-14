@@ -6,6 +6,17 @@ its own bundled CA list and fails behind this network's corporate
 TLS-inspecting proxy; urllib validates via the OS trust store instead,
 so it works without any custom certificate handling.
 
+Price basis (Sprint V6 — corporate actions): the Yahoo chart payload's
+`quote` OHLC series already arrives split-adjusted (verified live against
+NVDA's 2024-06-10 10:1 split: pre-split bars return post-split-scale
+closes, not raw ~1200s), so Close/Open/High/Low are split-safe by
+construction with no local adjustment math to drift. Dividends are NOT
+reinvested — the return basis is price return, and that limitation is
+pinned in the manifest's price-basis disclosure and docs/validation.md.
+The provider's `adjclose` series is intentionally not substituted: it is
+a second, silently-revising price truth that would fork research from
+production (V5 forbids parallel paths).
+
 Fetched data is cached to disk under CACHE_DIR (Parquet, one file per
 ticker/period/interval combination) so repeated runs within the TTL
 window don't re-hit Yahoo Finance for every ticker. Parquet was chosen

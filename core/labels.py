@@ -19,9 +19,11 @@ Governance rules enforced here:
   dataset state always produces the same labels. Partially elapsed
   horizons are never emitted (no partial-window leakage) and never
   persisted.
-- Single price truth: the same Yahoo-adjusted close series the scoring
-  path uses; no separate adjustment, so research and production share one
-  contract.
+- Single price truth: the same Yahoo split-adjusted quote-close series the
+  scoring path uses; no separate adjustment, so research and production
+  share one contract. Dividends are NOT reinvested (price return, not total
+  return) — pinned in the manifest price-basis disclosure and
+  docs/validation.md.
 - Versioning: every record carries OUTCOME_LABEL_VERSION; changing the
   up-threshold or window definitions creates a new version and never
   rewrites history.

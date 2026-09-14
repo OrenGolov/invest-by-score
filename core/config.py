@@ -452,6 +452,14 @@ BACKTEST_TRADE_NOTIONAL = 50_000.0
 BACKTEST_AVG_DOLLAR_VOLUME_WINDOW = 20
 
 
+# --- Historical universe ledger (V6) ---------------------------------------------
+# Survivorship-safe membership: a universe is a set of membership intervals,
+# not a list of today's tickers. The ledger lives in core/universe.py; the
+# version lives here so manifests and the shared-contract verifier read it
+# from exactly one place (same discipline as every other version constant).
+UNIVERSE_VERSION = "universe-ledger-v1"
+
+
 def _validate_backtest_config() -> None:
     """Import-time guard: the embargo must cover the longest label horizon."""
     max_horizon = max(LABEL_HORIZON_SESSIONS.values())

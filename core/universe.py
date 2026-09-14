@@ -47,7 +47,7 @@ from pathlib import Path
 
 import pandas as pd
 
-UNIVERSE_VERSION = "universe-ledger-v1"
+from core.config import UNIVERSE_VERSION
 
 UNIVERSES_PATH = Path(__file__).resolve().parent.parent / "data" / "universe.jsonl"
 

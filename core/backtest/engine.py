@@ -63,10 +63,11 @@ from core.config import (
     LONG_TERM_SCORE_VERSION,
     MARKET_FEATURE_VERSION,
     OUTCOME_LABEL_VERSION,
+    UNIVERSE_VERSION,
 )
 from core.labels import build_outcome_labels
 from core.score_engine import build_score
-from core.universe import universe_block_problems
+from core.universe import coverage_problems, universe_block_problems
 from fetch_data import TickerFetchError
 
 
@@ -385,6 +386,7 @@ def run_walk_forward_backtest(
     trade_notional: float | None = None,
     manifest_store_path: str | Path | None = None,
     universe: dict | None = None,
+    fetched_tickers: list[str] | None = None,
 ) -> dict:
     """Run the full walk-forward validation for one ticker over one frame.
 
@@ -408,6 +410,10 @@ def run_walk_forward_backtest(
     Without a declared universe the run proceeds but discloses
     `survivorship_status: unverifiable_no_ledger` and carries an explicit
     warning — it can never silently claim to be survivorship-safe.
+    Pass `fetched_tickers` (the tickers whose price history was actually
+    fetched for the run) to surface ledger members with no price history —
+    delisted names typically 404 on the provider — as an explicit warning
+    instead of silently dropping them.
     """
     cost_table = cost_table if cost_table is not None else COST_TABLE_V2
     initial_capital = initial_capital if initial_capital is not None else BACKTEST_INITIAL_CAPITAL
@@ -440,11 +446,22 @@ def run_walk_forward_backtest(
                 "universe gate refused the run: " + "; ".join(block_problems)
             )
         universe_block = universe
-        survivorship_warning = (
-            "survivorship: unverifiable — see the universe block problems"
-            if universe_block.get("survivorship_status") == "unverifiable"
-            else None
-        )
+        coverage_gaps: list[str] = []
+        if fetched_tickers is not None:
+            coverage_gaps = coverage_problems(
+                universe_block.get("ledger_members_at_as_of")
+                or universe_block.get("requested_members")
+                or [],
+                fetched_tickers,
+            )
+        if universe_block.get("survivorship_status") == "unverifiable":
+            survivorship_warning = (
+                "survivorship: unverifiable — see the universe block problems"
+            )
+        elif coverage_gaps:
+            survivorship_warning = "survivorship: " + "; ".join(coverage_gaps)
+        else:
+            survivorship_warning = None
 
     geometry = build_walk_forward_folds(
         len(frame), fold_sessions, embargo_sessions, holdout_sessions
@@ -458,6 +475,7 @@ def run_walk_forward_backtest(
         "cost_table": cost_table["cost_table_version"],
         "strategy": BACKTEST_STRATEGY_VERSION,
         "metrics": "backtest-metrics-v1",
+        "universe": UNIVERSE_VERSION,
     }
     config_snapshot = {
         "ticker": str(ticker).upper(),
@@ -475,6 +493,11 @@ def run_walk_forward_backtest(
     }
     provider_overrides = {
         "price_history": "cached_frame_injection",
+        "price_basis": (
+            "split-adjusted quote OHLC (verified live: NVDA 2024-06-10 10:1 "
+            "pre-split bars arrive post-split-scale); dividends NOT reinvested "
+            "(price return, not total return)"
+        ),
         "news": "forced_unavailable",
         "sentiment": "forced_unavailable",
         "macro": "forced_unavailable",
