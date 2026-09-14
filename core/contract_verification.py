@@ -81,7 +81,12 @@ _REQUIRED_ENGINE_CALLS = ("build_score(", "build_outcome_labels(")
 
 
 def feature_contract_problems(snapshot: dict) -> list[str]:
-    """Every feature contract must be complete and version-current."""
+    """Every feature contract must be complete and version-current.
+
+    Sprint M1: also enforces the feature-registry contract — every feature
+    must be registered and satisfy the PIT rule.
+    """
+    from core.feature_registry import build_default_registry, feature_contract_problems as _fr_problems
     features = snapshot.get("features") or {}
     if not features:
         return ["snapshot carries no feature contracts"]
@@ -104,7 +109,22 @@ def feature_contract_problems(snapshot: dict) -> list[str]:
             problems.append(
                 f"{name}: calculation_version {version!r} != {MARKET_FEATURE_VERSION!r}"
             )
+    # Sprint M1: enforce the feature-registry contract.
+    registry = build_default_registry()
+    problems.extend(_fr_problems(snapshot, registry))
     return problems
+
+
+def feature_registry_problems(snapshot: dict) -> list[str]:
+    """Enforce the feature-registry contract on a snapshot.
+
+    Every feature must be registered, and every feature contract must satisfy
+    the PIT rule (published_time <= as_of). This is the M1 binding rule: an
+    unregistered feature cannot enter a production model.
+    """
+    from core.feature_registry import build_default_registry, feature_contract_problems as _fr_problems
+    registry = build_default_registry()
+    return _fr_problems(snapshot, registry)
 
 
 def snapshot_field_problems(left: dict, right: dict) -> list[str]:

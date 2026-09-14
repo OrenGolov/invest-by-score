@@ -466,6 +466,12 @@ UNIVERSE_VERSION = "universe-ledger-v1"
 # verifier read it from exactly one place.
 FRAMING_VERSION = "backtest-framing-v1"
 
+# --- Canonical feature registry (M1) -------------------------------------------
+# Every feature that enters a production model must be registered in
+# core/feature_registry.py with complete metadata. The version lives here so
+# manifests and the shared-contract verifier read it from exactly one place.
+FEATURE_REGISTRY_VERSION = "feature-registry-v1"
+
 
 def _validate_backtest_config() -> None:
     """Import-time guard: the embargo must cover the longest label horizon."""

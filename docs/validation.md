@@ -22,6 +22,37 @@ canonical producers (`build_score`, the V1 label builder) and never
 defines parallel implementations. `tests/test_shared_contracts.py` pins
 all of it on every commit; a violation is a build failure.
 
+## Canonical Feature Registry (M1)
+
+Every feature that enters a production model must be registered in
+`core/feature_registry.py` with complete metadata: name, owner, domain,
+formula, version, unit, frequency, lookback, minimum history, null policy,
+PIT rule, source dependencies, feature family, and model compatibility.
+The version (`feature-registry-v1`, owned by
+`core/config.py::FEATURE_REGISTRY_VERSION`) is stamped into every manifest.
+
+Binding rules (enforced by the contract verifier and the engine):
+
+- **Unregistered features are rejected.** The verifier's
+  `feature_registry_problems(snapshot)` checks every feature contract on a
+  snapshot against the registry; an unregistered feature is a hard failure.
+  The engine also refuses a run whose registry is structurally broken.
+- **Producer must exist.** A feature's owner must be one of the known
+  agents (`market_data_agent`, `technical_agent`, etc.) —
+  `spec_problems` rejects any unknown owner.
+- **Future/revised input is rejected.** A feature contract whose
+  `published_time` is after `as_of` violates the PIT rule and is rejected.
+- **Deterministic feature hash.** Each `FeatureSpec` carries a
+  `canonical_hash()` (SHA-256 over its canonical JSON); `registry_hash()`
+  covers the whole registry. Any metadata change changes the hash.
+
+The default registry is pre-populated with the 22 market-data features
+produced by `agents/market_data_agent.py` (momentum, volatility, trend,
+volume families). Persistence is append-only at
+`data/feature_registry.jsonl`, idempotent per registry hash, with the same
+integrity model as the framing and monitoring stores.
+
+
 ## Backtest Protocol
 
 Use walk-forward splits with an embargo around evaluation windows, point-in-time

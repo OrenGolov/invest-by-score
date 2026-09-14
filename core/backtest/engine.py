@@ -59,6 +59,7 @@ from core.config import (
     BACKTEST_TRADE_NOTIONAL,
     CURRENT_SCORE_VERSION,
     ENSEMBLE_VERSION,
+    FEATURE_REGISTRY_VERSION,
     FRAMING_VERSION,
     LABEL_HORIZON_SESSIONS,
     LONG_TERM_SCORE_VERSION,
@@ -67,6 +68,7 @@ from core.config import (
     UNIVERSE_VERSION,
 )
 from core.framing import build_framing_block, framing_problems, persist_framing_snapshot
+from core.feature_registry import build_default_registry, feature_contract_problems as _fr_problems
 from core.labels import build_outcome_labels
 from core.monitoring import monitoring_snapshot, persist_monitoring_snapshot
 from core.score_engine import build_score
@@ -505,6 +507,7 @@ def run_walk_forward_backtest(
         "metrics": "backtest-metrics-v1",
         "universe": UNIVERSE_VERSION,
         "framing": FRAMING_VERSION,
+        "feature_registry": FEATURE_REGISTRY_VERSION,
     }
     config_snapshot = {
         "ticker": str(ticker).upper(),
@@ -536,12 +539,24 @@ def run_walk_forward_backtest(
     manifest_issues = validate_manifest(manifest)
     frame_problems = framing_problems(manifest)
     manifest_issues = manifest_issues + frame_problems
+    # Sprint M1: the feature registry is the contract — a run whose registry
+    # is structurally broken (empty or containing invalid specs) is refused
+    # before any fold is replayed. The per-snapshot enforcement (every feature
+    # must be registered + satisfy the PIT rule) is handled by the contract
+    # verifier's feature_contract_problems, which now delegates to the registry.
+    registry = build_default_registry()
+    registry_issues = registry.problems()
+    for spec in registry.all_features().values():
+        from core.feature_registry import spec_problems as _spec_problems
+        registry_issues.extend(
+            f"registry feature {spec.name!r}: {p}" for p in _spec_problems(spec)
+        )
+    manifest_issues = manifest_issues + registry_issues
     if manifest_issues:
         # V4: manifests are mandatory — a run without a valid manifest is
-        # invalid by definition, so it is refused before any fold is
-        # replayed and before any metric exists. V8: a run whose assumed
-        # surface is incomplete is equally un-framable and refused — a
-        # backtest without its explicit assumptions is not framed evidence.
+        # invalid by definition. V8: a run whose assumed surface is
+        # incomplete is equally un-framable. M1: a run whose feature registry
+        # is structurally broken is refused — the registry is the contract.
         raise BacktestManifestError(
             "invalid run manifest — a run without a valid manifest is invalid "
             f"by definition: {'; '.join(manifest_issues)}"
