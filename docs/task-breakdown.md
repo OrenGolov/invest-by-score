@@ -311,8 +311,24 @@ acceptance gates verified.
   `model_versions`/`agent_statuses` included, `expected_input_hashes`
   verified) while deliberately sitting OUTSIDE the data-agent posture loop —
   its absence renormalizes to nothing and cannot floor a healthy decision to
-  `ANALYSIS_ONLY`. The `derived_from_news` labeling (×0.5 confidence) is a
-  documented, test-pinned contract for any future news-derived design.
+  `ANALYSIS_ONLY`. The `derived_from_news` labeling is now an enforced,
+  test-pinned contract: `core/config.py::SENTIMENT_DERIVED_CONFIDENCE_SCALE`
+  (0.5) and `core/sentiment_contract.py::derive_sentiment_from_news` — the
+  ONLY sanctioned path to news-derived sentiment — is fail-closed (any news
+  snapshot that is not status OK with in-range numeric tone/confidence yields
+  the UNAVAILABLE placeholder; degraded or CONTRADICTORY evidence is never
+  laundered into a sentiment value), stamps
+  `derivation: "derived_from_news"` + `source_id: "sentiment_derived_from_news"`,
+  and scales `source_confidence` ×0.5 so the single-source dependency is
+  priced into confidence, not merely documented. It is deliberately NOT wired
+  into the production pipeline; promoting it requires a feature-registry entry
+  and an explicit ensemble-weight decision. Anti-proxying is proven three ways
+  in `tests/test_sentiment_contract.py`: the pinned UNAVAILABLE shape,
+  behavioral invariance (output identical under wildly different patched
+  news/technical pipeline states), and an AST import-hygiene guard (the module
+  may import only config + schemas; importing news/technical/market code fails
+  the suite). A source-scan test also forbids production references to the
+  derived path until it is formally registered.
   `tests/test_sentiment_contract.py` pins the shape byte-for-byte.
 
 ### N3. Macroeconomic agent ✓ DONE

@@ -10,6 +10,11 @@ CURRENT_SCORE_VERSION = "current-score-v3"
 LONG_TERM_SCORE_VERSION = "long-term-score-v2"
 NEWS_CONTRACT_VERSION = "news-contract-v1"
 SENTIMENT_CONTRACT_VERSION = "sentiment-contract-v1"
+# N2 anti-proxying rule: a news-derived sentiment design is permitted only as
+# an explicit, labeled feature (`derivation: "derived_from_news"`); its
+# confidence MUST be scaled by this factor relative to the news evidence it
+# consumed, so the dependency is reflected in every downstream confidence read.
+SENTIMENT_DERIVED_CONFIDENCE_SCALE = 0.5
 
 # --- Ensemble wiring (W1) ------------------------------------------------------
 # The published score is the weighted product of agent contributions, not an
