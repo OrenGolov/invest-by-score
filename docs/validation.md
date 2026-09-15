@@ -159,6 +159,41 @@ close series is the provider's split-adjusted feed (dividends are not
 reinvested). Any of these becoming load-bearing requires a new cost-table
 version.
 
+## Backtest Framing (V8)
+
+Every completed backtest run carries a versioned framing block
+(`core/framing.py`, `backtest-framing-v1`) alongside its manifest and
+monitoring snapshot. The block is the interpretive contract that keeps
+validation honest — a backtest is evidence about historical behavior under
+the assumptions it actually used, not proof the future behaves the same way.
+
+- **Canonical statement (immutable):** "This backtest is evidence about
+  historical behavior under the explicit assumptions listed in this block.
+  It is not proof that the future will behave the same way." The wording is
+  test-pinned; strong historical results never upgrade it.
+- **Assumptions are manifest-sourced:** cost table, strategy, price basis,
+  universe, embargo/fold/holdout geometry, enter/exit scores, and the data
+  digest are copied from the run manifest, so the framing cannot disagree
+  with the run it frames.
+- **Fail-closed:** `framing_problems()` refuses to call a run framable when
+  a required assumption is missing; the engine treats these as manifest
+  issues and raises before any fold is replayed. Evidence without its
+  assumptions stated is not framed evidence.
+- **Explicit limitations and non-claims:** the block lists the accepted
+  simulation limitations (no intraday timing, no partial fills, no borrow
+  costs, open-gap risk, price-return basis, no fees/taxes, PIT-only) and
+  what the run does NOT claim: not proof of the future, not a guarantee of
+  returns, no generalization to unseen periods/markets/asset classes, and
+  no waiver of the release gates.
+- **Evidence status is performance-invariant:** `historical_evidence` vs
+  `historical_evidence_no_decisions` depends only on whether the run
+  exercised decisions, never on how well they performed.
+- **Persistence:** append-only `data/framing.jsonl`, idempotent per
+  `(run_type, run_hash)`; a same-key record with different content is an
+  integrity violation, never a silent revision. The block is exposed as
+  `run["framing"]`.
+
+## Source Reliability and Hard Gates
 ## Source Reliability and Hard Gates
 
 The governance layer enforces a fail-closed quality model.

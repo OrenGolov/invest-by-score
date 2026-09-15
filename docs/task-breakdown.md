@@ -790,6 +790,55 @@ evidence, computed by pure functions — no dashboard dependency.
   recompute idempotently (4 new engine-integration tests). Full suite:
   389/389 pass.
 
+### V8. Framing — a backtest is historical evidence under explicit assumptions ✓ DONE
+
+Implemented 2026-09-14 (commit bcdec69). The interpretive contract that keeps
+validation honest: a backtest is evidence about historical behavior under the
+assumptions it actually used — never proof the future behaves the same way.
+
+- Evaluator: `core/framing.py` (pure, deterministic,
+  `FRAMING_VERSION = backtest-framing-v1` in `core/config.py`). Every
+  completed run carries a versioned framing block built by
+  `build_framing_block(manifest, aggregate)`.
+- Canonical statement (`FRAMING_STATEMENT`, test-pinned against upgrading
+  wording): "This backtest is evidence about historical behavior under the
+  explicit assumptions listed in this block. It is not proof that the future
+  will behave the same way."
+- Assumptions (`assumption_entries`) are sourced FROM THE MANIFEST —
+  cost_table, strategy, price_basis, universe, embargo/fold/holdout session
+  geometry, enter/exit scores, data_digest — so the framing can never
+  disagree with the run it frames. `framing_problems(manifest)` is
+  fail-closed: a missing assumption refuses the run. The engine merges
+  framing problems into the manifest validation and raises
+  `BacktestManifestError` BEFORE any fold is replayed (weak framing is
+  refused before replay, never after results exist).
+- Limitations (`FRAMING_LIMITATIONS`): the V3/V6-accepted simulation limits
+  (no intraday timing, no partial fills, no borrow/rebate costs, open-gap
+  risk, price-return basis, no exchange fees/taxes, PIT-only) as an
+  explicit, versioned list — never silently rediscovered.
+- Non-claims (`FRAMING_NON_CLAIMS`): not_proof_of_future, not_guarantee,
+  not_generalization, not_release_gate_waiver — the only framing vocabulary
+  a run may use about its own meaning. Strong historical results never
+  upgrade the framing (test-pinned): `evidence_status` is
+  `historical_evidence` or `historical_evidence_no_decisions`; the
+  aggregate decision count only informs the evidence note, never the status
+  or the statement.
+- Persistence: append-only `data/framing.jsonl`
+  (`persist_framing_snapshot`, idempotent per (run_type, run_hash);
+  byte-identical recompute appends nothing; same-key/different-content is
+  an integrity violation, never a silent revision; malformed lines raise on
+  load). The engine default mirrors the manifest store path;
+  `run["framing"]` exposes the block next to the manifest and monitoring
+  snapshot.
+- Binding documentation: `docs/validation.md` gains the "Backtest Framing
+  (V8)" section with the full contract.
+- Acceptance: canonical statement and non-claims pinned; superb and
+  terrible aggregates frame identically; a missing assumption refuses the
+  run before replay; idempotent store behavior; every engine run carries
+  the block. 17 tests in `tests/test_framing.py`. Full suite: 411/411 pass
+  at landing (508/508 as of N3 v2).
+
+## Sprint M — ML Layer, Calibration, Model Registry
 ## Sprint M — ML Layer, Calibration, Model Registry
 
 Preconditions: Sprint V complete (labels exist, harness exists, paper
