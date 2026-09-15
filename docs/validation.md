@@ -48,7 +48,30 @@ Binding rules (enforced by the contract verifier and the engine):
 
 The default registry is pre-populated with the 22 market-data features
 produced by `agents/market_data_agent.py` (momentum, volatility, trend,
-volume families). Persistence is append-only at
+volume families) plus the 5 fundamental factors that enter the production
+ensemble via `core/score_engine._build_fundamental_score` (owner
+`fundamental_agent`, version `FUNDAMENTAL_FEATURE_VERSION = "fundamental-feature-v1"`,
+owned by `core/config.py`). Producers without registered features yet are
+reported informationally by `unwired_producers` and wired sprint by sprint.
+
+The binding rule is enforced on both paths:
+
+- **Research/offline:** the walk-forward engine refuses to start when the
+  scored model's declared inputs are not registry-conformant and refuses
+  mid-run when a consumed feature surface violates the registry.
+- **Live score path:** the W3 auditor runs the `feature_registry_conformance`
+  veto check (`core/audit_policy.py`) on every decision — the market
+  snapshot's feature contracts are checked against the registry
+  (registration, PIT rule, calculation version, lookback, declared source).
+  An unregistered or PIT-violating contract forces `auditor_veto`, which
+  blocks PAPER. Fail-closed: a missing snapshot or empty feature surface
+  vetoes.
+- **CI:** `scripts/check_feature_registry.py` gates registry/snapshot drift
+  as a build failure with a diff-precise message (emitted surface must equal
+  the registered market-data surface; hash must be deterministic; persistence
+  must round-trip idempotently).
+
+Persistence is append-only at
 `data/feature_registry.jsonl`, idempotent per registry hash, with the same
 integrity model as the framing and monitoring stores.
 

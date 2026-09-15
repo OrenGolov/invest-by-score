@@ -847,18 +847,51 @@ first training dependency (scikit-learn is the pragmatic choice) — that is a
 requirements.txt change requiring explicit review, plus pinning consistent
 with the existing style.
 
-### M1. Feature registry (single source of truth)
+### M1. Feature registry (single source of truth) ✓ DONE
 
-- `core/feature_registry.py`: every scored feature declared as
-  `{name, owner_agent, domain, dtype, unit, lookback, null_policy,
-  calculation_version, min_history}`; a `validate_snapshot(snapshot)`
-  conformance check runs in the score path (dev/test modes) and in CI —
-  registry and snapshot drift is a build failure, not a runtime surprise.
-- Registry version `FEATURE_REGISTRY_VERSION` participates in replay hashes
-  and run manifests. Adding a feature without registry entry: rejected.
-- Acceptance: removing a snapshot feature or renaming one breaks CI with a
-  diff-precise message; a registry entry with no producer fails the inverse
-  check.
+Implemented 2026-09-15 (completed the registry started in commits fe70627 /
+4a72757). The registry is the only door into a production model.
+
+- Evaluator: `core/feature_registry.py` (`feature-registry-v1`, owned by
+  `core/config.py::FEATURE_REGISTRY_VERSION`). Every feature is declared as a
+  `FeatureSpec` with complete, validated metadata — name, owner, domain,
+  formula, version, unit, frequency, lookback, minimum history, null policy,
+  PIT rule, source dependencies, feature family, model compatibility — with
+  closed vocabularies (unknown unit/family/domain/frequency/source/null
+  policy/model family is a rejection, never a silent default).
+- Default registry: 22 market-data features (owner `market_data_agent`,
+  version `MARKET_FEATURE_VERSION`) + the 5 fundamental factors that enter
+  the production ensemble via `_build_fundamental_score` (owner
+  `fundamental_agent`, version `FUNDAMENTAL_FEATURE_VERSION`); producers
+  without registered features are reported informationally by
+  `unwired_producers` and wired sprint by sprint.
+- Binding rule (three gates): `model_feature_problems` (a model's declared
+  feature set), `feature_contract_problems` (the contracts a producer
+  emitted — unregistered, PIT-violating, version-drifted, lookback-mismatched
+  or undeclared-source contracts are rejected), and the walk-forward engine
+  (refuses to start on a non-conformant declared model surface and refuses
+  mid-run on a non-conformant consumed surface).
+- Live score path: the W3 auditor gained the `feature_registry_conformance`
+  veto check (`core/audit_policy.py`) — the decision's market snapshot is
+  checked against the registry on every orchestration; an unregistered or
+  PIT-violating feature contract forces `auditor_veto` and blocks PAPER.
+  Fail-closed: a missing snapshot or empty feature surface vetoes.
+- Producer must exist: `PRODUCERS` maps each owner to a real module +
+  callable on disk (`producer_problems`); re-registering a definition without
+  a version bump is refused (`FeatureRegistry.register`).
+- Deterministic identity: spec, registry, named feature set, and consumed
+  surface each carry a canonical SHA-256; persistence is append-only at
+  `data/feature_registry.jsonl`, idempotent per registry hash, integrity
+  violations raise.
+- CI drift gate: `scripts/check_feature_registry.py` — registry validity,
+  producer resolution, live-snapshot conformance, emitted-vs-registered
+  surface drift (diff-precise), hash determinism, persistence round-trip;
+  exit 1 on any drift. Removing/renaming a snapshot feature breaks the gate
+  with a diff-precise message.
+- Acceptance: 95 tests in `tests/test_feature_registry.py` (spec validation,
+  hashes, PIT/rejection gates, producer wiring, persistence, engine +
+  contract-verifier + auditor + orchestrator integration, fundamental factor
+  registration). Full suite: 522/522 pass.
 
 ### M2. Model registry and artifact tracking
 

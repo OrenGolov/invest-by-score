@@ -746,7 +746,23 @@ class AuditPolicyTests(unittest.TestCase):
         return result
 
     def _context(self, **overrides):
-        snapshot = overrides.pop("snapshot", {"ticker": "MSFT", "close": 100.0})
+        # The snapshot carries a registry-conformant feature contract: the M1
+        # auditor gate (feature_registry_conformance) checks the live surface
+        # against the canonical registry, so a clean audit context must expose
+        # one (rsi, version-current, PIT-valid, declared source/lookback).
+        snapshot = overrides.pop("snapshot", {
+            "ticker": "MSFT", "close": 100.0,
+            "features": {
+                "rsi": {
+                    "name": "rsi",
+                    "as_of": "2026-08-27 00:00:00",
+                    "source_id": "yahoo_finance_chart",
+                    "published_time": "2026-08-27 00:00:00",
+                    "calculation_version": "market-feature-v1",
+                    "lookback_period": "14d",
+                },
+            },
+        })
         context = {
             "ticker": "MSFT",
             "as_of": "2026-08-27 00:00:00",

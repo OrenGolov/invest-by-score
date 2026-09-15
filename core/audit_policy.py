@@ -210,6 +210,34 @@ def evaluate_audit_policy(context: dict) -> dict:
     )
 
     # replay_identifiers (veto) -----------------------------------------------------------------
+    # feature_registry_conformance (veto, M1) ----------------------------------------------------
+    # An unregistered feature cannot enter a production model — this is the
+    # live path's enforcement point (the walk-forward engine enforces the
+    # same rule offline). The market snapshot's feature contracts are checked
+    # against the canonical registry: registration, the PIT rule
+    # (published_time <= as_of), the declared calculation version, the
+    # registered lookback, and the declared source dependencies.
+    # Fail-closed: a missing snapshot or an empty feature surface fails the
+    # check — evidence whose features are unregistered is not auditable
+    # evidence.
+    audit_snapshot = context.get("snapshot")
+    from core.contract_verification import feature_registry_problems as _registry_problems
+
+    registry_problems = _registry_problems(
+        audit_snapshot if isinstance(audit_snapshot, dict) else {}
+    )
+    add(
+        "feature_registry_conformance",
+        "veto",
+        not registry_problems,
+        (
+            "every consumed feature contract is registered and registry-conformant"
+            if not registry_problems
+            else "; ".join(registry_problems[:5])
+        ),
+    )
+
+    # replay_identifiers (veto) -----------------------------------------------------------------
     replay_hash = context.get("replay_hash")
     add("replay_identifiers", "veto", bool(replay_hash), "replay hash present" if replay_hash else "replay hash missing (fail-closed)")
 

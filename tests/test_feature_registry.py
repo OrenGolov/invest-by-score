@@ -48,6 +48,10 @@ from core.backtest.engine import (
     offline_replay_seam,
 )
 from core import score_engine
+from agents.market_data_agent import fetch_market_snapshot
+from core.audit_policy import evaluate_audit_policy, stable_hash
+from core.config import FUNDAMENTAL_FEATURE_VERSION
+from core.orchestrator import orchestrate_score
 
 
 def _valid_spec(name: str = "test_feature", **overrides) -> FeatureSpec:
@@ -213,8 +217,8 @@ class TestRegistryHash(unittest.TestCase):
 
 
 class TestBuildDefaultRegistry(unittest.TestCase):
-    def test_builds_22_features(self):
-        self.assertEqual(len(build_default_registry().all_features()), 22)
+    def test_builds_27_features(self):
+        self.assertEqual(len(build_default_registry().all_features()), 27)
 
     def test_expected_names_present(self):
         expected = {
@@ -223,7 +227,9 @@ class TestBuildDefaultRegistry(unittest.TestCase):
             "atr_14", "trend_slope_60d", "trend_vs_20d_mean", "rsi",
             "volatility", "volume_ratio_20d",
             "price_vs_ma_50", "price_vs_ma_100", "price_vs_ma_150", "price_vs_ma_200",
-            "ma_50", "ma_100", "ma_150", "ma_200"}
+            "ma_50", "ma_100", "ma_150", "ma_200",
+            "revenue_growth", "margin_quality", "free_cash_flow_quality",
+            "balance_sheet_quality", "valuation_quality"}
         self.assertEqual(set(build_default_registry().all_features()), expected)
 
     def test_all_specs_valid(self):
@@ -231,14 +237,22 @@ class TestBuildDefaultRegistry(unittest.TestCase):
         for name, spec in reg.all_features().items():
             self.assertEqual(spec_problems(spec), [], f"{name}: {spec_problems(spec)}")
 
-    def test_version_matches_live_constant(self):
+    def test_version_matches_the_domain_constant(self):
         from core.config import MARKET_FEATURE_VERSION
-        for spec in build_default_registry().all_features().values():
-            self.assertEqual(spec.version, MARKET_FEATURE_VERSION)
+        for name, spec in build_default_registry().all_features().items():
+            expected = (
+                FUNDAMENTAL_FEATURE_VERSION
+                if spec.domain == "fundamental"
+                else MARKET_FEATURE_VERSION
+            )
+            self.assertEqual(spec.version, expected, name)
 
-    def test_all_owned_by_market_data_agent(self):
-        for spec in build_default_registry().all_features().values():
-            self.assertEqual(spec.owner, "market_data_agent")
+    def test_ownership_follows_domain(self):
+        for name, spec in build_default_registry().all_features().items():
+            if spec.domain == "fundamental":
+                self.assertEqual(spec.owner, "fundamental_agent", name)
+            else:
+                self.assertEqual(spec.owner, "market_data_agent", name)
 
     def test_all_compatible_with_technical_analysis(self):
         for spec in build_default_registry().all_features().values():
@@ -440,8 +454,10 @@ class TestProducerRegistry(unittest.TestCase):
         registry = build_default_registry()
         unwired = unwired_producers(registry)
         self.assertNotIn("market_data_agent", unwired)
+        self.assertNotIn("fundamental_agent", unwired)
         self.assertEqual(sorted(unwired), sorted(
-            name for name in PRODUCER_BY_NAME if name != "market_data_agent"))
+            name for name in PRODUCER_BY_NAME
+            if name not in ("market_data_agent", "fundamental_agent")))
         self.assertEqual(registry.problems(), [])
 
 
@@ -688,6 +704,257 @@ class TestEngineFeatureGate(unittest.TestCase):
         self.assertEqual(
             result["folds"][0]["feature_surface"], "unexposed_by_score_result")
         self.assertEqual(result["folds"][0]["feature_surface_bars"], 0)
+
+
+class TestFundamentalFactorRegistration(unittest.TestCase):
+    """M1: the fundamental factors that enter the production model are registered."""
+
+    FACTORS = (
+        "revenue_growth", "margin_quality", "free_cash_flow_quality",
+        "balance_sheet_quality", "valuation_quality",
+    )
+
+    def test_factors_registered_with_full_metadata(self):
+        registry = build_default_registry()
+        for name in self.FACTORS:
+            spec = registry.get(name)
+            self.assertIsNotNone(spec, name)
+            self.assertEqual(spec.owner, "fundamental_agent", name)
+            self.assertEqual(spec.domain, "fundamental", name)
+            self.assertEqual(spec.unit, "score", name)
+            self.assertEqual(spec.frequency, "per_session", name)
+            self.assertEqual(spec.null_policy, "default", name)
+            self.assertEqual(spec.source_dependencies, ["alpha_vantage_overview"], name)
+            self.assertIn(spec.feature_family, ("growth", "quality", "valuation"), name)
+            self.assertTrue(spec.pit_rule, name)
+            self.assertTrue(spec.formula, name)
+            self.assertEqual(spec_problems(spec), [], name)
+
+    def test_formulas_describe_the_real_computation(self):
+        registry = build_default_registry()
+        expected_tokens = {
+            "revenue_growth": "revenue_growth * 10.0",
+            "margin_quality": "gross_margins * 10.0",
+            "free_cash_flow_quality": "8.0 when free_cash_flow > 0",
+            "balance_sheet_quality": "10.0 - debt_to_equity * 5.0",
+            "valuation_quality": "(price_to_book - 2.0) * 1.5",
+        }
+        for name, token in expected_tokens.items():
+            self.assertIn(token, registry.get(name).formula, name)
+
+    def test_factor_producer_resolves(self):
+        self.assertEqual(producer_problems("fundamental_agent"), [])
+
+    def test_fundamental_version_constant_used(self):
+        for name in self.FACTORS:
+            self.assertEqual(
+                build_default_registry().get(name).version,
+                FUNDAMENTAL_FEATURE_VERSION, name)
+
+    def test_registered_names_are_exactly_the_consumed_factors(self):
+        from core.score_engine import _build_fundamental_features
+        factors = _build_fundamental_features({}, {"valuation_metrics": {}})
+        for name in self.FACTORS:
+            self.assertIn(name, factors, name)
+
+    def test_fundamental_factor_surface_passes_the_contract_check(self):
+        as_of = "2026-09-15 00:00:00"
+        features = {
+            name: {
+                "name": name, "as_of": as_of,
+                "source_id": "alpha_vantage_overview",
+                "published_time": as_of,
+                "calculation_version": FUNDAMENTAL_FEATURE_VERSION,
+                "lookback_period": "1d",
+            }
+            for name in self.FACTORS
+        }
+        problems = feature_contract_problems(
+            {"features": features}, build_default_registry())
+        self.assertEqual(problems, [])
+
+
+class TestAuditorRegistryConformance(unittest.TestCase):
+    """M1: the live score path refuses unregistered features via the auditor veto."""
+
+    AS_OF = "2026-08-27 00:00:00"
+
+    @staticmethod
+    def _agents():
+        names = ["market_data", "technical_analysis", "fundamental_analysis",
+                 "news_intelligence", "risk_management"]
+        return [
+            {
+                "agent": name,
+                "status": "OK",
+                "evidence": [{"source_record_id": f"{name}_source", "reason": "ok"}],
+                "input_hash": "a" * 64,
+            }
+            for name in names
+        ]
+
+    @classmethod
+    def _fake_result(cls):
+        return {
+            "ticker": "MSFT",
+            "as_of": cls.AS_OF,
+            "score": 7.0,
+            "current_time_score": 7.5,
+            "long_term_score": 6.5,
+            "confidence": 0.8,
+            "confidence_breakdown": {"value": 0.8, "calculation_version": "evidence-confidence-v2"},
+            "ensemble_breakdown": {
+                "current_time_score": 7.5,
+                "long_term_score": 6.5,
+                "no_eligible_agents": False,
+                "agents": {
+                    "technical_analysis": {
+                        "effective_weight_current": 1.0,
+                        "effective_weight_long": 1.0,
+                    },
+                },
+            },
+            "governance": {"risk_gate_passed": True},
+            "evidence_ledger": {"status": "ready"},
+            "replay_metadata": {"audit_event_id": "evt-1"},
+        }
+
+    def _contract(self, name="rsi", published_time=None, calculation_version="market-feature-v1"):
+        return {
+            "name": name, "as_of": self.AS_OF,
+            "source_id": "yahoo_finance_chart",
+            "published_time": published_time or self.AS_OF,
+            "calculation_version": calculation_version,
+            "lookback_period": "14d",
+        }
+
+    def _context(self, snapshot=None, include_snapshot=True):
+        if snapshot is None:
+            snapshot = {
+                "ticker": "MSFT", "close": 100.0,
+                "features": {"rsi": self._contract()},
+            }
+        context = {
+            "ticker": "MSFT",
+            "as_of": self.AS_OF,
+            "agents": self._agents(),
+            "expected_input_hashes": {
+                "market_data": "a" * 64,
+                "technical_analysis": "a" * 64,
+                "fundamental_analysis": "a" * 64,
+                "news_intelligence": "a" * 64,
+                "risk_management": "a" * 64,
+            },
+            "snapshot_hash": stable_hash(snapshot),
+            "replay_hash": "r" * 64,
+            "first_result": self._fake_result(),
+            "second_result": self._fake_result(),
+            "confidence": 0.8,
+            "confidence_breakdown": {"value": 0.8, "calculation_version": "evidence-confidence-v2"},
+            "ensemble_breakdown": self._fake_result()["ensemble_breakdown"],
+            "current_time_score": 7.5,
+            "long_term_score": 6.5,
+            "governance": {"risk_gate_passed": True},
+            "evidence_ledger": {"status": "ready"},
+        }
+        if include_snapshot:
+            context["snapshot"] = snapshot
+        return context
+
+    @staticmethod
+    def _finding(evaluation):
+        return next(
+            f for f in evaluation["findings"]
+            if f["check_id"] == "feature_registry_conformance"
+        )
+
+    def test_clean_context_passes_the_registry_check(self):
+        evaluation = evaluate_audit_policy(self._context())
+        self.assertFalse(evaluation["veto"])
+        self.assertEqual(evaluation["veto_check_ids"], [])
+        self.assertTrue(self._finding(evaluation)["passed"])
+
+    def test_ghost_feature_vetoes(self):
+        snapshot = {
+            "ticker": "MSFT", "close": 100.0,
+            "features": {
+                "rsi": self._contract(),
+                "ghost_feature": self._contract("ghost_feature"),
+            },
+        }
+        evaluation = evaluate_audit_policy(self._context(snapshot=snapshot))
+        self.assertTrue(evaluation["veto"])
+        self.assertIn("feature_registry_conformance", evaluation["veto_check_ids"])
+        self.assertIn("ghost_feature", self._finding(evaluation)["detail"])
+
+    def test_future_published_feature_vetoes(self):
+        snapshot = {
+            "ticker": "MSFT", "close": 100.0,
+            "features": {"rsi": self._contract(published_time="2026-08-28 00:00:00")},
+        }
+        evaluation = evaluate_audit_policy(self._context(snapshot=snapshot))
+        self.assertTrue(evaluation["veto"])
+        self.assertIn("feature_registry_conformance", evaluation["veto_check_ids"])
+
+    def test_revised_calculation_version_vetoes(self):
+        snapshot = {
+            "ticker": "MSFT", "close": 100.0,
+            "features": {"rsi": self._contract(calculation_version="market-feature-v0")},
+        }
+        evaluation = evaluate_audit_policy(self._context(snapshot=snapshot))
+        self.assertTrue(evaluation["veto"])
+        self.assertIn("feature_registry_conformance", evaluation["veto_check_ids"])
+
+    def test_empty_feature_surface_vetoes(self):
+        snapshot = {"ticker": "MSFT", "close": 100.0}
+        evaluation = evaluate_audit_policy(self._context(snapshot=snapshot))
+        self.assertTrue(evaluation["veto"])
+        self.assertIn("feature_registry_conformance", evaluation["veto_check_ids"])
+
+    def test_missing_snapshot_fails_closed(self):
+        evaluation = evaluate_audit_policy(self._context(include_snapshot=False))
+        self.assertTrue(evaluation["veto"])
+        self.assertIn("feature_registry_conformance", evaluation["veto_check_ids"])
+
+    def test_non_dict_snapshot_fails_closed(self):
+        evaluation = evaluate_audit_policy(self._context(snapshot="not-a-dict"))
+        self.assertTrue(evaluation["veto"])
+        self.assertIn("feature_registry_conformance", evaluation["veto_check_ids"])
+
+
+class TestLivePathRegistryGate(unittest.TestCase):
+    """M1 integration: an unregistered feature contract cannot reach PAPER."""
+
+    def test_ghost_feature_contract_blocks_the_decision(self):
+        clean = fetch_market_snapshot("MSFT", "2024-01-02")
+        ghost = {
+            "name": "ghost_feature", "as_of": clean["as_of"],
+            "source_id": "yahoo_finance_chart",
+            "published_time": clean["as_of"],
+            "calculation_version": "market-feature-v1",
+            "lookback_period": "1d",
+        }
+
+        def injecting_fetch(ticker, as_of, timestamp=None):
+            injected = dict(clean)
+            injected["features"] = {**clean["features"], "ghost_feature": ghost}
+            return injected
+
+        with patch("core.orchestrator.fetch_market_snapshot", injecting_fetch):
+            decision = orchestrate_score("MSFT", "2024-01-02")
+
+        self.assertIn("auditor_veto", decision.veto_reasons)
+        self.assertNotEqual(decision.mode, "PAPER")
+        audit_agent = next(
+            agent for agent in decision.agent_outputs
+            if agent.agent == "performance_auditor"
+        )
+        finding = next(
+            f for f in audit_agent.payload["findings"]
+            if f["check_id"] == "feature_registry_conformance"
+        )
+        self.assertFalse(finding["passed"])
+        self.assertIn("ghost_feature", finding["detail"])
 
 
 if __name__ == "__main__":

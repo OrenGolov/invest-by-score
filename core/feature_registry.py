@@ -53,7 +53,11 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
-from core.config import FEATURE_REGISTRY_VERSION, MARKET_FEATURE_VERSION
+from core.config import (
+    FEATURE_REGISTRY_VERSION,
+    FUNDAMENTAL_FEATURE_VERSION,
+    MARKET_FEATURE_VERSION,
+)
 
 FEATURE_REGISTRY_STORE_PATH = Path(__file__).resolve().parent.parent / "data" / "feature_registry.jsonl"
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -623,8 +627,39 @@ def _market_feature(
     )
 
 
+# The PIT rule every fundamental factor inherits: metrics may only enter
+# through a fundamentals snapshot whose source contract is timestamped at or
+# before as_of. Later-published metrics are rejected upstream and can never
+# reach the factor (M1 future/revised-input rule).
+_FUNDAMENTAL_PIT_RULE = (
+    "Fundamental metrics enter only through the fundamentals snapshot whose "
+    "source contract is timestamped at or before as_of; a metric published "
+    "after as_of is rejected upstream and never reaches the factor."
+)
+
+
+def _fundamental_feature(name: str, formula: str, feature_family: str) -> FeatureSpec:
+    """A fundamental factor produced by core.score_engine._build_fundamental_score."""
+    return FeatureSpec(
+        name=name,
+        owner="fundamental_agent",
+        domain="fundamental",
+        formula=formula,
+        version=FUNDAMENTAL_FEATURE_VERSION,
+        unit="score",
+        frequency="per_session",
+        lookback="1d",
+        minimum_history=1,
+        null_policy="default",
+        pit_rule=_FUNDAMENTAL_PIT_RULE,
+        source_dependencies=["alpha_vantage_overview"],
+        feature_family=feature_family,
+        model_compatibility=["technical_analysis", "linear", "logistic", "tree", "boosting"],
+    )
+
+
 def build_default_registry() -> FeatureRegistry:
-    """Build the canonical default registry (22 market-data features)."""
+    """Build the canonical default registry (22 market-data + 5 fundamental features)."""
     registry = FeatureRegistry()
 
     _RETURN = (
@@ -723,6 +758,55 @@ def build_default_registry() -> FeatureRegistry:
         ),
         unit="ratio", lookback="20d", minimum_history=20,
         null_policy="default", feature_family="volume",
+    ))
+
+    # --- Fundamental factors (M1) ------------------------------------------------
+    # The five 0-10 factors produced by core.score_engine._build_fundamental_features
+    # and consumed by _build_fundamental_score (the ensemble's fundamental leg).
+    # Exactly the features that enter the production model are registered — no
+    # more, no less. Missing metrics degrade to the factor's explicit neutral
+    # default (null_policy "default"); the fundamentals layer's own
+    # source-status gating keeps degraded evidence out of actionable decisions.
+    registry.register(_fundamental_feature(
+        name="revenue_growth",
+        formula=(
+            "0-10 growth factor from the fundamentals snapshot: "
+            "clamp_0_10(revenue_growth * 10.0); neutral 5.0 when "
+            "revenue_growth is 0 or missing."
+        ),
+        feature_family="growth",
+    ))
+    registry.register(_fundamental_feature(
+        name="margin_quality",
+        formula=(
+            "0-10 margin factor: clamp_0_10(gross_margins * 10.0); "
+            "neutral 5.0 when gross_margins is 0 or missing."
+        ),
+        feature_family="quality",
+    ))
+    registry.register(_fundamental_feature(
+        name="free_cash_flow_quality",
+        formula=(
+            "0-10 cash-flow factor: 8.0 when free_cash_flow > 0, else 3.0 "
+            "(positive free cash flow supports balance-sheet flexibility)."
+        ),
+        feature_family="quality",
+    ))
+    registry.register(_fundamental_feature(
+        name="balance_sheet_quality",
+        formula=(
+            "0-10 leverage factor: clamp_0_10(10.0 - debt_to_equity * 5.0); "
+            "leverage above 2.0 scores 0."
+        ),
+        feature_family="quality",
+    ))
+    registry.register(_fundamental_feature(
+        name="valuation_quality",
+        formula=(
+            "0-10 valuation factor: clamp_0_10(10.0 - (price_to_book - 2.0) * 1.5); "
+            "price_to_book defaults to 4.0 when missing."
+        ),
+        feature_family="valuation",
     ))
 
     return registry

@@ -478,6 +478,10 @@ FRAMING_VERSION = "backtest-framing-v1"
 # core/feature_registry.py with complete metadata. The version lives here so
 # manifests and the shared-contract verifier read it from exactly one place.
 FEATURE_REGISTRY_VERSION = "feature-registry-v1"
+# Per-domain feature-definition versions: a domain's factors evolve on their
+# own cadence, so each carries its own version constant (read from exactly
+# one place, same discipline as MARKET_FEATURE_VERSION).
+FUNDAMENTAL_FEATURE_VERSION = "fundamental-feature-v1"
 
 
 def _validate_backtest_config() -> None:
