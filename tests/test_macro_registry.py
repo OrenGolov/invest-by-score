@@ -18,6 +18,15 @@ from datetime import datetime, timedelta
 from unittest.mock import patch
 
 from core import config as core_config
+from core.macro_registry import (
+    MACRO_REGISTRY_VERSION,
+    MACRO_SERIES_REGISTRY,
+    MACRO_SENSITIVITY_VERSION,
+    MACRO_VINTAGE_SOURCE_ALFRED,
+    MACRO_VINTAGE_SOURCE_NONE,
+    get_sector_loadings,
+    get_symbol_sector,
+)
 from core.macro_adapter import (
     MACRO_SOURCE_ID,
     UNAVAILABLE_SOURCE_ID,
@@ -26,13 +35,7 @@ from core.macro_adapter import (
     fetch_fred_series,
     pit_filter_macro,
     resolve_macro_provider,
-)
-from core.macro_registry import (
-    MACRO_REGISTRY_VERSION,
-    MACRO_SERIES_REGISTRY,
-    MACRO_SENSITIVITY_VERSION,
-    get_sector_loadings,
-    get_symbol_sector,
+    resolve_vintage,
 )
 from core.orchestrator import _derive_agent_statuses, orchestrate_score
 from core.score_engine import _ensemble_blend, build_score
@@ -86,9 +89,36 @@ def _fake_fetch(values_by_series):
     return _fetch
 
 
-def _snapshot(values_by_series, ticker="MSFT", as_of=AS_OF):
+def _fake_vintage_fetch(values_by_series):
+    """Stand-in for the ALFRED as-known feed: records carry a vintage_date
+    (the value was known at that date), hermetically, no network."""
+
+    def _fetch(series_id, api_key, realtime_date="", lag_days=0.0,
+               lookback_periods=120, timeout=10.0):
+        records = []
+        for entry in values_by_series.get(series_id, []):
+            reference_dt = datetime.fromisoformat(entry["reference_date"])
+            published_dt = reference_dt + timedelta(days=lag_days)
+            records.append({
+                "source_record_id": f"{series_id}_{entry['reference_date']}",
+                "series_id": series_id,
+                "reference_date": entry["reference_date"],
+                "published_time": published_dt.isoformat(),
+                "published_time_source": "alfred_realtime_lag_convention",
+                "vintage_date": published_dt.date().isoformat(),
+                "value": entry["value"],
+            })
+        return {"status": "ok", "records": records, "reason": ""}
+
+    return _fetch
+
+
+def _snapshot(values_by_series, ticker="MSFT", as_of=AS_OF, vintage_fetch=None):
     with patch.dict(os.environ, KEY_ENV), \
             patch("core.macro_adapter.append_raw_records", return_value=True), \
+            patch("core.macro_adapter.fetch_fred_vintages",
+                  side_effect=vintage_fetch if vintage_fetch is not None
+                  else _fake_vintage_fetch(values_by_series)), \
             patch("core.macro_adapter.fetch_fred_series", side_effect=_fake_fetch(values_by_series)):
         return build_macro_snapshot(ticker, as_of)
 
@@ -128,8 +158,17 @@ class RegistryTests(unittest.TestCase):
             self.assertTrue(series.feature_version.startswith("macro-feature-"))
 
     def test_registry_and_sensitivity_versions_exist(self):
-        self.assertEqual(MACRO_REGISTRY_VERSION, "macro-registry-v1")
+        # v2: as-known vintage feed metadata (vintage_source) per series.
+        self.assertEqual(MACRO_REGISTRY_VERSION, "macro-registry-v2")
         self.assertEqual(MACRO_SENSITIVITY_VERSION, "macro-sensitivity-v1")
+
+    def test_every_series_declares_a_known_vintage_source(self):
+        for logical_id, series in MACRO_SERIES_REGISTRY.items():
+            self.assertIn(
+                series.vintage_source,
+                (MACRO_VINTAGE_SOURCE_NONE, MACRO_VINTAGE_SOURCE_ALFRED),
+                f"{logical_id} has unknown vintage_source {series.vintage_source!r}",
+            )
 
     def test_lag_conventions_are_publication_time_safe(self):
         # Lookahead-bias guard: a monthly series dated the 1st must not be
@@ -221,6 +260,111 @@ class PitFilterTests(unittest.TestCase):
         self.assertEqual(rejected[0]["reason"], "unparseable_published_time")
 
 
+def _vintage_rec(rid, reference, vintage, value, published_offset_days=0.0):
+    """ALFRED-style record: one observation of one reference period at one vintage."""
+    vintage_dt = datetime.fromisoformat(vintage)
+    published_dt = vintage_dt + timedelta(days=published_offset_days)
+    return {
+        "source_record_id": rid,
+        "series_id": "CPIAUCSL",
+        "reference_date": reference,
+        "published_time": published_dt.isoformat(),
+        "published_time_source": "alfred_realtime_lag_convention",
+        "vintage_date": vintage,
+        "value": value,
+    }
+
+
+class VintageTests(unittest.TestCase):
+    """N3 vintage-awareness: first release, revisions, as-of-known selection."""
+
+    def test_selects_as_of_known_vintage_with_revision_history(self):
+        as_of = datetime(2024, 3, 15, 12, 0, 0)
+        records = [
+            _vintage_rec("v1", "2024-01-01", "2024-02-12", 3.1),   # first release
+            _vintage_rec("v2", "2024-01-01", "2024-03-12", 3.4),   # revision
+            _vintage_rec("older", "2023-12-01", "2024-01-12", 3.3),
+        ]
+        eligible, _ = pit_filter_macro(records, as_of)
+        selection = resolve_vintage(eligible)
+        self.assertEqual(selection["status"], "ok")
+        self.assertEqual(selection["reference_date"], "2024-01-01")  # latest reference period
+        self.assertEqual(selection["selected_record"]["source_record_id"], "v2")  # as-of-known
+        self.assertEqual(selection["first_release_value"], 3.1)   # first release retained
+        self.assertEqual(selection["first_release_vintage_date"], "2024-02-12")
+        self.assertEqual(selection["revision_count"], 1)          # one revision beyond first
+
+    def test_revision_published_after_as_of_never_leaks(self):
+        # The March revision exists in the payload but was VINTAGED after the
+        # decision point (its lag-modeled release time precedes as_of while
+        # the revision itself was published later): PIT filter rejects it as
+        # future_vintage (pending, non-invalidating), so the as-of-known
+        # value stays the first release.
+        as_of = datetime(2024, 3, 15, 12, 0, 0)
+        records = [
+            _vintage_rec("v1", "2024-01-01", "2024-02-12", 3.1),
+            _vintage_rec("v2-late", "2024-01-01", "2024-03-20", 9.9, published_offset_days=-10.0),
+        ]
+        eligible, rejected = pit_filter_macro(records, as_of)
+        self.assertEqual([entry["reason"] for entry in rejected], ["future_vintage"])
+        selection = resolve_vintage(eligible)
+        self.assertEqual(float(selection["selected_record"]["value"]), 3.1)
+        self.assertEqual(selection["revision_count"], 0)
+
+    def test_without_vintage_metadata_published_time_is_the_proxy(self):
+        # Current-vintage payloads carry no vintage_date: selection still
+        # deterministically picks the latest publication, with revision_count
+        # 0 and first_release == selected (graceful degradation, disclosed).
+        as_of = datetime(2024, 3, 15, 12, 0, 0)
+        records = [_rec(rid="a", published="2024-03-10 08:30:00", value=5.33)]
+        eligible, _ = pit_filter_macro(records, as_of)
+        selection = resolve_vintage(eligible)
+        self.assertEqual(selection["status"], "ok")
+        self.assertEqual(float(selection["selected_record"]["value"]), 5.33)
+        self.assertEqual(selection["revision_count"], 0)
+        self.assertEqual(selection["first_release_value"], 5.33)
+
+    def test_empty_input_is_reported_not_raised(self):
+        self.assertEqual(resolve_vintage([]), {"status": "empty"})
+
+    def test_snapshot_exposes_vintage_provenance_per_series(self):
+        snapshot = _snapshot(HEALTHY)
+        credibility = {e["series_id"]: e["credibility"] for e in snapshot["per_series_contributions"]}
+        vintage = credibility["fed_funds"]["vintage"]
+        self.assertEqual(vintage["source"], MACRO_VINTAGE_SOURCE_ALFRED)
+        self.assertTrue(vintage["reference_date"])
+        self.assertEqual(vintage["first_release_value"], snapshot["series_values"]["fed_funds"])
+        self.assertEqual(vintage["revision_count"], 0)
+
+    def test_snapshot_pipeline_discloses_vintage_state(self):
+        pipeline = _snapshot(HEALTHY)["pipeline"]
+        self.assertEqual(
+            pipeline["vintage_source_used"],
+            {logical: MACRO_VINTAGE_SOURCE_ALFRED for logical in MACRO_SERIES_REGISTRY},
+        )
+        self.assertEqual(pipeline["vintage_gaps"], [])
+        self.assertEqual(pipeline["current_vintage_fallback"], [])
+
+    def test_vintage_feed_failure_falls_back_with_disclosure(self):
+        # The as-known feed is down: the adapter falls back to the current-
+        # vintage endpoint for every ALFRED-declared series and DISCLOSES it
+        # (vintage_gaps + current_vintage_fallback) — never silent, because
+        # for a historical as_of that fallback carries later revisions.
+        def _failing_vintage(*args, **kwargs):
+            return {"status": "provider_request_failed", "records": [], "reason": "ALFRED request failed: boom"}
+
+        snapshot = _snapshot(HEALTHY, vintage_fetch=_failing_vintage)
+        self.assertEqual(snapshot["status"], "OK")
+        pipeline = snapshot["pipeline"]
+        self.assertEqual(pipeline["vintage_source_used"], {})
+        self.assertEqual(len(pipeline["vintage_gaps"]), 5)
+        self.assertEqual(pipeline["current_vintage_fallback"], list(MACRO_SERIES_REGISTRY))
+        # Values still arrive (from the disclosed fallback), vintage block
+        # marks the none-source degradation explicitly.
+        credibility = {e["series_id"]: e["credibility"] for e in snapshot["per_series_contributions"]}
+        self.assertEqual(credibility["fed_funds"]["vintage"]["source"], MACRO_VINTAGE_SOURCE_NONE)
+
+
 class RegimeTests(unittest.TestCase):
     def test_risk_on_classification_and_score_mapping(self):
         regime, score, reasoning = compute_risk_regime(
@@ -267,6 +411,7 @@ class SnapshotTests(unittest.TestCase):
 
         with patch.dict(os.environ, KEY_ENV), \
                 patch("core.macro_adapter.append_raw_records", return_value=True), \
+                patch("core.macro_adapter.fetch_fred_vintages", side_effect=_failing_fetch), \
                 patch("core.macro_adapter.fetch_fred_series", side_effect=_failing_fetch):
             snapshot = build_macro_snapshot("MSFT", AS_OF)
         self.assertEqual(snapshot["status"], "INCOMPLETE")
@@ -277,9 +422,13 @@ class SnapshotTests(unittest.TestCase):
     def test_all_empty_payloads_degrade_to_incomplete(self):
         # Missing series degrade confidence (INCOMPLETE) and are never
         # zero-filled into neutral evidence (N3 contract).
+        def _empty_fetch(*args, **kwargs):
+            return {"status": "ok", "records": [], "reason": ""}
+
         with patch.dict(os.environ, KEY_ENV), \
                 patch("core.macro_adapter.append_raw_records", return_value=True), \
-                patch("core.macro_adapter.fetch_fred_series", side_effect=_fake_fetch({})):
+                patch("core.macro_adapter.fetch_fred_vintages", side_effect=_empty_fetch), \
+                patch("core.macro_adapter.fetch_fred_series", side_effect=_empty_fetch):
             snapshot = build_macro_snapshot("MSFT", AS_OF)
         self.assertEqual(snapshot["status"], "INCOMPLETE")
         self.assertEqual(len(snapshot["pipeline"]["missing_series"]), 5)
@@ -329,6 +478,7 @@ class SnapshotTests(unittest.TestCase):
 
         with patch.dict(os.environ, KEY_ENV), \
                 patch("core.macro_adapter.append_raw_records", return_value=True), \
+                patch("core.macro_adapter.fetch_fred_vintages", side_effect=_malformed_fetch), \
                 patch("core.macro_adapter.fetch_fred_series", side_effect=_malformed_fetch):
             snapshot = build_macro_snapshot("MSFT", AS_OF)
         self.assertEqual(snapshot["status"], "INVALID")
@@ -449,6 +599,7 @@ class ScoreEngineIntegrationTests(unittest.TestCase):
 
         with patch.dict(os.environ, KEY_ENV), \
                 patch("core.macro_adapter.append_raw_records", return_value=True), \
+                patch("core.macro_adapter.fetch_fred_vintages", side_effect=_malformed_fetch), \
                 patch("core.macro_adapter.fetch_fred_series", side_effect=_malformed_fetch), \
                 patch("core.score_engine.fetch_news_snapshot", return_value=self._ok_news()):
             decision = orchestrate_score("MSFT", "2024-01-02")

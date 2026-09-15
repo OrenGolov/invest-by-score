@@ -335,12 +335,15 @@ acceptance gates verified.
 
 Implemented 2026-09-01. Full vintage-aware series registry, PIT filtering,
 risk regime classification, and sector sensitivity mapping complete.
+Vintage-aware v2 (publication-time vintages) completed 2026-09-15.
 
 - Series registry: `core/macro_registry.py` (data constant `MacroSeries` entries
   for fed_funds, cpi_yoy, initial_claims, gdp_growth, 10y_yield). Each series
   carries complete metadata: provider (FRED), series_id, unit, frequency,
   transformation, publication_lag_days, reference_period_field,
-  published_time_field, feature_version, lookback_periods, description.
+  published_time_field, feature_version, lookback_periods, description,
+  pit_policy (`published_time_gate_first_release_retained`) and vintage_source
+  (`fred_alfred_realtime` for all five series).
 - Adapter: `core/macro_adapter.py` (~500 lines) implementing full pipeline:
   FETCH → PROVIDER GATE → PIT FILTER → REVISION HANDLING → INDICATOR ANALYSIS
   → SECTOR-WEIGHTED REGIME → CONFIDENCE CALCULATION.
@@ -363,7 +366,22 @@ risk regime classification, and sector sensitivity mapping complete.
   INCOMPLETE (missing series; confidence degraded by MACRO_MISSING_SERIES_PENALTY
   per series), INVALID (future-dated or unparseable publication times).
 - Per-series contributions: each series carries source_record_ids, published_time,
-  value, and credibility status. Aggregation uses latest-version records.
+  value, credibility status, and a `vintage` block (source, reference_date,
+  vintage_date, first_release_value, first_release_vintage_date, revision_count).
+  Aggregation uses `resolve_vintage()` as-of-known selection, never FIFO-last.
+- Vintage awareness v2 (macro-adapter-v2): FRED's standard endpoint returns only
+  the CURRENT vintage of each observation; consuming it for a historical as_of
+  would silently apply later revisions (the prohibited revised-data-in-history
+  failure). The adapter fetches the AS-OF-KNOWN vintage via the ALFRED realtime
+  endpoint (`fetch_fred_vintages`), and `resolve_vintage()` performs
+  deterministic VINTAGE SELECTION: latest eligible reference period, selected
+  value = the vintage known at as_of, first-release value retained,
+  revision_count = revision history where available. A vintage-feed failure
+  falls back to the current-vintage endpoint but is DISCLOSED (pipeline
+  `vintage_source_used`, `vintage_gaps`, `current_vintage_fallback`; per-series
+  `vintage.source = "none"`), never silent. Covered by `VintageTests` in
+  `tests/test_macro_registry.py` (as-of-known selection, no revision leak past
+  as_of, published-time proxy degradation, fallback disclosure).
 - Confidence: base 0.9 for FRED data, penalized by 0.15 per missing series.
   Never silent zero-fill; missing series explicitly flagged.
 - Output: `MacroSnapshot` dataclass with ticker, as_of, status, regime,

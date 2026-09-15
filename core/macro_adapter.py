@@ -2,7 +2,7 @@
 
 Pipeline:
 
-    FETCH -> PROVIDER GATE -> PIT FILTER -> REVISION HANDLING -> 
+    FETCH -> PROVIDER GATE -> PIT FILTER -> VINTAGE SELECTION -> 
     INDICATOR ANALYSIS -> SECTOR-WEIGHTED REGIME -> CONFIDENCE CALCULATION
 
 Governance rules:
@@ -14,8 +14,15 @@ Governance rules:
   reference date. Future-dated releases are pending (normal for a historical
   as_of — excluded and counted, never used); unparseable publication times
   invalidate the payload (status INVALID, fail-closed).
+- Vintage awareness (adapter v2): FRED's standard endpoint returns only the
+  CURRENT vintage of each observation — consuming it for a historical as_of
+  would silently apply later revisions (revision lookahead bias). The ALFRED
+  realtime feed supplies the value AS KNOWN at as_of; resolve_vintage() retains
+  the first-release value, tracks the eligible revision chain, and selects the
+  as-of-known vintage. A vintage-feed failure is disclosed (pipeline
+  vintage_gaps + current_vintage_fallback), never silent.
 - Revisions: every fetch appends to raw_store (W6). The adapter uses the
-  latest version (append-order defines winner, immune to clock granularity).
+  as-of-known vintage (append-order defines winner, immune to clock granularity).
 - Missing series: degrades confidence (INCOMPLETE), never zero-fills to neutral.
 - Sector sensitivity: static loadings per GICS sector (rates, energy, USD);
   symbol-sector mapping v1 (curated, extensible via service integration later).
@@ -47,6 +54,8 @@ from core.config import (
 )
 from core.macro_registry import (
     MACRO_SERIES_REGISTRY,
+    MACRO_VINTAGE_SOURCE_ALFRED,
+    MACRO_VINTAGE_SOURCE_NONE,
     SECTOR_MACRO_LOADINGS,
     SYMBOL_TO_SECTOR,
     get_series,
@@ -176,6 +185,81 @@ def fetch_fred_series(
     return {"status": "ok", "records": records, "reason": ""}
 
 
+def fetch_fred_vintages(
+    series_id: str,
+    api_key: str,
+    realtime_date: str,
+    lag_days: float = 0.0,
+    lookback_periods: int = MACRO_LOOKBACK_PERIODS,
+    timeout: float = MACRO_PROVIDER_TIMEOUT_SECONDS,
+) -> dict:
+    """Fetch the AS-OF-KNOWN vintage of one series via the ALFRED realtime feed.
+
+    FRED's standard endpoint (fetch_fred_series) returns only the CURRENT
+    vintage: for a historical as_of, every older reference period would carry
+    today's revised value — the exact "revised macro data in historical
+    snapshots" failure the master context prohibits. ALFRED's realtime
+    endpoint instead returns, for every reference period, the value AS KNOWN
+    on `realtime_date` (the first release for periods not yet revised).
+
+    Each record carries `vintage_date` (the as-known date) so
+    resolve_vintage() can order co-published vintages deterministically. The
+    publication timestamp remains the conservative lag-modeled release time:
+    a value whose modeled release falls after as_of is still PIT-rejected.
+
+    Returns {"status": "ok"|"provider_request_failed", "records": [...], "reason": str}.
+    Never raises: a failed request is an explicit disposition (the caller
+    discloses the vintage gap), never empty data pretending to be coverage.
+    """
+    url = (
+        f"https://api.stlouisfed.org/fred/series/observations"
+        f"?series_id={urllib.parse.quote(series_id)}"
+        f"&api_key={api_key}"
+        f"&file_type=json"
+        f"&realtime_start={urllib.parse.quote(str(realtime_date))}"
+        f"&realtime_end={urllib.parse.quote(str(realtime_date))}"
+        f"&limit={max(1, lookback_periods * 4)}"
+    )
+    request = urllib.request.Request(url, headers={"User-Agent": "invest-by-score/1.0"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.load(response)
+    except (urllib.error.URLError, json.JSONDecodeError, TimeoutError, OSError, ValueError) as exc:
+        LOGGER.warning("macro_alfred_request_failed: %s %s", series_id, exc)
+        return {"status": "provider_request_failed", "records": [], "reason": f"ALFRED request failed: {exc}"}
+
+    observations = payload.get("observations", [])
+    if not observations:
+        return {"status": "ok", "records": [], "reason": ""}
+
+    records: list[dict] = []
+    for obs in observations:
+        date_str = obs.get("date")
+        value_str = obs.get("value")
+        vintage_date = obs.get("realtime_end") or str(realtime_date)
+        if not date_str or not value_str or value_str == ".":  # "." = no data
+            continue
+        try:
+            value = float(value_str)
+        except ValueError:
+            continue
+        reference_dt = _parse_timestamp(date_str)
+        if reference_dt is None:
+            continue
+        published_dt = reference_dt + timedelta(days=lag_days)
+        records.append({
+            "source_record_id": f"{series_id}_{date_str}_vintage_{vintage_date}",
+            "series_id": series_id,
+            "reference_date": date_str,
+            "published_time": published_dt.isoformat(),
+            "published_time_source": "alfred_realtime_lag_convention",
+            "vintage_date": vintage_date,
+            "value": value,
+        })
+
+    return {"status": "ok", "records": records, "reason": ""}
+
+
 def pit_filter_macro(records: list[dict], as_of_dt: datetime) -> tuple[list[tuple[dict, datetime]], list[dict]]:
     """PIT FILTER: keep records with published_time <= as_of (inclusive).
 
@@ -202,8 +286,76 @@ def pit_filter_macro(records: list[dict], as_of_dt: datetime) -> tuple[list[tupl
                 "reason": "future_dated",
             })
             continue
+        # ALFRED vintage records: the as-known date must also be at or before
+        # as_of. The lag-modeled release can precede as_of while the revision
+        # itself was published later; selecting it would leak a revision the
+        # decision maker could not have seen (future_vintage = pending, the
+        # same normal non-invalidating condition as future_dated).
+        vintage_dt = _parse_timestamp(record.get("vintage_date"))
+        if vintage_dt is not None and vintage_dt > as_of_dt:
+            rejected.append({
+                "source_record_id": str(record.get("source_record_id", "")),
+                "series_id": str(record.get("series_id", "")),
+                "reason": "future_vintage",
+            })
+            continue
         eligible.append((record, published_dt))
     return eligible, rejected
+
+
+def resolve_vintage(eligible: list[tuple[dict, datetime]]) -> dict:
+    """VINTAGE SELECTION (N3): deterministic as-of-known value for one series.
+
+    `eligible` is the PIT-filtered record set for ONE series; every record in
+    it was legitimately knowable at as_of. Records may carry `vintage_date`
+    (ALFRED realtime feed). Selection rules (all deterministic, no wall clock):
+
+    - group candidates by reference_date and take the LATEST reference period
+      (ISO dates compare lexicographically);
+    - within that group order candidates by (vintage_date or published_time,
+      source_record_id): the FIRST candidate is the first-release vintage,
+      the LAST is the as-of-known value (the latest revision published at or
+      before as_of);
+    - `revision_count` counts distinct vintages beyond the first release, so
+      the payload discloses how much revision history was consumed.
+
+    Without vintage metadata the function degrades gracefully: published_time
+    acts as the vintage proxy, so a single-vintage current-vintage payload
+    yields revision_count 0 and first_release_value == selected value.
+    Returns {"status": "empty"} for an empty input; otherwise {"status": "ok",
+    ...} with `selected_record` / `selected_published_time` for provenance.
+    """
+    if not eligible:
+        return {"status": "empty"}
+
+    groups: dict[str, list[tuple[dict, datetime]]] = {}
+    for record, published_dt in eligible:
+        groups.setdefault(str(record.get("reference_date", "")), []).append((record, published_dt))
+    latest_reference = max(groups)
+
+    ordered = sorted(
+        groups[latest_reference],
+        key=lambda item: (
+            _parse_timestamp(item[0].get("vintage_date")) or item[1],
+            str(item[0].get("source_record_id", "")),
+        ),
+    )
+    selected_record, selected_dt = ordered[-1]
+    first_record, first_dt = ordered[0]
+    distinct_vintages = {
+        _parse_timestamp(record.get("vintage_date")) or published_dt
+        for record, published_dt in ordered
+    }
+    return {
+        "status": "ok",
+        "reference_date": latest_reference,
+        "selected_record": selected_record,
+        "selected_published_time": selected_dt,
+        "vintage_date": str(selected_record.get("vintage_date") or selected_dt.date().isoformat()),
+        "first_release_value": float(first_record["value"]),
+        "first_release_vintage_date": str(first_record.get("vintage_date") or first_dt.date().isoformat()),
+        "revision_count": max(0, len(distinct_vintages) - 1),
+    }
 
 
 def compute_risk_regime(
@@ -361,19 +513,47 @@ def build_macro_snapshot(ticker: str, as_of: str, timeout: float = MACRO_PROVIDE
     if not api_key:
         return _unavailable_snapshot(ticker, as_of_text)
 
-    # Fetch all series in parallel concept (sequential for now).
+    # Fetch all series (sequential). Vintage-first strategy: for a series
+    # whose registry entry declares an as-known vintage feed (ALFRED), fetch
+    # the values AS KNOWN at as_of. A failed vintage request falls back to
+    # the standard (current-vintage) endpoint WITH disclosure — for a
+    # historical as_of that fallback carries later revisions, so it must
+    # never be silent (revision lookahead bias).
     series_data: dict[str, list[tuple[dict, datetime]]] = {}
     series_rejected: dict[str, list[dict]] = {}
+    vintage_gaps: list[dict] = []
+    current_vintage_fallback: list[str] = []
+    vintage_source_used: dict[str, str] = {}
     has_any_error = False
+    realtime_date = as_of_dt.date().isoformat()
 
     for logical_id, series in MACRO_SERIES_REGISTRY.items():
-        fetched = fetch_fred_series(
-            series.series_id,
-            api_key,
-            lag_days=series.lag_days,
-            lookback_periods=MACRO_LOOKBACK_PERIODS,
-            timeout=timeout,
-        )
+        fetched: dict | None = None
+        if series.vintage_source == MACRO_VINTAGE_SOURCE_ALFRED:
+            fetched = fetch_fred_vintages(
+                series.series_id,
+                api_key,
+                realtime_date=realtime_date,
+                lag_days=series.lag_days,
+                lookback_periods=MACRO_LOOKBACK_PERIODS,
+                timeout=timeout,
+            )
+            if fetched["status"] != "ok":
+                LOGGER.warning("macro_vintage_fetch_failed: %s (%s)", logical_id, fetched["reason"])
+                vintage_gaps.append({"series_id": logical_id, "reason": fetched["reason"]})
+                fetched = None
+            else:
+                vintage_source_used[logical_id] = MACRO_VINTAGE_SOURCE_ALFRED
+        if fetched is None:
+            fetched = fetch_fred_series(
+                series.series_id,
+                api_key,
+                lag_days=series.lag_days,
+                lookback_periods=MACRO_LOOKBACK_PERIODS,
+                timeout=timeout,
+            )
+            if series.vintage_source == MACRO_VINTAGE_SOURCE_ALFRED and fetched["status"] == "ok":
+                current_vintage_fallback.append(logical_id)
         if fetched["status"] != "ok":
             LOGGER.warning("macro_fetch_failed: %s (%s)", logical_id, fetched["reason"])
             series_data[logical_id] = []
@@ -397,7 +577,7 @@ def build_macro_snapshot(ticker: str, as_of: str, timeout: float = MACRO_PROVIDE
         if any(entry["reason"] == "unparseable_published_time" for entry in rejected):
             has_any_error = True
 
-    # Extract latest value from each series (FIFO = latest by append order).
+    # Extract the as-of-known value from each series (VINTAGE SELECTION).
     series_values: dict[str, float] = {}
     series_credibility: dict[str, dict] = {}
     latest_published_time = None
@@ -410,16 +590,25 @@ def build_macro_snapshot(ticker: str, as_of: str, timeout: float = MACRO_PROVIDE
             series_credibility[logical_id] = {"status": "UNAVAILABLE", "reason": "no_eligible_records"}
             continue
         
-        # Latest = last eligible (most recent by published time)
-        record, published_dt = eligible[-1]
-        series_values[logical_id] = float(record.get("value", 0.0))
+        selection = resolve_vintage(eligible)
+        selected_record = selection["selected_record"]
+        selected_dt = selection["selected_published_time"]
+        series_values[logical_id] = float(selected_record.get("value", 0.0))
         series_credibility[logical_id] = {
             "status": "OK",
-            "published_time": published_dt.isoformat(),
-            "source_record_id": record.get("source_record_id"),
+            "published_time": selected_dt.isoformat(),
+            "source_record_id": selected_record.get("source_record_id"),
+            "vintage": {
+                "source": vintage_source_used.get(logical_id, MACRO_VINTAGE_SOURCE_NONE),
+                "reference_date": selection["reference_date"],
+                "vintage_date": selection["vintage_date"],
+                "first_release_value": selection["first_release_value"],
+                "first_release_vintage_date": selection["first_release_vintage_date"],
+                "revision_count": selection["revision_count"],
+            },
         }
-        if latest_published_time is None or published_dt > latest_published_time:
-            latest_published_time = published_dt
+        if latest_published_time is None or selected_dt > latest_published_time:
+            latest_published_time = selected_dt
 
     # Compute risk regime from the series values.
     regime, risk_score, regime_reasoning = compute_risk_regime(
@@ -493,9 +682,15 @@ def build_macro_snapshot(ticker: str, as_of: str, timeout: float = MACRO_PROVIDE
             "missing_series": missing_series,
             "pending_releases": sum(
                 1 for entries in series_rejected.values() for entry in entries
-                if entry["reason"] == "future_dated"
+                if entry["reason"] in ("future_dated", "future_vintage")
             ),
             "regime_reasoning": regime_reasoning,
+            # Vintage disclosure (N3): which vintage feed each series used,
+            # where the as-known feed failed, and which series silently fell
+            # back to the current-vintage endpoint (never silent).
+            "vintage_source_used": dict(vintage_source_used),
+            "vintage_gaps": list(vintage_gaps),
+            "current_vintage_fallback": list(current_vintage_fallback),
         }
 
     return snapshot

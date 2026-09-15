@@ -18,6 +18,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+# --- N3 PIT + vintage policy constants ------------------------------------------
+# PIT policy (per series, declared): eligibility is gated on the publication
+# timestamp (never the reference-period end), and the first-release value is
+# retained so a historical decision can never silently consume a later revision.
+MACRO_PIT_POLICY = "published_time_gate_first_release_retained"
+# Vintage sources: FRED's standard endpoint returns only the CURRENT vintage;
+# the ALFRED realtime endpoint returns the value AS KNOWN on the requested
+# realtime date — the legitimate feed for as-of-known (first-release) values.
+MACRO_VINTAGE_SOURCE_NONE = "none"
+MACRO_VINTAGE_SOURCE_ALFRED = "fred_alfred_realtime"
+
 # --- Federal Reserve Economic Data (FRED) series registry ----------------------
 
 @dataclass(frozen=True)
@@ -38,6 +49,8 @@ class MacroSeries:
     published_time_field: str     # JSON field for publication timestamp (e.g. "publication_date")
     first_release_marker: str     # Marker in payload for first release (e.g. "notes")
     description: str              # Role in regime / economic context
+    pit_policy: str = MACRO_PIT_POLICY            # Declared PIT policy (N3 master spec field)
+    vintage_source: str = MACRO_VINTAGE_SOURCE_NONE  # Feed supplying as-of-known vintages
 
     def to_dict(self) -> dict:
         """Serialize to dict for caching / audit."""
@@ -52,6 +65,8 @@ class MacroSeries:
             "feature_version": self.feature_version,
             "lookback_periods": self.lookback_periods,
             "description": self.description,
+            "pit_policy": self.pit_policy,
+            "vintage_source": self.vintage_source,
         }
 
 
@@ -74,6 +89,7 @@ MACRO_SERIES_REGISTRY: dict[str, MacroSeries] = {
         published_time_field="date",  # FRED daily data published same day or next morning
         first_release_marker="",
         description="Central bank target rate; inversely linked to risk-on appetite and tech multiples.",
+        vintage_source=MACRO_VINTAGE_SOURCE_ALFRED,
     ),
     "cpi_yoy": MacroSeries(
         series_id="CPIAUCSL",
@@ -91,6 +107,7 @@ MACRO_SERIES_REGISTRY: dict[str, MacroSeries] = {
         published_time_field="publication_date",
         first_release_marker="real_time_start",
         description="Inflation momentum; above-target readings compress growth multiples and increase volatility regime risk.",
+        vintage_source=MACRO_VINTAGE_SOURCE_ALFRED,
     ),
     "initial_claims": MacroSeries(
         series_id="ICSA",
@@ -108,6 +125,7 @@ MACRO_SERIES_REGISTRY: dict[str, MacroSeries] = {
         published_time_field="publication_date",
         first_release_marker="notes",
         description="Labor market health; spikes correlate with regime downturns and elevated drawdown risk.",
+        vintage_source=MACRO_VINTAGE_SOURCE_ALFRED,
     ),
     "gdp_growth": MacroSeries(
         series_id="A191RL1Q225SBEA",
@@ -125,6 +143,7 @@ MACRO_SERIES_REGISTRY: dict[str, MacroSeries] = {
         published_time_field="publication_date",
         first_release_marker="real_time_start",
         description="Economic growth rate; below-trend readings increase bear case and regime-downshift risk.",
+        vintage_source=MACRO_VINTAGE_SOURCE_ALFRED,
     ),
     "10y_yield": MacroSeries(
         series_id="DGS10",
@@ -142,6 +161,7 @@ MACRO_SERIES_REGISTRY: dict[str, MacroSeries] = {
         published_time_field="date",
         first_release_marker="",
         description="Long-term risk-free rate; drives equity risk premium and discount-rate sensitivity (esp. growth stocks).",
+        vintage_source=MACRO_VINTAGE_SOURCE_ALFRED,
     ),
 }
 
@@ -154,8 +174,9 @@ MACRO_SERIES_REGISTRY: dict[str, MacroSeries] = {
 MACRO_SENSITIVITY_VERSION = "macro-sensitivity-v1"
 
 # Version stamp for the series registry itself; bumped whenever a series
-# definition (lag convention, unit, transformation, membership) changes.
-MACRO_REGISTRY_VERSION = "macro-registry-v1"
+# definition (lag convention, unit, transformation, membership, PIT/vintage
+# policy declaration) changes. v2: declared pit_policy + vintage_source fields.
+MACRO_REGISTRY_VERSION = "macro-registry-v2"
 
 SECTOR_MACRO_LOADINGS: dict[str, dict[str, float]] = {
     "Energy": {

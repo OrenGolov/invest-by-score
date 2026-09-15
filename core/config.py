@@ -301,7 +301,9 @@ NEWS_SCORE_SPAN = 5.0
 # raw_store (W6); eligibility gates on published_time <= as_of.
 
 MACRO_CONTRACT_VERSION = "macro-contract-v1"
-MACRO_ADAPTER_VERSION = "macro-adapter-v1"
+# v2: VINTAGE SELECTION stage (N3) — first-release retention + revision history
+# via the ALFRED realtime feed; values are selected as known at as_of.
+MACRO_ADAPTER_VERSION = "macro-adapter-v2"
 
 # Provider configuration (FRED as v1; BLS/CENSUS extensible but not in v1).
 MACRO_PROVIDER_API_KEY_ENV = "FRED_API_KEY"
