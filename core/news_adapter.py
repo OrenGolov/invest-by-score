@@ -90,10 +90,13 @@ NEWS_CATEGORY_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("litigation", (
         r"\blawsuit\b", r"\bsued\b", r"\bsues\b", r"\blitigation\b", r"\bclass action\b",
         r"\bsettlement\b", r"\bcourt\b", r"\bindict\w+\b",
+        r"\b(?:derivative|counters?|defamation) suit\b", r"\bfiles? (?:a )?suit\b",
+        r"\bsuit (?:names|alleges|accuses|against)\b",
     )),
     ("regulation", (
         r"\bregulator\w*\b", r"\bregulation\b", r"\bantitrust\b",
-        r"\bsec (?:probe|investigation|charges|files)\b", r"\bfined\b", r"\bpenalt\w+\b",
+        r"\bsec (?:probe|investigation|charges|files|reporting|rules|requirements|fines|settlement|subpoena)\b",
+        r"\bfined\b", r"\bpenalt\w+\b",
         r"\bcompliance\b", r"\bbanned\b",
     )),
     ("product_launch", (

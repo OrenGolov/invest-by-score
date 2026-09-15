@@ -255,7 +255,9 @@ acceptance gates verified.
 - Per-article record: `{source_id, source_record_id, published_time, headline,
   url, category, tone, tone_derivation, relevance, source_weight,
   included_in_aggregation, exclusion_reason}`.
-- Classifier v1 (curated pattern sets, `NEWS_CLASSIFIER_VERSION`): earnings,
+- Classifier v2 (curated pattern sets, `NEWS_CLASSIFIER_VERSION`; v2 extended
+  litigation and regulation coverage — derivative/countersuit phrasing, SEC
+  reporting/rules/requirements): earnings,
   guidance, litigation, regulation, product_launch, macro_shock, m_and_a,
   strategic_announcement, management_commentary, other. First match wins;
   taxonomy defined in `NEWS_CATEGORY_PATTERNS` as data constant.

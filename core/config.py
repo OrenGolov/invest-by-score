@@ -252,7 +252,7 @@ CONFIDENCE_CAP = 0.95
 # core/news_adapter.py; thresholds and versions live here so governance reads
 # them from exactly one place. The no-key path stays the explicit UNAVAILABLE
 # contract (a missing provider is a status, never a neutral score).
-NEWS_CLASSIFIER_VERSION = "news-classifier-v1"
+NEWS_CLASSIFIER_VERSION = "news-classifier-v2"
 NEWS_TONE_LEXICON_VERSION = "news-tone-lexicon-v1"
 NEWS_AGGREGATOR_VERSION = "news-aggregator-v1"
 NEWS_PIPELINE_VERSION = "news-pipeline-v1"
