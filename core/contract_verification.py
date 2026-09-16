@@ -128,6 +128,86 @@ def feature_registry_problems(snapshot: dict) -> list[str]:
     return _fr_problems(snapshot, registry)
 
 
+# The value each Sprint N contextual agent contributes to the published
+# score, and the registered feature it must conform to (M1b). Registering
+# the features was only half the gap: nothing built a surface for the
+# auditor to check, so news and macro reached the score unexamined.
+_CONTEXTUAL_FEATURE_SOURCES = (
+    ("news_sentiment_score", "news_snapshot", "sentiment_score"),
+    ("macro_regime_score", "macro_snapshot", "regime_score"),
+    ("regime_probability_proxy", "market_regime_snapshot", "probability_proxy"),
+    ("sentiment_score", "sentiment_snapshot", "sentiment_score"),
+)
+
+
+def contextual_feature_surface(score_result) -> dict:
+    """Build the feature surface for the Sprint N contextual agents.
+
+    Only OK contracts carrying a usable value produce a feature. A non-OK
+    agent yields no feature at all rather than a neutral one — the
+    fail-closed rule these agents are governed by (null_policy "exclude").
+    Returns `{}` when no contextual agent is live, which is the normal
+    offline posture and is not itself a violation.
+    """
+    from core.feature_registry import build_default_registry
+
+    registry = build_default_registry()
+    surface: dict = {}
+    for feature_name, snapshot_attr, value_key in _CONTEXTUAL_FEATURE_SOURCES:
+        snapshot = getattr(score_result, snapshot_attr, None)
+        if not isinstance(snapshot, dict):
+            continue
+        if str(snapshot.get("status", "UNAVAILABLE")) != "OK":
+            continue
+        value = snapshot.get(value_key)
+        if value is None:
+            continue
+        spec = registry.get(feature_name)
+        if spec is None:
+            # Unregistered: emit the contract as-is so the gate rejects it
+            # rather than silently dropping a live contribution.
+            surface[feature_name] = {
+                "name": feature_name,
+                "value": value,
+                "as_of": snapshot.get("as_of"),
+                "source_id": snapshot.get("source_id"),
+                "published_time": snapshot.get("published_time") or snapshot.get("as_of"),
+                "calculation_version": snapshot.get("calculation_version"),
+                "lookback_period": snapshot.get("lookback_period"),
+            }
+            continue
+        surface[feature_name] = {
+            "name": feature_name,
+            "value": value,
+            "as_of": snapshot.get("as_of"),
+            "source_id": snapshot.get("source_id"),
+            "published_time": snapshot.get("published_time") or snapshot.get("as_of"),
+            "calculation_version": snapshot.get("calculation_version"),
+            # The registered lookback is the DEFINITION's window. Some agents
+            # (regime) report the sessions actually consumed, which varies per
+            # run and could never equal a fixed registered value; the observed
+            # count stays visible in that agent's own payload.
+            "lookback_period": spec.lookback,
+        }
+    return surface
+
+
+def contextual_feature_problems(score_result) -> list[str]:
+    """Enforce the registry contract on the contextual agents' surface.
+
+    An empty surface is conforming: it means no contextual agent is OK, which
+    the agent-status taxonomy already governs. What this refuses is a LIVE
+    contextual agent whose contribution is unregistered, PIT-violating,
+    version-drifted, or from an undeclared source.
+    """
+    from core.feature_registry import build_default_registry, feature_contract_problems as _fr_problems
+
+    surface = contextual_feature_surface(score_result)
+    if not surface:
+        return []
+    return _fr_problems({"features": surface}, build_default_registry())
+
+
 def snapshot_field_problems(left: dict, right: dict) -> list[str]:
     """Diff-precise comparison of the shared snapshot surface."""
     problems: list[str] = []

@@ -118,6 +118,49 @@ def main() -> int:
         if registry_hash(load_feature_registry(store)) != registry_hash(registry):
             failures.append("persistence round-trip changed the registry hash")
 
+    # 7. M1b: every producer that contributes a value to the published score
+    # must own a registered feature, and the contextual gate must actually
+    # fire on a violation (a guard that cannot fail is theatre).
+    from types import SimpleNamespace
+
+    from core.config import NEWS_CONTRACT_VERSION
+    from core.contract_verification import (
+        contextual_feature_problems,
+        contextual_feature_surface,
+    )
+
+    owners = {spec.owner for spec in registry.all_features().values()}
+    for scoring_owner in ("news_agent", "macro_agent", "regime_agent", "sentiment_agent"):
+        if scoring_owner not in owners:
+            failures.append(
+                f"{scoring_owner} reaches the published score but owns no "
+                f"registered feature (M1b regression)"
+            )
+
+    def _news_result(**overrides):
+        snapshot = {
+            "status": "OK", "sentiment_score": 0.4, "as_of": "2026-01-05 00:00:00",
+            "source_id": "newsapi_news", "published_time": "2026-01-04 00:00:00",
+            "calculation_version": NEWS_CONTRACT_VERSION,
+        }
+        snapshot.update(overrides)
+        return SimpleNamespace(
+            news_snapshot=snapshot, macro_snapshot={"status": "UNAVAILABLE"},
+            market_regime_snapshot={"status": "UNAVAILABLE"},
+            sentiment_snapshot={"status": "UNAVAILABLE"},
+        )
+
+    if "news_sentiment_score" not in contextual_feature_surface(_news_result()):
+        failures.append("a live, conformant news contract produced no feature surface")
+    if contextual_feature_problems(_news_result()):
+        failures.append("a live, conformant news contract was wrongly rejected")
+    if not contextual_feature_problems(_news_result(published_time="2099-01-01 00:00:00")):
+        failures.append(
+            "a future-dated news contract was NOT rejected — the contextual gate is vacuous"
+        )
+    if contextual_feature_surface(_news_result(status="INCOMPLETE")):
+        failures.append("a non-OK news agent still produced a feature (fail-closed violated)")
+
     if failures:
         print("M1 feature-registry gate FAILED:")
         for failure in failures:
@@ -130,6 +173,10 @@ def main() -> int:
         f"({len(emitted)} contracts, registry-conformant at {as_of})"
     )
     print("  registry valid, producers resolve, hash deterministic, persistence idempotent.")
+    print(
+        "  M1b: every scoring producer owns a registered feature; "
+        "contextual gate proven non-vacuous."
+    )
     return 0
 
 

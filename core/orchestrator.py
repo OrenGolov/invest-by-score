@@ -394,6 +394,9 @@ def orchestrate_score(ticker: str, as_of: str, timestamp: str | None = None) -> 
             "risk_management": snapshot_hash,
         },
         "snapshot": snapshot,
+        # M1b: lets the auditor gate the contextual agents' live contributions
+        # against the registry, not just the market feature surface.
+        "score_result_for_contextual_check": score_result,
         "snapshot_hash": snapshot_hash,
         "replay_hash": replay_hash,
         "first_result": score_result.to_dict(),

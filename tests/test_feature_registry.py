@@ -50,7 +50,17 @@ from core.backtest.engine import (
 from core import score_engine
 from agents.market_data_agent import fetch_market_snapshot
 from core.audit_policy import evaluate_audit_policy, stable_hash
-from core.config import FUNDAMENTAL_FEATURE_VERSION
+from core.contract_verification import (
+    contextual_feature_problems,
+    contextual_feature_surface,
+)
+from core.config import (
+    FUNDAMENTAL_FEATURE_VERSION,
+    MACRO_CONTRACT_VERSION,
+    NEWS_CONTRACT_VERSION,
+    REGIME_CONTRACT_VERSION,
+    SENTIMENT_CONTRACT_VERSION,
+)
 from core.orchestrator import orchestrate_score
 
 
@@ -216,9 +226,20 @@ class TestRegistryHash(unittest.TestCase):
         r.register(_valid_spec("b")); self.assertNotEqual(h1, registry_hash(r))
 
 
+# The four Sprint N contextual signals registered by M1b, with the version
+# constant each one's contract is stamped with.
+_CONTEXTUAL_EXPECTED = {
+    "news_sentiment_score": ("news_agent", "news", NEWS_CONTRACT_VERSION),
+    "macro_regime_score": ("macro_agent", "macro", MACRO_CONTRACT_VERSION),
+    "regime_probability_proxy": ("regime_agent", "regime", REGIME_CONTRACT_VERSION),
+    "sentiment_score": ("sentiment_agent", "sentiment", SENTIMENT_CONTRACT_VERSION),
+}
+
+
 class TestBuildDefaultRegistry(unittest.TestCase):
-    def test_builds_27_features(self):
-        self.assertEqual(len(build_default_registry().all_features()), 27)
+    def test_builds_31_features(self):
+        """22 market + 5 fundamental + 4 contextual (M1b)."""
+        self.assertEqual(len(build_default_registry().all_features()), 31)
 
     def test_expected_names_present(self):
         expected = {
@@ -229,8 +250,27 @@ class TestBuildDefaultRegistry(unittest.TestCase):
             "price_vs_ma_50", "price_vs_ma_100", "price_vs_ma_150", "price_vs_ma_200",
             "ma_50", "ma_100", "ma_150", "ma_200",
             "revenue_growth", "margin_quality", "free_cash_flow_quality",
-            "balance_sheet_quality", "valuation_quality"}
+            "balance_sheet_quality", "valuation_quality",
+            *_CONTEXTUAL_EXPECTED}
         self.assertEqual(set(build_default_registry().all_features()), expected)
+
+    def test_every_scoring_agent_has_a_registered_feature(self):
+        """M1b: no agent may reach the published score unregistered.
+
+        news_intelligence and macroeconomic each carry 0.10 ensemble weight;
+        before M1b they contributed while being invisible to the registry.
+        """
+        owners = {spec.owner for spec in build_default_registry().all_features().values()}
+        for owner in ("news_agent", "macro_agent", "regime_agent", "sentiment_agent"):
+            with self.subTest(owner=owner):
+                self.assertIn(owner, owners)
+
+    def test_contextual_features_fail_closed_on_null(self):
+        """These agents must never substitute a neutral for a missing value."""
+        registry = build_default_registry()
+        for name in _CONTEXTUAL_EXPECTED:
+            with self.subTest(feature=name):
+                self.assertEqual(registry.get(name).null_policy, "exclude")
 
     def test_all_specs_valid(self):
         reg = build_default_registry()
@@ -240,23 +280,36 @@ class TestBuildDefaultRegistry(unittest.TestCase):
     def test_version_matches_the_domain_constant(self):
         from core.config import MARKET_FEATURE_VERSION
         for name, spec in build_default_registry().all_features().items():
-            expected = (
-                FUNDAMENTAL_FEATURE_VERSION
-                if spec.domain == "fundamental"
-                else MARKET_FEATURE_VERSION
-            )
+            if name in _CONTEXTUAL_EXPECTED:
+                expected = _CONTEXTUAL_EXPECTED[name][2]
+            elif spec.domain == "fundamental":
+                expected = FUNDAMENTAL_FEATURE_VERSION
+            else:
+                expected = MARKET_FEATURE_VERSION
             self.assertEqual(spec.version, expected, name)
 
     def test_ownership_follows_domain(self):
         for name, spec in build_default_registry().all_features().items():
-            if spec.domain == "fundamental":
+            if name in _CONTEXTUAL_EXPECTED:
+                owner, domain, _ = _CONTEXTUAL_EXPECTED[name]
+                self.assertEqual(spec.owner, owner, name)
+                self.assertEqual(spec.domain, domain, name)
+            elif spec.domain == "fundamental":
                 self.assertEqual(spec.owner, "fundamental_agent", name)
             else:
                 self.assertEqual(spec.owner, "market_data_agent", name)
 
-    def test_all_compatible_with_technical_analysis(self):
-        for spec in build_default_registry().all_features().values():
-            self.assertIn("technical_analysis", spec.model_compatibility)
+    def test_scoring_features_compatible_with_technical_analysis(self):
+        """The technical scorers' own inputs must declare that family.
+
+        Contextual signals are model inputs, not technical-scorer inputs, so
+        they declare the ML families instead.
+        """
+        for name, spec in build_default_registry().all_features().items():
+            if name in _CONTEXTUAL_EXPECTED:
+                self.assertIn("tree", spec.model_compatibility, name)
+            else:
+                self.assertIn("technical_analysis", spec.model_compatibility, name)
 
 
 class TestPersistence(unittest.TestCase):
@@ -451,13 +504,20 @@ class TestProducerRegistry(unittest.TestCase):
         self.assertIn("does not exist", str(ctx.exception))
 
     def test_unwired_producers_are_reported_not_failed(self):
+        """After M1b only technical_agent is unwired, and legitimately so.
+
+        It is a pure delegator over the canonical scorers (W5) and produces
+        no features of its own — the market features it consumes are owned by
+        market_data_agent. Every producer that actually contributes a value to
+        the published score now owns a registered feature.
+        """
         registry = build_default_registry()
         unwired = unwired_producers(registry)
-        self.assertNotIn("market_data_agent", unwired)
-        self.assertNotIn("fundamental_agent", unwired)
-        self.assertEqual(sorted(unwired), sorted(
-            name for name in PRODUCER_BY_NAME
-            if name not in ("market_data_agent", "fundamental_agent")))
+        self.assertEqual(sorted(unwired), ["technical_agent"])
+        for wired in ("market_data_agent", "fundamental_agent", "news_agent",
+                      "macro_agent", "regime_agent", "sentiment_agent"):
+            with self.subTest(producer=wired):
+                self.assertNotIn(wired, unwired)
         self.assertEqual(registry.problems(), [])
 
 
@@ -960,3 +1020,70 @@ class TestLivePathRegistryGate(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
+
+
+class TestContextualFeatureEnforcement(unittest.TestCase):
+    """M1b: the contextual agents' live contributions are gated too.
+
+    Registering the features was only half the gap. Before this, the auditor's
+    conformance check inspected only the market snapshot's feature surface, so
+    a live news (0.10 weight) or macro (0.10 weight) contribution reached the
+    published score without ever meeting the registry.
+    """
+
+    def _live_news(self, **overrides):
+        snapshot = {
+            "status": "OK",
+            "sentiment_score": 0.4,
+            "as_of": "2026-01-05 00:00:00",
+            "source_id": "newsapi_news",
+            "published_time": "2026-01-04 00:00:00",
+            "calculation_version": NEWS_CONTRACT_VERSION,
+        }
+        snapshot.update(overrides)
+        return SimpleNamespace(
+            news_snapshot=snapshot,
+            macro_snapshot={"status": "UNAVAILABLE"},
+            market_regime_snapshot={"status": "UNAVAILABLE"},
+            sentiment_snapshot={"status": "UNAVAILABLE"},
+        )
+
+    def test_live_conformant_news_produces_a_feature(self):
+        surface = contextual_feature_surface(self._live_news())
+        self.assertIn("news_sentiment_score", surface)
+        self.assertEqual(contextual_feature_problems(self._live_news()), [])
+
+    def test_future_published_news_is_rejected(self):
+        result = self._live_news(published_time="2030-01-01 00:00:00")
+        problems = contextual_feature_problems(result)
+        self.assertTrue(any("PIT rule" in p for p in problems), problems)
+
+    def test_version_drifted_news_is_rejected(self):
+        result = self._live_news(calculation_version="news-contract-v0")
+        self.assertTrue(contextual_feature_problems(result))
+
+    def test_undeclared_source_is_rejected(self):
+        result = self._live_news(source_id="yahoo_finance_chart")
+        self.assertTrue(contextual_feature_problems(result))
+
+    def test_non_ok_agent_yields_no_feature(self):
+        """Fail-closed: a degraded agent contributes nothing, not a neutral."""
+        for status in ("UNAVAILABLE", "INCOMPLETE", "CONTRADICTORY", "INVALID"):
+            with self.subTest(status=status):
+                result = self._live_news(status=status)
+                self.assertEqual(contextual_feature_surface(result), {})
+
+    def test_null_value_yields_no_feature(self):
+        result = self._live_news(sentiment_score=None)
+        self.assertEqual(contextual_feature_surface(result), {})
+
+    def test_fully_offline_posture_is_conforming(self):
+        """No contextual agent OK means an empty surface, which is not a violation."""
+        offline = SimpleNamespace(
+            news_snapshot={"status": "UNAVAILABLE"},
+            macro_snapshot={"status": "UNAVAILABLE"},
+            market_regime_snapshot={"status": "UNAVAILABLE"},
+            sentiment_snapshot={"status": "UNAVAILABLE"},
+        )
+        self.assertEqual(contextual_feature_surface(offline), {})
+        self.assertEqual(contextual_feature_problems(offline), [])

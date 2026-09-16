@@ -944,25 +944,47 @@ Implemented 2026-09-15 (completed the registry started in commits fe70627 /
   contract-verifier + auditor + orchestrator integration, fundamental factor
   registration). Full suite: 522/522 pass.
 
-### M1b. Open registry coverage gap (blocks nothing, but read before M2)
+### M1b. Contextual-agent registry coverage ✓ DONE
 
-M1's binding rule — "an unregistered feature cannot enter a production
-model" — is enforced, but its *coverage* is currently the market surface
-only. Recorded here so M2 does not inherit a false sense of completeness:
+Closed 2026-09-16. M1's rule was enforced, but only on the market feature
+surface: `news_intelligence` (0.10 ensemble weight) and `macroeconomic`
+(0.10, both horizons) reached the published score through their own snapshot
+shapes, which the registry did not describe. A news or macro input change was
+invisible to the drift gate.
 
-- 27 features are registered: 22 market (`market_data_agent`) + 5
-  fundamental (`fundamental_agent`).
-- 5 of 7 declared producers have **no** registered features:
-  `news_agent`, `macro_agent`, `regime_agent`, `sentiment_agent`,
-  `technical_agent` (reported by `unwired_producers`).
-- The auditor's `feature_registry_conformance` check inspects
-  `snapshot["features"]`, i.e. the market contract surface. Meanwhile
-  `news_intelligence` (weight 0.10 current) and `macroeconomic` (0.10 both
-  horizons) contribute to the published score through their own snapshot
-  shapes, which the registry does not yet describe.
-- Consequence: a news or macro input change is not caught by the M1 drift
-  gate. Before any model consumes those lines, their features need specs
-  and the conformance check needs to reach their surfaces.
+Both halves of the gap are now closed:
+
+- **Registration.** Four contextual signals registered in
+  `core/feature_registry.py` — `news_sentiment_score` (news-contract-v1),
+  `macro_regime_score` (macro-contract-v1), `regime_probability_proxy`
+  (regime-contract-v1) and `sentiment_score` (sentiment-contract-v1).
+  Exactly the values that reach the production path; no aspirational
+  entries. Registry: 22 market + 5 fundamental + 4 contextual = **31
+  features**. `unwired_producers` drops from 5 to 1 — only
+  `technical_agent`, legitimately, since W5 made it a pure delegator that
+  owns no features of its own.
+- **Enforcement.** Registration alone changes nothing if no surface is
+  built. `contract_verification.contextual_feature_surface` assembles the
+  live contextual contracts and `contextual_feature_problems` gates them;
+  the W3 auditor's `feature_registry_conformance` check now evaluates that
+  surface alongside the market one, so a live news or macro contribution
+  that is unregistered, PIT-violating, version-drifted or from an undeclared
+  source forces `auditor_veto`.
+- **Fail-closed.** `null_policy` is `exclude`, never `default`: a non-OK
+  agent yields no feature rather than a neutral substitute. An empty
+  contextual surface is conforming — it means no contextual agent is OK,
+  which the agent-status taxonomy already governs.
+- **The gate is proven non-vacuous.** `scripts/check_feature_registry.py`
+  plants a future-dated news contract and fails if it is NOT rejected, and
+  verifies every scoring producer owns a registered feature.
+- Acceptance: 104 tests in `tests/test_feature_registry.py` (7 new for
+  contextual enforcement). Full suite: 593/593 pass.
+
+Implementation note: the regime agent reports `lookback_period` as the
+sessions it actually consumed, which varies per run and can never equal a
+single registered value. The surface carries the registered lookback (the
+definition's window) while the observed count stays visible in the agent's
+own payload — caught by the auditor during implementation, not by review.
 
 ### M2-DS. Official training dataset builder ✓ DONE
 
@@ -1009,9 +1031,11 @@ schema `training-row-v1`, constants owned by `core/config.py`).
 - Acceptance: 32 tests in `tests/test_training_dataset.py`. Full suite:
   584/584 pass.
 
-Open follow-up: the dataset currently draws the 16 registered market
-features. News/macro/regime features remain unregistered (see M1b), so they
-cannot yet enter a dataset — by design, not oversight.
+Dataset feature scope: the builder draws the technical scorers' declared
+inputs by default. Since M1b the contextual signals are registered too, so a
+caller may request them explicitly via `feature_names` once those agents have
+live providers connected (news/macro/sentiment are provider-gated and read
+UNAVAILABLE offline).
 
 ### M2. Model registry and artifact tracking
 

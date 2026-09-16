@@ -221,11 +221,22 @@ def evaluate_audit_policy(context: dict) -> dict:
     # check — evidence whose features are unregistered is not auditable
     # evidence.
     audit_snapshot = context.get("snapshot")
-    from core.contract_verification import feature_registry_problems as _registry_problems
+    from core.contract_verification import (
+        contextual_feature_problems as _contextual_problems,
+        feature_registry_problems as _registry_problems,
+    )
 
     registry_problems = _registry_problems(
         audit_snapshot if isinstance(audit_snapshot, dict) else {}
     )
+    # M1b: the market surface is not the whole model. The Sprint N contextual
+    # agents (news 0.10, macro 0.10) reach the published score through their
+    # own contracts; before this, a live news or macro contribution was
+    # invisible to the registry gate. An empty contextual surface is
+    # conforming — it means no contextual agent is OK.
+    contextual_result = context.get("score_result_for_contextual_check")
+    if contextual_result is not None:
+        registry_problems = registry_problems + _contextual_problems(contextual_result)
     add(
         "feature_registry_conformance",
         "veto",

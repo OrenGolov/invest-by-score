@@ -56,7 +56,12 @@ from typing import Any, Iterable
 from core.config import (
     FEATURE_REGISTRY_VERSION,
     FUNDAMENTAL_FEATURE_VERSION,
+    MACRO_CONTRACT_VERSION,
     MARKET_FEATURE_VERSION,
+    NEWS_CONTRACT_VERSION,
+    REGIME_CONTRACT_VERSION,
+    REGIME_REQUIRED_SESSIONS,
+    SENTIMENT_CONTRACT_VERSION,
 )
 
 FEATURE_REGISTRY_STORE_PATH = Path(__file__).resolve().parent.parent / "data" / "feature_registry.jsonl"
@@ -91,6 +96,12 @@ MODEL_FAMILIES: tuple[str, ...] = (
 KNOWN_SOURCES: tuple[str, ...] = (
     "yahoo_finance_chart", "alpha_vantage_overview", "fred_macro",
     "newsapi_news", "portfolio_list_snapshot",
+    # The sentiment agent's two declared source identities (N2). Neither is a
+    # live provider today: the contract is permanently UNAVAILABLE unless the
+    # sanctioned news-derived path is used, which labels itself explicitly.
+    # They are declared here so the feature can be registered and gated like
+    # any other rather than living outside the registry.
+    "sentiment_provider_unconfigured", "sentiment_derived_from_news",
 )
 
 FEATURE_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -658,8 +669,57 @@ def _fundamental_feature(name: str, formula: str, feature_family: str) -> Featur
     )
 
 
+# The PIT rule the contextual agents inherit. Each contract carries its own
+# published_time and is filtered to as_of by its adapter before the value is
+# produced; a contract published after as_of is rejected upstream.
+_CONTEXTUAL_PIT_RULE = (
+    "The agent's snapshot is filtered to evidence published at or before "
+    "as_of before the signal is computed; a contract published after as_of "
+    "is rejected upstream and never reaches the feature. A non-OK agent "
+    "status yields no value at all rather than a neutral substitute."
+)
+
+
+def _contextual_feature(
+    name: str,
+    owner: str,
+    domain: str,
+    formula: str,
+    version: str,
+    unit: str,
+    source_dependencies: list[str],
+    feature_family: str,
+    lookback: str = "1d",
+    frequency: str = "per_session",
+    minimum_history: int = 1,
+) -> FeatureSpec:
+    """A signal produced by one of the Sprint N contextual agents.
+
+    null_policy is "exclude", never "default": these agents are governed by
+    the fail-closed rule that a missing or non-OK contract must not become a
+    neutral value (master context sections 9 and 16). A model that cannot
+    obtain the feature loses the row, it does not receive a fabricated one.
+    """
+    return FeatureSpec(
+        name=name,
+        owner=owner,
+        domain=domain,
+        formula=formula,
+        version=version,
+        unit=unit,
+        frequency=frequency,
+        lookback=lookback,
+        minimum_history=minimum_history,
+        null_policy="exclude",
+        pit_rule=_CONTEXTUAL_PIT_RULE,
+        source_dependencies=source_dependencies,
+        feature_family=feature_family,
+        model_compatibility=["linear", "logistic", "tree", "boosting"],
+    )
+
+
 def build_default_registry() -> FeatureRegistry:
-    """Build the canonical default registry (22 market-data + 5 fundamental features)."""
+    """Build the canonical default registry (22 market + 5 fundamental + 4 contextual)."""
     registry = FeatureRegistry()
 
     _RETURN = (
@@ -807,6 +867,82 @@ def build_default_registry() -> FeatureRegistry:
             "price_to_book defaults to 4.0 when missing."
         ),
         feature_family="valuation",
+    ))
+
+    # --- Sprint N contextual agents (M1b) ------------------------------------
+    # The signals that actually reach the published score from the news,
+    # macro, regime and sentiment agents. Before these were registered, the
+    # news and macro lines contributed 0.10 each to the ensemble while being
+    # invisible to the M1 drift gate — the registry rule was enforced only on
+    # the surface that happened to be registered. Exactly the values that
+    # enter the production path are registered here; no aspirational entries.
+    registry.register(_contextual_feature(
+        name="news_sentiment_score",
+        owner="news_agent",
+        domain="news",
+        formula=(
+            "Aggregate tone of the credible, PIT-eligible article set in "
+            "[-1, 1], from core.news_adapter.build_news_snapshot. Enters the "
+            "ensemble as NEWS_SCORE_BASE + NEWS_SCORE_SPAN * sentiment_score. "
+            "Produced only when the news contract status is OK; CONTRADICTORY "
+            "never averages to neutral."
+        ),
+        version=NEWS_CONTRACT_VERSION,
+        unit="ratio",
+        source_dependencies=["newsapi_news"],
+        feature_family="news_event",
+    ))
+    registry.register(_contextual_feature(
+        name="macro_regime_score",
+        owner="macro_agent",
+        domain="macro",
+        formula=(
+            "Vintage-aware macro regime tilt in [0, 1] (0 risk-off, 0.5 "
+            "neutral, 1 risk-on) from core.macro_adapter.build_macro_snapshot. "
+            "Enters the ensemble as MACRO_SCORE_BASE + MACRO_SCORE_SPAN * "
+            "regime_score. Series are resolved at their publication-time "
+            "vintage (N3), never a later revision."
+        ),
+        version=MACRO_CONTRACT_VERSION,
+        unit="ratio",
+        source_dependencies=["fred_macro"],
+        feature_family="macro",
+    ))
+    registry.register(_contextual_feature(
+        name="regime_probability_proxy",
+        owner="regime_agent",
+        domain="regime",
+        formula=(
+            "Continuous proxy in [0, 1] for the five-state regime "
+            "classification from core.regime_agent.build_regime_snapshot. "
+            "Carries zero ensemble weight by design — the regime agent gates "
+            "(STRESS forces NO_TRADE, RISK_OFF damps momentum) rather than "
+            "votes — but is registered so a model may condition on it."
+        ),
+        version=REGIME_CONTRACT_VERSION,
+        unit="ratio",
+        lookback="283d",
+        minimum_history=REGIME_REQUIRED_SESSIONS,
+        source_dependencies=["yahoo_finance_chart"],
+        feature_family="regime",
+    ))
+    registry.register(_contextual_feature(
+        name="sentiment_score",
+        owner="sentiment_agent",
+        domain="sentiment",
+        formula=(
+            "Social/positioning sentiment in [-1, 1] from "
+            "core.sentiment_contract.fetch_sentiment_snapshot. No legitimate "
+            "provider is connected, so the contract is UNAVAILABLE and the "
+            "feature yields no value; the only sanctioned derived path is "
+            "derive_sentiment_from_news, which labels itself derived_from_news "
+            "and scales confidence. Anti-proxying rule (N2): never inferred "
+            "from RSI, price direction, or technical indicators."
+        ),
+        version=SENTIMENT_CONTRACT_VERSION,
+        unit="ratio",
+        source_dependencies=["sentiment_provider_unconfigured", "sentiment_derived_from_news"],
+        feature_family="sentiment",
     ))
 
     return registry
