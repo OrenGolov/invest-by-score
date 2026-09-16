@@ -589,6 +589,31 @@ class AgentStatusDerivationTests(unittest.TestCase):
         )
         self.assertEqual(statuses["market_regime"], "UNAVAILABLE")
 
+    def test_technical_status_inherits_market_data_status(self):
+        """Regression: technical_analysis used to be hardcoded OK.
+
+        The technical agent derives every signal from the market snapshot and
+        carries the largest ensemble weight, so reporting OK on top of a
+        degraded snapshot let a failed agent masquerade as OK in the audit
+        record (master context section 32).
+        """
+        for quality, timestamp_valid, expected in (
+            (85.0, True, "OK"),
+            (10.0, True, "INCOMPLETE"),
+            (85.0, False, "INVALID"),
+        ):
+            with self.subTest(quality=quality, timestamp_valid=timestamp_valid):
+                statuses = _derive_agent_statuses(
+                    {
+                        "data_quality": {"score": quality},
+                        "source_contract": {"timestamp_valid": timestamp_valid},
+                    },
+                    {"point_in_time_valid": True},
+                    _statuses_stub("OK"),
+                )
+                self.assertEqual(statuses["market_data"], expected)
+                self.assertEqual(statuses["technical_analysis"], expected)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -499,3 +499,48 @@ def _validate_backtest_config() -> None:
 
 
 _validate_backtest_config()
+
+
+# --- Paper-trading order engine (V6) --------------------------------------------
+# Simulation only. The paper engine turns accepted decisions into order
+# intents and simulated fills so later sprints (L1 outcome closure) have
+# real trade evidence to close against.
+#
+# Execution-mode constants. LIVE_APPROVED exists ONLY as a schema value with
+# no construction path anywhere in the codebase — the live branch raises
+# unconditionally. It is deliberately not a config flag away from working:
+# turning it on requires writing new code, which is the point.
+PAPER_ENGINE_VERSION = "paper-engine-v1"
+
+EXECUTION_MODE_PAPER = "PAPER_ONLY"
+EXECUTION_MODE_LIVE_DISABLED = "LIVE_DISABLED"
+EXECUTION_MODE_LIVE_APPROVED = "LIVE_APPROVED"
+
+# The permanent default. Nothing in the codebase assigns any other value.
+EXECUTION_MODE = EXECUTION_MODE_LIVE_DISABLED
+
+# Only a decision in this posture may produce an order intent. ANALYSIS_ONLY
+# and NO_TRADE decisions are logged as rejections instead (the paper log must
+# show why nothing happened, per the V6 acceptance criteria).
+PAPER_TRADABLE_MODE = "PAPER"
+
+# Fixed notional per paper order. A sizing model is Sprint R's job
+# (correlation-aware sizing); until then every intent is the same size so
+# that fill evidence is not confounded by an unvalidated sizing rule.
+PAPER_ORDER_NOTIONAL = 10_000.0
+
+PAPER_ORDER_SCHEMA_VERSION = "paper-order-v1"
+
+
+def _validate_paper_config() -> None:
+    """Import-time guard: the engine must be unable to reach a live posture."""
+    if EXECUTION_MODE != EXECUTION_MODE_LIVE_DISABLED:
+        raise ValueError(
+            f"EXECUTION_MODE must be {EXECUTION_MODE_LIVE_DISABLED!r}; the paper "
+            f"engine has no live execution path (got {EXECUTION_MODE!r})"
+        )
+    if PAPER_ORDER_NOTIONAL <= 0:
+        raise ValueError("PAPER_ORDER_NOTIONAL must be positive")
+
+
+_validate_paper_config()

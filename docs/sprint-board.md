@@ -2,9 +2,16 @@
 
 ## Baseline status
 
-This project is currently in the early technical scoring stage, not yet in the full governed multi-agent platform described in the design docs.
+> **Status as of 2026-09-16.** This section described the Sprint-1/2 baseline
+> and is kept for history. The project has since completed Sprints **W**
+> (governance wiring), **N** (news/sentiment/macro/regime), **V**
+> (labels/backtest/paper) and **M1** (canonical feature registry); the live
+> decision path is governed by a fail-closed risk policy and an auditor that
+> can veto. The authoritative per-task status is
+> [docs/task-breakdown.md](./task-breakdown.md), not this section. Next up is
+> **M2**.
 
-Current implementation present:
+The Sprint-1/2 baseline, for history:
 - [fetch_data.py](../fetch_data.py): market OHLCV fetch and Parquet cache layer
 - [agents/market_data_agent.py](../agents/market_data_agent.py): market snapshot and validation logic
 - [agents/technical_agent.py](../agents/technical_agent.py): technical score formula

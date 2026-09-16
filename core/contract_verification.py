@@ -24,8 +24,8 @@ enforcement toolkit that keeps that rule true:
 
 Pure and deterministic; every function returns a list of diff-precise
 problem strings (empty = conforming) so callers can assert or gate. Tests
-in `tests/test_shared_contracts.py` pin the invariants; CI re-runs them on
-every commit.
+in `tests/test_shared_contracts.py` pin the invariants;
+`.github/workflows/ci.yml` re-runs them on every push and pull request.
 """
 
 from __future__ import annotations

@@ -24,7 +24,7 @@ Rationale: the orchestrator runs six agents but the headline score ignores
 them; Risk and Auditor are passive relays. Every later sprint (news, ML,
 backtest) compounds on this fault line. Close it first.
 
-### W1. Versioned ensemble wiring — agent outputs drive the final score
+### W1. Versioned ensemble wiring — agent outputs drive the final score ✓ DONE
 
 - Objective: make the published score the weighted product of live agent
   outputs instead of an independent hand-built blend, without losing the
@@ -61,7 +61,7 @@ backtest) compounds on this fault line. Close it first.
   breakdown; a failing provider renormalizes provably in a unit test; two
   identical calls produce byte-identical `to_dict()`.
 
-### W2. Risk agent becomes a real fail-closed gate
+### W2. Risk agent becomes a real fail-closed gate ✓ DONE
 
 - Status: **implemented** — `core/risk_policy.py` evaluates `RISK_POLICY_V2`
   (core/config.py); the orchestrator's risk agent carries the full structured
@@ -95,7 +95,7 @@ backtest) compounds on this fault line. Close it first.
   critically — that no input combination can produce `mode == "PAPER"` while
   any `veto`-severity rule is triggered.
 
-### W3. Auditor agent becomes an evidence-and-replay validator
+### W3. Auditor agent becomes an evidence-and-replay validator ✓ DONE
 
 - Status: **implemented** — `core/audit_policy.py` (owning canonical hashing)
   evaluates seven checks: evidence sufficiency, agent input-hash integrity,
@@ -119,7 +119,7 @@ backtest) compounds on this fault line. Close it first.
 - Acceptance: tampering a payload or hash flips the decision to `NO_TRADE`
   with an `auditor_veto` reason; the happy path adds no network or I/O.
 
-### W4. Failure-state taxonomy across every contract
+### W4. Failure-state taxonomy across every contract ✓ DONE
 
 - Status: **implemented** — `AgentStatus` enum (OK/UNAVAILABLE/STALE/
   INCOMPLETE/CONTRADICTORY/INVALID + VETO for governance agents) in
@@ -151,7 +151,7 @@ backtest) compounds on this fault line. Close it first.
 - Acceptance: table-driven tests map each snapshot corruption to the intended
   status, and each status to the intended decision posture.
 
-### W5. Single technical truth
+### W5. Single technical truth ✓ DONE
 
 - Status: **implemented** — `agents/technical_agent.py` is now a thin adapter
   over the canonical scorers (`_score_current_time`/`_score_long_term`);
@@ -175,7 +175,7 @@ backtest) compounds on this fault line. Close it first.
 - Acceptance: separation tests still pass; a new invariant test asserts
   `|agent_technical.score − blend(current, long)| < 1e-9`.
 
-### W6. Append-only raw-record store (Sprint-1 leftover, minimal viable)
+### W6. Append-only raw-record store (Sprint-1 leftover, minimal viable) ✓ DONE
 
 - Status: **implemented** — `core/raw_store.py`: `append_raw_records` (one
   JSONL line per fetch under `data/raw/{source_id}/{YYYY-MM-DD}.jsonl` with
@@ -208,7 +208,7 @@ backtest) compounds on this fault line. Close it first.
   from `data/raw` for a past as_of, assert feature equality with the original
   run within float tolerance.
 
-### W7. Audit event enrichment
+### W7. Audit event enrichment ✓ DONE
 
 - Status: **implemented** — events are now `audit-event-v2`: `schema_version`,
   `ensemble_version`, `model_versions` (agent → version), `agent_statuses`,
@@ -291,7 +291,7 @@ acceptance gates verified.
   with both sides + confidence floor (test suite); as_of filtering proven
   (future-dated test). Smoke: 6/6 checks pass.
 
-### N2. Sentiment agent (social/positioning, distinct from news tone)
+### N2. Sentiment agent (social/positioning, distinct from news tone) ✓ DONE
 
 - Scope per design docs: retail/institutional positioning and social signals —
   not a re-broadcast of news tone. Until a real provider lands, ship
@@ -743,7 +743,7 @@ test-pinned invariant — no parallel ad hoc path.
   seeded-violation test proving the parallel-path detector catches a
   rogue scorer and that removal restores a clean scan.
 
-### V6. Paper-trading order engine (simulation only)
+### V6. Paper-trading order engine (simulation only) ✓ DONE
 
 - Objective: simulate the decision → order → fill loop with governance
   intact, producing the trade evidence later sprints consume.
@@ -761,6 +761,42 @@ test-pinned invariant — no parallel ad hoc path.
 - Acceptance: duplicate intent submission yields one order; a vetoed
   decision produces an intent-shaped rejection, never a fill; live branch
   raises unconditionally.
+
+**Implemented 2026-09-16** in `core/paper_engine.py` (`paper-engine-v1`,
+constants owned by `core/config.py`).
+
+- Numbering note: commit `540cb34` landed the survivorship-safe universe
+  (`core/universe.py`) under the "V6" label while this V6 — the paper
+  engine — stayed unbuilt. Both are now complete; the universe work is
+  tracked under **V6b** below to keep the commit history readable. Sprint V
+  ("Labels / Backtest / Paper") is complete only now that Paper exists.
+- Governance is upstream and absolute: `submit_order_intent` reads the
+  `OrchestrationDecision` it is handed and re-derives nothing, so it cannot
+  overturn a veto. Only `mode == "PAPER"` is ACCEPTED; ANALYSIS_ONLY and
+  NO_TRADE produce intent-shaped REJECTED records carrying
+  `governing_rule_ids` — the log shows why nothing happened.
+- Idempotency: `order_id` is a truncated SHA-256 over
+  (ticker, as_of, side, kind), so it is stable across processes and
+  crash-retries. A resubmission returns the stored record with
+  `duplicate: True` and appends nothing.
+- Fills price exclusively through the V3 cost table
+  (`execution_cost_record`) — no inline spread or slippage constant exists
+  in the engine. Fail-closed: unknown liquidity pays the widest (micro)
+  spread. A frozen `COST_TABLE_V1` replay is supported.
+- No live path: `submit_live_order` raises `NotImplementedError`
+  unconditionally, `EXECUTION_MODE` is permanently `LIVE_DISABLED` (guarded
+  at import by `_validate_paper_config`), and a test greps `core/` and
+  `agents/` to prove `LIVE_APPROVED` has no construction path.
+- Acceptance: 29 tests in `tests/test_paper_engine.py`. Full suite:
+  552/552 pass.
+
+### V6b. Survivorship-safe historical universe ✓ DONE
+
+Landed in commit `540cb34` as `core/universe.py` (`universe-ledger-v1`),
+originally mislabeled V6. Membership intervals `{ticker, listed_from,
+listed_to}` keep delisted members after they stop trading;
+`survivorship_problems` flags a candidate universe that is missing a member
+listed at `as_of`. Covered by `tests/test_universe.py`.
 
 ### V7. Monitoring foundations ✓ DONE
 
@@ -839,7 +875,22 @@ assumptions it actually used — never proof the future behaves the same way.
   at landing (508/508 as of N3 v2).
 
 ## Sprint M — ML Layer, Calibration, Model Registry
-## Sprint M — ML Layer, Calibration, Model Registry
+
+> **Numbering.** This board and `NEXT_STEPS_SPRINTS.md` (derived from the
+> master context) number Sprint M differently. This board is authoritative
+> for execution; the mapping is:
+>
+> | This board | Master context (`NEXT_STEPS_SPRINTS.md`) |
+> |---|---|
+> | M1 Feature registry | M1 Canonical Feature Registry |
+> | M2 Model registry and artifact tracking | M5 Model Artifact Registry |
+> | M3 Training pipeline | M2 Training Dataset Builder + M4 Baseline Suite |
+> | M4 Calibration and score mapping | M6 Calibration and Uncertainty |
+> | M5 Promotion gates and drift hooks | M7 Champion/Challenger + M8 Reproducibility Gate |
+>
+> The master context's **M3 Research Trial Registry** has no slot on this
+> board yet — it needs one before training runs begin, or experiments will
+> bypass the trial registry (a named failure mode, master context section 32).
 
 Preconditions: Sprint V complete (labels exist, harness exists, paper
 evidence accumulates). Dependency note: this sprint introduces the project's
@@ -892,6 +943,26 @@ Implemented 2026-09-15 (completed the registry started in commits fe70627 /
   hashes, PIT/rejection gates, producer wiring, persistence, engine +
   contract-verifier + auditor + orchestrator integration, fundamental factor
   registration). Full suite: 522/522 pass.
+
+### M1b. Open registry coverage gap (blocks nothing, but read before M2)
+
+M1's binding rule — "an unregistered feature cannot enter a production
+model" — is enforced, but its *coverage* is currently the market surface
+only. Recorded here so M2 does not inherit a false sense of completeness:
+
+- 27 features are registered: 22 market (`market_data_agent`) + 5
+  fundamental (`fundamental_agent`).
+- 5 of 7 declared producers have **no** registered features:
+  `news_agent`, `macro_agent`, `regime_agent`, `sentiment_agent`,
+  `technical_agent` (reported by `unwired_producers`).
+- The auditor's `feature_registry_conformance` check inspects
+  `snapshot["features"]`, i.e. the market contract surface. Meanwhile
+  `news_intelligence` (weight 0.10 current) and `macroeconomic` (0.10 both
+  horizons) contribute to the published score through their own snapshot
+  shapes, which the registry does not yet describe.
+- Consequence: a news or macro input change is not caught by the M1 drift
+  gate. Before any model consumes those lines, their features need specs
+  and the conformance check needs to reach their surfaces.
 
 ### M2. Model registry and artifact tracking
 

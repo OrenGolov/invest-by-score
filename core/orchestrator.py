@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from agents.market_data_agent import fetch_market_snapshot
 from agents.technical_agent import score_technical
-from core.agent_contracts import AgentContract, NoTradeDecision, OrchestrationDecision
+from core.agent_contracts import AgentContract, OrchestrationDecision
 from core.audit_store import AUDIT_SCHEMA_VERSION, persist_decision_audit
 from core.audit_policy import evaluate_audit_policy, stable_hash
 from core.config import RISK_POLICY_V2
 from core.risk_policy import evaluate_risk_policy
-from core.schemas import STATUS_POSTURE, AgentStatus, status_posture, worst_status
+from core.schemas import AgentStatus, status_posture, worst_status
 from core.score_engine import build_score
 from fetch_data import fetch_fundamental_snapshot
 
@@ -84,9 +84,15 @@ def _derive_agent_statuses(snapshot: dict, fundamental_snapshot: dict, score_res
     macro_status = str((getattr(score_result, "macro_snapshot", None) or {}).get("status", "UNAVAILABLE"))
     regime_status = str((getattr(score_result, "market_regime_snapshot", None) or {}).get("status", "UNAVAILABLE"))
 
+    # The technical agent derives every signal from the market snapshot, so it
+    # cannot be healthier than the snapshot it read. Reporting OK on top of a
+    # STALE/INVALID snapshot would let a failed agent masquerade as OK in the
+    # permanent audit record — while carrying the largest ensemble weight.
+    technical_status = market_status
+
     return {
         "market_data": market_status,
-        "technical_analysis": AgentStatus.OK.value,
+        "technical_analysis": technical_status,
         "fundamental_analysis": fundamental_status,
         "news_intelligence": news_status,
         "macroeconomic": macro_status,
@@ -112,7 +118,7 @@ def orchestrate_score(ticker: str, as_of: str, timestamp: str | None = None) -> 
     agent_statuses = _derive_agent_statuses(snapshot, fundamental_snapshot, score_result)
 
     market_payload = {
-        "status": "OK",
+        "status": agent_statuses["market_data"],
         "source": snapshot.get("source"),
         "source_confidence": snapshot.get("source_confidence"),
         "future_bars_excluded": snapshot.get("future_bars_excluded", 0),
@@ -135,7 +141,7 @@ def orchestrate_score(ticker: str, as_of: str, timestamp: str | None = None) -> 
     )
 
     technical_payload = {
-        "status": "OK",
+        "status": agent_statuses["technical_analysis"],
         "score": technical_score,
         "rsi": snapshot.get("rsi"),
         "trend_regime": snapshot.get("market_regime"),
@@ -144,7 +150,7 @@ def orchestrate_score(ticker: str, as_of: str, timestamp: str | None = None) -> 
         agent="technical_analysis",
         ticker=ticker.upper(),
         as_of=snapshot["as_of"],
-        status="OK",
+        status=agent_statuses["technical_analysis"],
         score=technical_score,
         confidence=max(0.0, min(1.0, score_result.confidence)),
         uncertainty={"lower": 4.0, "upper": 8.0},
@@ -516,6 +522,4 @@ def orchestrate_score(ticker: str, as_of: str, timestamp: str | None = None) -> 
         decision_type="NO_TRADE" if mode == "NO_TRADE" else "score",
         source_record_ids=source_record_ids,
     )
-    if mode == "NO_TRADE":
-        return decision
     return decision

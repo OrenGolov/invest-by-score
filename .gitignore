@@ -1,6 +1,17 @@
-﻿venv/
+venv/
 __pycache__/
 *.pyc
 .env
 .vscode/
-data/
+
+# Derived caches and provider snapshots: rebuildable from data/raw/, so they
+# stay out of git. Everything the replay proof needs is tracked below.
+data/*.parquet
+data/*_fundamentals_*.json
+data/decision_audit.jsonl
+data/paper_orders.jsonl
+
+# NOT ignored (tracked on purpose): data/raw/ is the W6 append-only
+# provenance ledger and data/feature_registry.jsonl is the M1 registry.
+# "delete derived cache -> rebuild from raw -> reproduce the same result"
+# is only executable by a fresh clone if these travel with the repo.
