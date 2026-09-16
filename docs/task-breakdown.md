@@ -964,6 +964,55 @@ only. Recorded here so M2 does not inherit a false sense of completeness:
   gate. Before any model consumes those lines, their features need specs
   and the conformance check needs to reach their surfaces.
 
+### M2-DS. Official training dataset builder ✓ DONE
+
+> Master-context M2 ("Official Training Dataset Builder"). Tracked with a
+> `-DS` suffix because this board's M2 slot is the model/artifact registry —
+> see the numbering table above. Built ahead of the board's M2 because a
+> model registry with no dataset to register is premature.
+
+Implemented 2026-09-16 in `core/training_dataset.py` (`training-dataset-v1`,
+schema `training-row-v1`, constants owned by `core/config.py`).
+
+- **One door into a training set.** The builder CALLS the canonical
+  producers and reimplements nothing: features come from
+  `core.score_engine.build_score` replayed through the V2
+  `offline_replay_seam`, outcomes from the V1
+  `core.labels.build_outcome_labels`. A side extractor that pulls features
+  another way is the classic leakage route, so the same parallel-path rule
+  that governs research applies here.
+- **Row shape:** `prediction_time -> information available at
+  prediction_time -> features -> future outcome`. Features and outcome never
+  share a code path.
+- **Leakage is caught, not assumed absent.** `row_problems` re-verifies every
+  contract's `published_time <= prediction_time` independently of the
+  registry check, on freshly built rows and on rows loaded back from disk.
+  The CI gate plants a future-dated contract and fails if it is NOT rejected
+  — a guard that cannot fail is theatre.
+- **M1 gate reaches datasets.** An unregistered, PIT-violating,
+  version-drifted or undeclared-source feature cannot enter a dataset any
+  more than it can enter a production model (`model_feature_problems`).
+- **Nothing is imputed.** A missing feature, a null/NaN value, an
+  UNAVAILABLE label or an unmatured horizon excludes the row with a recorded
+  reason in `report()["exclusion_reasons"]`. Coverage is never silently
+  thinned and absence is never a zero.
+- **Deterministic `dataset_hash`:** canonical SHA-256 over every row's
+  identity (including feature *contracts*, not just values — the same number
+  from a different source is different training data) plus the feature-set
+  hash, target horizon and label version. Rows are sorted before hashing, so
+  build order cannot change identity. Verified by rebuild.
+- Append-only manifest at `data/training_datasets.jsonl`, idempotent per
+  dataset hash; the manifest carries provenance, not the row payload.
+- CI drift gate: `scripts/check_training_dataset.py` — builds from real
+  cached history, checks conformance and leakage, proves hash determinism,
+  proves both guards non-vacuous, checks persistence idempotency.
+- Acceptance: 32 tests in `tests/test_training_dataset.py`. Full suite:
+  584/584 pass.
+
+Open follow-up: the dataset currently draws the 16 registered market
+features. News/macro/regime features remain unregistered (see M1b), so they
+cannot yet enter a dataset — by design, not oversight.
+
 ### M2. Model registry and artifact tracking
 
 - `models/manifest.json` (append-friendly, versioned entries):

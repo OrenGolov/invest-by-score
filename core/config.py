@@ -544,3 +544,39 @@ def _validate_paper_config() -> None:
 
 
 _validate_paper_config()
+
+
+# --- Official training dataset builder (M2) --------------------------------------
+# The ONLY sanctioned dataset generator. Every training row is
+# prediction_time -> information available at prediction_time -> features ->
+# future outcome, and the whole dataset carries a deterministic hash so a
+# trial can name exactly the data it trained on.
+TRAINING_DATASET_VERSION = "training-dataset-v1"
+
+# A row is emitted only when its label horizon has fully matured. An
+# unmatured horizon is not a zero and not a neutral — it is an excluded row,
+# recorded in the build report so coverage is never silently thinned.
+TRAINING_DATASET_SCHEMA_VERSION = "training-row-v1"
+
+# The horizon a row's supervised target is drawn from. 20d is the only
+# horizon carrying a directional label (label_up) and an adverse-excursion
+# measure in the V1 label contract, so it is the default target.
+TRAINING_DEFAULT_TARGET_HORIZON = "20d"
+
+# Fail-closed row admission. A row must carry every declared feature with a
+# usable value; a missing feature excludes the row rather than imputing a
+# neutral (master context section 32: never silently replace missing values
+# with neutral evidence).
+TRAINING_REQUIRE_COMPLETE_FEATURES = True
+
+
+def _validate_training_dataset_config() -> None:
+    """Import-time guard: the default target horizon must be a real horizon."""
+    if TRAINING_DEFAULT_TARGET_HORIZON not in LABEL_HORIZON_SESSIONS:
+        raise ValueError(
+            f"TRAINING_DEFAULT_TARGET_HORIZON {TRAINING_DEFAULT_TARGET_HORIZON!r} is not "
+            f"a declared label horizon (known: {sorted(LABEL_HORIZON_SESSIONS)})"
+        )
+
+
+_validate_training_dataset_config()

@@ -32,3 +32,6 @@ jobs:
 
       - name: N1 taxonomy coverage gate
         run: python scripts/check_n1_taxonomy_coverage.py
+
+      - name: M2 training-dataset drift gate
+        run: python scripts/check_training_dataset.py
