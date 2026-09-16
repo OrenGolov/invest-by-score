@@ -573,8 +573,25 @@ class TestModelFeatureGate(unittest.TestCase):
         self.assertTrue(any("ghost" in p and "not registered" in p for p in problems))
 
     def test_incompatible_model_family_refused(self):
-        problems = model_feature_problems(["rsi"], self.registry, "boosting")
+        """A contextual signal is not an input to the technical scorers.
+
+        Previously this used rsi + boosting, but market features now declare
+        the ML families on purpose (M3: the trainer consumes exactly the
+        features the dataset builder emits). news_sentiment_score genuinely
+        excludes technical_analysis, so the rule stays covered.
+        """
+        problems = model_feature_problems(
+            ["news_sentiment_score"], self.registry, "technical_analysis"
+        )
         self.assertTrue(any("does not declare compatibility" in p for p in problems))
+
+    def test_market_features_are_available_to_ml_families(self):
+        """M3: the trainer must be able to consume the emitted feature surface."""
+        for family in ("linear", "tree", "boosting", "baseline_mean", "momentum"):
+            with self.subTest(family=family):
+                self.assertEqual(
+                    model_feature_problems(["rsi", "change_20d"], self.registry, family), []
+                )
 
     def test_unknown_model_family_refused(self):
         problems = model_feature_problems(["rsi"], self.registry, "oracle")

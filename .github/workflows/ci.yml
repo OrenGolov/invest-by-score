@@ -41,3 +41,6 @@ jobs:
 
       - name: M3 trial-registry drift gate
         run: python scripts/check_trial_registry.py
+
+      - name: M3 training-pipeline drift gate
+        run: python scripts/check_training_pipeline.py

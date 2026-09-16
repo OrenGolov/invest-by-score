@@ -1120,21 +1120,54 @@ constants owned by `core/config.py`), ledger at `data/research_trials.jsonl`.
 - Acceptance: 41 tests in `tests/test_trial_registry.py`. Full suite:
   678/678 pass.
 
-### M3. Training pipeline (offline, reproducible)
+### M3. Training pipeline (offline, reproducible) ✓ DONE
 
-- `scripts/train.py`: loads point-in-time-eligible features (via the same
-  snapshot code paths against the raw store — never a parallel extractor),
-  joins V1 labels, applies the M1 registry, trains baselines:
-  regularized linear (Ridge/ElasticNet), RandomForest, GradientBoosting.
-  Sequence/temporal models are explicitly out of scope until the baselines
-  survive V2 validation.
-- Time-safe splits come from the V2 harness (folds + embargo), not from
-  sklearn defaults; class/label imbalance handling documented in the run
-  manifest; seeds fixed and recorded.
-- Determinism: same seed + same data digests → identical artifact hash.
-- Acceptance: two training runs with identical manifests produce identical
-  metrics and artifact hashes; a feature added without registry entry aborts
-  training.
+Implemented 2026-09-16 in `core/training.py` (`training-pipeline-v1`) with
+the `scripts/train.py` entrypoint the board names.
+
+**Dependency:** this sprint added the project's first ML dependency,
+`scikit-learn==1.9.1`, reviewed and approved before landing. `joblib==1.6.0`
+is pinned alongside it rather than left transitive, because it serialises the
+artifacts M8 must hash.
+
+- **Splits come from the V2 harness, never sklearn.** `train_test_split`,
+  `KFold` and `cross_val_score` shuffle by default and leak the future into
+  training on panel data. The trainer calls `build_walk_forward_folds` — the
+  same anchored windows and embargo the backtest engine uses — and both a
+  test and the CI gate parse the module's AST to prove no sklearn splitter is
+  imported.
+- **The registry gates training.** Every dataset feature must be registered
+  and declare compatibility with the family being trained; an unregistered
+  feature aborts the run before the matrix is built.
+- **Baselines first.** Six estimators: `historical_mean` and `momentum`
+  (pure numpy, no dependency) plus ridge, elastic_net, random_forest and
+  gradient_boosting. Sequence/temporal models stay out of scope until these
+  survive validation.
+- **Determinism.** Same dataset hash + same seed + same configuration produce
+  identical metrics and an identical artifact hash, verified across separate
+  processes including RandomForest. The hash is taken over FITTED PARAMETERS,
+  not pickle bytes: joblib output embeds library versions and is not
+  byte-stable across environments, which would make the M8 guarantee
+  untestable in CI. The environment (python/numpy/sklearn/platform) is
+  recorded so M8 can say WHY two runs diverged.
+- **Metrics are out-of-sample by construction** — pooled observations equal
+  the sum of validation rows, and a test asserts it.
+- CI drift gate: `scripts/check_training_pipeline.py` (~26s). Verified
+  non-vacuous by sabotage: disabling the registry gate makes it fail, and it
+  distinguishes a clean refusal from an incidental crash.
+- Acceptance: 26 tests in `tests/test_training.py`. Full suite: 705/705 pass.
+
+Found during implementation: the 22 market features declared only
+`technical_analysis` compatibility, so the M1 gate correctly refused to let
+any ML family consume the very features the M2-DS builder emits. They now
+declare the ML families, matching what the fundamental and contextual
+features already did — an M1 oversight the gate caught rather than a
+deliberate restriction.
+
+First result, recorded honestly: on a 500-row NVDA dataset the pure
+`historical_mean` baseline beat every trained model on RMSE. No model has
+earned promotion, and `scripts/train.py` says so explicitly when a pure
+baseline wins. That is the point of establishing baselines first.
 
 ### M4. Calibration and score mapping
 

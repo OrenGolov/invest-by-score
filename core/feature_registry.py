@@ -634,7 +634,15 @@ def _market_feature(
         pit_rule=_MARKET_PIT_RULE,
         source_dependencies=["yahoo_finance_chart"],
         feature_family=feature_family,
-        model_compatibility=["technical_analysis"],
+        # Market features back the technical scorers AND are legitimate ML
+        # inputs: same PIT rule, same numeric contract the fundamental
+        # factors already declare for these families. Declaring only
+        # technical_analysis would have barred the M3 trainer from the very
+        # features the dataset builder emits.
+        model_compatibility=[
+            "technical_analysis", "baseline_mean", "momentum", "mean_reversion",
+            "linear", "logistic", "tree", "boosting",
+        ],
     )
 
 

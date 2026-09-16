@@ -636,3 +636,25 @@ TRIAL_VALIDATION_SCHEMES = (
 # cannot be changed afterwards. Changing which metric counts after seeing the
 # results is the definition of cherry-picking.
 TRIAL_METRIC_LOCK_ENFORCED = True
+
+
+# --- Offline training pipeline (board M3) ----------------------------------------
+# The only sanctioned trainer. It consumes M2-DS datasets, splits them with
+# the V2 walk-forward harness (never sklearn's own splitters, which are not
+# time-safe), and records everything needed to reproduce the artifact.
+TRAINING_PIPELINE_VERSION = "training-pipeline-v1"
+
+# Fixed seed for every estimator that accepts one. Recorded in the run
+# manifest; changing it is a new run, not a re-run.
+TRAINING_DEFAULT_SEED = 42
+
+# The baseline families M3 trains. Sequence/temporal models are explicitly
+# out of scope until these survive V2 validation (board M3, and master
+# context section 32: do not build a complex network before proving simple
+# baselines).
+TRAINING_BASELINE_FAMILIES = ("linear", "tree", "boosting")
+
+# Artifacts are hashed over their PARAMETERS, not the pickle bytes: joblib
+# output embeds library versions and is not byte-stable across environments,
+# which would make the M8 reproducibility guarantee untestable in CI.
+TRAINING_ARTIFACT_HASH_BASIS = "fitted_parameters"
