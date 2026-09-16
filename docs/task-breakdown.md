@@ -1079,6 +1079,47 @@ constants owned by `core/config.py`), persisted at `models/manifest.json`.
 - Acceptance: 44 tests in `tests/test_model_registry.py`. Full suite:
   637/637 pass.
 
+### M3-TR. Research trial registry ✓ DONE
+
+> Master-context M3 ("Research Trial Registry"). Tracked with a `-TR` suffix
+> because this board's M3 slot is the training pipeline — see the numbering
+> table above. Built first because the board's M3 runs experiments, and an
+> experiment that is not pre-registered is not evidence.
+
+Implemented 2026-09-16 in `core/trial_registry.py` (`trial-registry-v1`,
+constants owned by `core/config.py`), ledger at `data/research_trials.jsonl`.
+
+- **Every M3 field recorded and validated:** trial_id, hypothesis,
+  feature_set_version, model_family, hyperparameters, label_version,
+  horizons, training_window, validation_scheme, costs, seed, dataset_hash,
+  metrics. Closed vocabularies for model family and validation scheme;
+  `costs` must name its `cost_table_version` (V3); `dataset_hash` ties a
+  trial to an exact M2-DS dataset; a stale `label_version` is refused.
+- **Pre-registration is structural.** A registered trial carries NO metrics —
+  validation refuses them — and `complete_trial` refuses metrics that omit
+  the pre-registered `primary_metric`. Choosing the metric after seeing the
+  results is the definition of cherry-picking, so the metric is locked at
+  registration.
+- **Results are immutable.** A completed or abandoned trial cannot be
+  re-completed, abandoned or edited. Editing a registered trial's
+  configuration breaks its `trial_id` and validation says so.
+- **An identical configuration is the SAME experiment.** `trial_id` is a
+  deterministic hash over the configuration — hypothesis included, metrics
+  and timestamps excluded — so re-running an experiment cannot masquerade as
+  a new independent result. This is what makes the X7 multiple-testing count
+  honest.
+- **Abandoned trials are recorded, never deleted**, and must state why.
+  `multiple_testing_report()` counts them alongside completed trials: the
+  number of things tried is the number people forget, and it is exactly the
+  number a significance correction needs.
+- Append-only ledger: registration and completion are separate lines, so the
+  file itself evidences that the hypothesis preceded the result.
+- CI drift gate: `scripts/check_trial_registry.py` — 19 guards, each
+  exercised and required to fire. Verified non-vacuous by sabotage: disabling
+  the primary-metric lock makes the gate exit 1.
+- Acceptance: 41 tests in `tests/test_trial_registry.py`. Full suite:
+  678/678 pass.
+
 ### M3. Training pipeline (offline, reproducible)
 
 - `scripts/train.py`: loads point-in-time-eligible features (via the same

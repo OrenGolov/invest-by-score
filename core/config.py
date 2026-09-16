@@ -607,3 +607,32 @@ MODEL_LIVE_ELIGIBLE_STATUSES = (MODEL_STATUS_APPROVED,)
 # involved. The orchestrator resolves these through the registry rather than
 # hardcoding the strings.
 MODEL_REGISTRY_SEED_APPROVER = "governance_baseline"
+
+
+# --- Research trial registry (M3) ------------------------------------------------
+# Every research experiment is recorded BEFORE its metrics are known. The
+# registry exists to protect against uncontrolled experimentation and
+# cherry-picking: an unrecorded trial is not evidence, and a hypothesis
+# written after seeing the result is not a hypothesis.
+TRIAL_REGISTRY_VERSION = "trial-registry-v1"
+
+# Lifecycle. A trial is REGISTERED (hypothesis + full configuration, no
+# metrics yet), then exactly once COMPLETED (metrics attached) or ABANDONED
+# (recorded with a reason). A completed trial is immutable.
+TRIAL_STATUS_REGISTERED = "registered"
+TRIAL_STATUS_COMPLETED = "completed"
+TRIAL_STATUS_ABANDONED = "abandoned"
+TRIAL_STATUSES = (
+    TRIAL_STATUS_REGISTERED, TRIAL_STATUS_COMPLETED, TRIAL_STATUS_ABANDONED,
+)
+
+# Recognised validation schemes. "none" is deliberately absent: a trial with
+# no validation scheme is not a trial.
+TRIAL_VALIDATION_SCHEMES = (
+    "walk_forward", "walk_forward_embargo", "expanding_window", "holdout",
+)
+
+# The pre-registered primary metric must be declared at registration time and
+# cannot be changed afterwards. Changing which metric counts after seeing the
+# results is the definition of cherry-picking.
+TRIAL_METRIC_LOCK_ENFORCED = True

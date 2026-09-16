@@ -38,3 +38,6 @@ jobs:
 
       - name: M2 model-registry drift gate
         run: python scripts/check_model_registry.py
+
+      - name: M3 trial-registry drift gate
+        run: python scripts/check_trial_registry.py
