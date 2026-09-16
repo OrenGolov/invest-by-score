@@ -9,7 +9,7 @@ from typing import Any
 from core.audit_policy import stable_hash
 
 AUDIT_LOG_PATH = Path(__file__).resolve().parent.parent / "data" / "decision_audit.jsonl"
-AUDIT_SCHEMA_VERSION = "audit-event-v2"
+AUDIT_SCHEMA_VERSION = "audit-event-v3"
 
 
 def _read_audit_events() -> list[dict[str, Any]]:
@@ -46,6 +46,10 @@ def persist_decision_audit(decision: dict[str, Any]) -> dict[str, Any]:
         "source_quality": decision.get("source_quality") or {},
         "ensemble_version": str(decision.get("ensemble_version", "") or ""),
         "model_versions": dict(decision.get("model_versions") or {}),
+        # M2: the registry status behind each stamped model version, so an
+        # override (the only path to a non-approved model) is permanently
+        # visible in the audit trail rather than inferable after the fact.
+        "model_resolutions": dict(decision.get("model_resolutions") or {}),
         "agent_statuses": dict(decision.get("agent_statuses") or {}),
         "veto": dict(decision.get("veto") or {}),
         "confidence_breakdown_digest": (

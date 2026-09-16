@@ -6,6 +6,7 @@ from core.agent_contracts import AgentContract, OrchestrationDecision
 from core.audit_store import AUDIT_SCHEMA_VERSION, persist_decision_audit
 from core.audit_policy import evaluate_audit_policy, stable_hash
 from core.config import RISK_POLICY_V2
+from core.model_registry import build_default_model_registry, require_live_model
 from core.risk_policy import evaluate_risk_policy
 from core.schemas import AgentStatus, status_posture, worst_status
 from core.score_engine import build_score
@@ -102,6 +103,20 @@ def _derive_agent_statuses(snapshot: dict, fundamental_snapshot: dict, score_res
 
 def orchestrate_score(ticker: str, as_of: str, timestamp: str | None = None) -> OrchestrationDecision:
     """Run the typed, point-in-time agent contract layer for a requested as_of snapshot."""
+    # M2: every model version the decision stamps is resolved through the
+    # model registry. A non-approved model cannot back a live decision, and
+    # the resolution records travel into the audit event so the governing
+    # status (and any override) is part of the permanent record.
+    model_registry = build_default_model_registry()
+    model_resolutions = {
+        agent: require_live_model(version, model_registry)
+        for agent, version in (
+            ("market_data", "market-data-v1"),
+            ("technical_analysis", "technical-v1"),
+            ("fundamental_analysis", "fundamental-v1"),
+        )
+    }
+
     snapshot = fetch_market_snapshot(ticker, as_of, timestamp)
     fundamental_snapshot = fetch_fundamental_snapshot(ticker, as_of, use_cache=True)
     score_result = build_score(ticker, as_of, timestamp, persist_audit=False)
@@ -133,7 +148,7 @@ def orchestrate_score(ticker: str, as_of: str, timestamp: str | None = None) -> 
         confidence=float(snapshot.get("source_confidence", 0.0)),
         uncertainty={"lower": 0.2, "upper": 0.8},
         evidence=[{"source_record_id": snapshot.get("source_contract", {}).get("source_id", "yahoo_finance_chart"), "reason": "Market snapshot was filtered to bars at or before the as_of timestamp."}],
-        model_version="market-data-v1",
+        model_version=model_resolutions["market_data"]["model_version"],
         input_hash=snapshot_hash,
         warnings=[] if snapshot.get("data_quality", {}).get("score", 0.0) >= 60.0 else ["quality_below_threshold"],
         payload=market_payload,
@@ -155,7 +170,7 @@ def orchestrate_score(ticker: str, as_of: str, timestamp: str | None = None) -> 
         confidence=max(0.0, min(1.0, score_result.confidence)),
         uncertainty={"lower": 4.0, "upper": 8.0},
         evidence=[{"source_record_id": snapshot.get("source_contract", {}).get("source_id", "yahoo_finance_chart"), "reason": "Technical signals were computed from on-or-before as_of bars only."}],
-        model_version="technical-v1",
+        model_version=model_resolutions["technical_analysis"]["model_version"],
         input_hash=snapshot_hash,
         warnings=[] if technical_score > 0 else ["technical_signal_unavailable"],
         payload=technical_payload,
@@ -177,7 +192,7 @@ def orchestrate_score(ticker: str, as_of: str, timestamp: str | None = None) -> 
         confidence=float(fundamental_snapshot.get("source_confidence", 0.0)),
         uncertainty={"lower": 0.1, "upper": 0.9},
         evidence=[{"source_record_id": fundamental_snapshot.get("source", "provider_key_required"), "reason": "Fundamental metrics were gated by source availability and timestamp validity."}],
-        model_version="fundamental-v1",
+        model_version=model_resolutions["fundamental_analysis"]["model_version"],
         input_hash=_stable_hash(fundamental_snapshot),
         warnings=[] if fundamental_snapshot.get("point_in_time_valid", True) else ["future_dated_fundamental_payload"],
         payload=fundamental_payload,
@@ -494,6 +509,7 @@ def orchestrate_score(ticker: str, as_of: str, timestamp: str | None = None) -> 
             agent.agent: agent.model_version
             for agent in (market_agent, technical_agent, fundamental_agent, news_agent, sentiment_agent, macro_agent, regime_agent, risk_agent, audit_agent)
         },
+        "model_resolutions": model_resolutions,
         "agent_statuses": {
             agent.agent: agent.status
             for agent in (market_agent, technical_agent, fundamental_agent, news_agent, sentiment_agent, macro_agent, regime_agent, risk_agent, audit_agent)

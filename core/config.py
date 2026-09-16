@@ -580,3 +580,30 @@ def _validate_training_dataset_config() -> None:
 
 
 _validate_training_dataset_config()
+
+
+# --- Model registry and artifact tracking (M2) -----------------------------------
+# A model referenced by a live decision must be `approved`. The registry is
+# the single source of truth for which model versions exist, what they were
+# trained on, and whether governance has cleared them for the score path.
+MODEL_REGISTRY_VERSION = "model-registry-v1"
+
+# Lifecycle. A model is born CANDIDATE and can only reach APPROVED through a
+# promotion that carries an out-of-sample comparison against the incumbent
+# plus a human approver. RETIRED is terminal for the score path but never
+# deletes the artifact — historical decisions must stay explainable.
+MODEL_STATUS_CANDIDATE = "candidate"
+MODEL_STATUS_APPROVED = "approved"
+MODEL_STATUS_RETIRED = "retired"
+MODEL_STATUSES = (MODEL_STATUS_CANDIDATE, MODEL_STATUS_APPROVED, MODEL_STATUS_RETIRED)
+
+# Only these statuses may back a live decision.
+MODEL_LIVE_ELIGIBLE_STATUSES = (MODEL_STATUS_APPROVED,)
+
+# The deterministic-scorer entries that back today's score path. These are
+# rule-based scorers, not trained artifacts, so they carry no dataset hash —
+# but they are registered and approved like anything else, because the
+# binding rule is about GOVERNANCE not about whether gradient descent was
+# involved. The orchestrator resolves these through the registry rather than
+# hardcoding the strings.
+MODEL_REGISTRY_SEED_APPROVER = "governance_baseline"

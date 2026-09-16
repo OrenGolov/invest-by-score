@@ -1,0 +1,63 @@
+{
+  "models": [
+    {
+      "approved_at": "2026-09-16T00:00:00+00:00",
+      "approved_by": "governance_baseline",
+      "artifact_uri": null,
+      "dataset_hash": null,
+      "family": "technical_analysis",
+      "feature_set_version": "fundamental-feature-v1",
+      "metrics": {},
+      "model_version": "fundamental-v1",
+      "oos_comparison": {
+        "note": "Deterministic rule-based scorer predating the model registry; approved as the governance baseline, not by out-of-sample comparison. Any TRAINED successor must beat it through promote()."
+      },
+      "parent_version": null,
+      "registry_version": "model-registry-v1",
+      "retired_at": null,
+      "retired_reason": "",
+      "status": "approved",
+      "training_data_cutoff": null
+    },
+    {
+      "approved_at": "2026-09-16T00:00:00+00:00",
+      "approved_by": "governance_baseline",
+      "artifact_uri": null,
+      "dataset_hash": null,
+      "family": "technical_analysis",
+      "feature_set_version": "market-feature-v1",
+      "metrics": {},
+      "model_version": "market-data-v1",
+      "oos_comparison": {
+        "note": "Deterministic rule-based scorer predating the model registry; approved as the governance baseline, not by out-of-sample comparison. Any TRAINED successor must beat it through promote()."
+      },
+      "parent_version": null,
+      "registry_version": "model-registry-v1",
+      "retired_at": null,
+      "retired_reason": "",
+      "status": "approved",
+      "training_data_cutoff": null
+    },
+    {
+      "approved_at": "2026-09-16T00:00:00+00:00",
+      "approved_by": "governance_baseline",
+      "artifact_uri": null,
+      "dataset_hash": null,
+      "family": "technical_analysis",
+      "feature_set_version": "current-score-v3+long-term-score-v2",
+      "metrics": {},
+      "model_version": "technical-v1",
+      "oos_comparison": {
+        "note": "Deterministic rule-based scorer predating the model registry; approved as the governance baseline, not by out-of-sample comparison. Any TRAINED successor must beat it through promote()."
+      },
+      "parent_version": null,
+      "registry_version": "model-registry-v1",
+      "retired_at": null,
+      "retired_reason": "",
+      "status": "approved",
+      "training_data_cutoff": null
+    }
+  ],
+  "registry_hash": "cad408d1cc5ceb4deeeb058e1d55e65f7875016a347e85e12d6e6d5dadc75165",
+  "registry_version": "model-registry-v1"
+}

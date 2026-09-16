@@ -210,7 +210,8 @@ backtest) compounds on this fault line. Close it first.
 
 ### W7. Audit event enrichment ✓ DONE
 
-- Status: **implemented** — events are now `audit-event-v2`: `schema_version`,
+- Status: **implemented** — events are now `audit-event-v3` (v2 + the M2
+  `model_resolutions` block): `schema_version`,
   `ensemble_version`, `model_versions` (agent → version), `agent_statuses`,
   `veto` (risk rule ids + auditor check ids), and
   `confidence_breakdown_digest` (hash, not the bulk payload). The enriched
@@ -1037,20 +1038,46 @@ caller may request them explicitly via `feature_names` once those agents have
 live providers connected (news/macro/sentiment are provider-gated and read
 UNAVAILABLE offline).
 
-### M2. Model registry and artifact tracking
+### M2. Model registry and artifact tracking ✓ DONE
 
-- `models/manifest.json` (append-friendly, versioned entries):
-  `{model_version, family, feature_set_version, training_data_cutoff,
-  artifact_uri, status: candidate|approved|retired, metrics: {...},
-  approved_by, approved_at, parent_version}`.
-- Rules enforced in code: a model referenced by a live decision must be
-  `approved`; promotion candidate→approved requires an out-of-sample
-  comparison row against the incumbent plus a human `approved_by`; retirement
-  never deletes artifacts. `ScoreResult.model_version` fields populate from
-  here (currently hard-coded `technical-v1` etc. — those strings become
-  registry lookups).
-- Acceptance: referencing an unapproved/retired model in the score path is
-  impossible without an explicit override that itself is audited.
+Implemented 2026-09-16 in `core/model_registry.py` (`model-registry-v1`,
+constants owned by `core/config.py`), persisted at `models/manifest.json`.
+
+- **Entries** carry `{model_version, family, feature_set_version,
+  training_data_cutoff, artifact_uri, status, metrics, approved_by,
+  approved_at, parent_version}` plus `dataset_hash` (joins an M2-DS dataset
+  to the model trained on it), `oos_comparison` and `retired_at/reason`.
+  Closed vocabularies: an unknown family or status is a rejection.
+- **The live-path rule is enforced.** `require_live_model` resolves a version
+  or raises: unregistered, `candidate` and `retired` all refuse. The
+  orchestrator resolves `market-data-v1`, `technical-v1` and
+  `fundamental-v1` through the registry — the three hardcoded literals are
+  gone, and a test plus the CI gate assert they stay gone.
+- **The override is audited by construction.** The only way past the gate is
+  an explicit `override_reason`, and the returned resolution record names the
+  override. Those records flow into the W7 audit event (`model_resolutions`,
+  schema bumped to `audit-event-v3`), so a non-approved model can never back
+  a decision without leaving a permanent trace. This is the acceptance
+  criterion, literally.
+- **Promotion is gated.** `promote` refuses without an out-of-sample
+  comparison naming the pre-registered primary metric, both sides' values and
+  the sample size; refuses when the comparison does not name the real
+  incumbent; refuses a candidate that does not beat the incumbent (loss
+  metrics declare `higher_is_better: False`); and refuses an automated
+  `approved_by` — governance sign-off cannot be a CI job.
+- **Retirement never deletes.** `retire` flips status and records when/why;
+  the entry and its `artifact_uri` survive, because historical decisions must
+  stay explainable.
+- Seeded entries are the deterministic rule-based scorers backing today's
+  score path. They carry no dataset hash or artifact — the binding rule is
+  about governance, not about whether gradient descent was involved — and
+  any trained successor must beat them through `promote()`.
+- CI drift gate: `scripts/check_model_registry.py` — registry validity,
+  committed-manifest-vs-code drift, live-gate refusals proven non-vacuous,
+  override recording, all three promotion refusals, retirement preservation,
+  and the absence of hardcoded literals.
+- Acceptance: 44 tests in `tests/test_model_registry.py`. Full suite:
+  637/637 pass.
 
 ### M3. Training pipeline (offline, reproducible)
 

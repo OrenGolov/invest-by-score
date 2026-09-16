@@ -35,3 +35,6 @@ jobs:
 
       - name: M2 training-dataset drift gate
         run: python scripts/check_training_dataset.py
+
+      - name: M2 model-registry drift gate
+        run: python scripts/check_model_registry.py

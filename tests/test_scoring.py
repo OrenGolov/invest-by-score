@@ -1156,7 +1156,7 @@ class AuditStoreEnrichmentTests(unittest.TestCase):
             "agent_statuses": {"market_data": "OK"},
             "veto": {"risk_management": {"veto": False, "rule_ids": []}},
         })
-        self.assertEqual(event["schema_version"], "audit-event-v2")
+        self.assertEqual(event["schema_version"], "audit-event-v3")
         self.assertEqual(event["ensemble_version"], "ensemble-v1")
         self.assertEqual(event["model_versions"], {"technical_analysis": "technical-v1"})
         self.assertEqual(event["agent_statuses"], {"market_data": "OK"})
@@ -1170,7 +1170,7 @@ class AuditStoreEnrichmentTests(unittest.TestCase):
         after = get_decision_by_ticker_and_as_of("MSFT", as_of)
         self.assertEqual(len(after) - len(before), 1)  # the probe run must not double-write
         event = after[-1]
-        self.assertEqual(event["schema_version"], "audit-event-v2")
+        self.assertEqual(event["schema_version"], "audit-event-v3")
         self.assertEqual(event["ensemble_version"], "ensemble-v3")
         self.assertEqual(len(event["model_versions"]), 9)
         self.assertEqual(event["model_versions"]["risk_management"], "risk-policy-v2")
