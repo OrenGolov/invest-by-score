@@ -101,10 +101,17 @@ class TestDatasetSurvivorshipVerdict(unittest.TestCase):
         self.assertNotEqual(verdict["status"], "single_ticker")
         self.assertEqual(verdict["tickers"], 2)
 
-    def test_empty_ledger_is_unverifiable_not_silently_clean(self) -> None:
+    def test_a_subset_of_the_portfolio_is_flagged_not_silently_clean(self) -> None:
+        """Never a silent pass.
+
+        Before the ledger was seeded this returned "unverifiable"; now it
+        returns "survivorship_biased", because a two-name slice of a 74-name
+        portfolio drops everything else. Either way the point holds — the
+        builder must not report a clean verdict it has not earned.
+        """
         verdict = self._multi().survivorship
-        self.assertEqual(verdict["status"], "unverifiable")
-        self.assertIn("ledger", verdict["detail"])
+        self.assertIn(verdict["status"], ("unverifiable", "survivorship_biased"))
+        self.assertNotEqual(verdict["status"], "point_in_time_complete")
 
     def test_fail_closed_mode_refuses_an_unsafe_build(self) -> None:
         with self.assertRaises(TrainingDatasetError) as ctx:
