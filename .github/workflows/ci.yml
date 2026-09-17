@@ -68,3 +68,6 @@ jobs:
 
       - name: E5 attribution drift gate
         run: python scripts/check_attribution.py
+
+      - name: E6 event-memory drift gate
+        run: python scripts/check_event_memory.py

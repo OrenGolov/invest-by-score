@@ -1,0 +1,402 @@
+"""Event memory (Sprint E6) — institutional memory of how events landed.
+
+Stores, per event: the event itself, the market context, the chart state at
+the moment it happened, the measured 1D/5D/20D/60D response, and the
+attribution verdict. This is what the forecasting sprints retrieve from when
+asking "what happened last time a setup looked like this?".
+
+    E1 event + E4 study + E5 attribution
+        |
+        v
+    remember()       <- refuses an incomplete memory
+        |
+        v
+    data/event_memory.jsonl  (append-only)
+        |
+        v
+    find_analogs()   <- similar chart state, same event type
+        |
+        v
+    analog_summary() <- REFUSES to summarise too few
+
+Design decisions worth stating:
+
+- **A memory is written only when it is complete.** Event, study and
+  attribution must all be present and measured. A half-recorded memory is
+  worse than an absent one, because it looks like evidence — and this is the
+  store the forecasting layer will retrieve from without re-deriving
+  anything.
+- **The chart state uses the SHARED snapshot fields.** A remembered chart
+  state and a live one are described in identical terms, or the comparison
+  is meaningless. Institutional memory that cannot be compared with the
+  present is just a log.
+- **Analogs match on chart state AND event type.** An earnings surprise into
+  an overbought chart is not a comparable for a regulatory action into the
+  same chart. Similarity alone would retrieve confident nonsense.
+- **A summary needs enough analogs, or it refuses.** A "typical response"
+  computed from two examples is not typical of anything, so
+  `analog_summary` returns the matches with `status: "insufficient_analogs"`
+  rather than a median nobody should act on.
+- **The attribution verdict travels with every memory.** A remembered
+  response that was `confounded` is a different thing from one that was
+  `event_associated`, and forgetting which is how a memory store turns into
+  a source of false confidence.
+- **Memories are immutable and deduplicated by event id.** Re-recording the
+  same event is a no-op, so a re-run cannot inflate the analog count.
+
+Pure and deterministic apart from the append itself.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any, Iterable
+
+from core.config import (
+    EVENT_MEMORY_CHART_FIELDS,
+    EVENT_MEMORY_MIN_ANALOGS,
+    EVENT_MEMORY_MIN_SIMILARITY,
+    EVENT_MEMORY_RESPONSE_HORIZONS,
+    EVENT_MEMORY_VERSION,
+)
+
+EVENT_MEMORY_STORE_PATH = (
+    Path(__file__).resolve().parent.parent / "data" / "event_memory.jsonl"
+)
+
+
+class EventMemoryError(ValueError):
+    """Raised when a memory is incomplete or a retrieval is invalid."""
+
+
+@dataclass
+class EventMemory:
+    """One remembered event and everything needed to learn from it."""
+
+    event_id: str
+    ticker: str
+    published_time: str
+    event_type: str
+    direction: str
+    actor: str = ""
+    actor_type: str = ""
+    # Chart state at the moment of the event, in shared snapshot terms.
+    chart_state: dict[str, Any] = field(default_factory=dict)
+    # Market context: regime, benchmark and sector identities.
+    context: dict[str, Any] = field(default_factory=dict)
+    # Measured response per horizon: stock, abnormal, volatility, volume.
+    response: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # E5 verdict per horizon — a confounded response is not the same thing
+    # as an event-associated one, and forgetting which breeds false
+    # confidence.
+    attribution: dict[str, str] = field(default_factory=dict)
+    entity_resolution_method: str = ""
+    memory_version: str = EVENT_MEMORY_VERSION
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def response_at(self, horizon: str) -> float | None:
+        """The abnormal return at one horizon, or None if unrecorded."""
+        return (self.response.get(horizon) or {}).get("abnormal_return")
+
+    def is_event_associated(self, horizon: str = "20d") -> bool:
+        return self.attribution.get(horizon) == "event_associated"
+
+
+def memory_problems(memory: EventMemory) -> list[str]:
+    """Validate a memory before it is written.
+
+    A memory that looks like evidence but is not is the worst thing this
+    store can contain, so the bar for entry is high.
+    """
+    problems: list[str] = []
+    if not str(memory.event_id or "").strip():
+        problems.append("event_id is required — memories are deduplicated by it")
+    if not str(memory.ticker or "").strip():
+        problems.append("ticker is required")
+    if not str(memory.published_time or "").strip():
+        problems.append("published_time is required")
+    if not str(memory.event_type or "").strip():
+        problems.append("event_type is required — analogs match on it")
+    if not memory.chart_state:
+        problems.append(
+            "chart_state is required — a memory that cannot be compared with "
+            "the present is a log, not institutional memory"
+        )
+    if not memory.response:
+        problems.append(
+            "no measured response — an event with no recorded outcome teaches "
+            "nothing and should not occupy memory"
+        )
+    for horizon, verdict in (memory.attribution or {}).items():
+        if horizon not in memory.response:
+            problems.append(
+                f"attribution recorded for {horizon!r} but no response was measured"
+            )
+    return problems
+
+
+def build_memory(
+    event,
+    study,
+    attributions: dict | None = None,
+    snapshot: dict | None = None,
+) -> EventMemory:
+    """Assemble a memory from an E1 event, an E4 study and E5 attributions.
+
+    Refuses an unmeasured study: recording an event whose response was never
+    measured would put a row in memory that teaches nothing while counting
+    toward every analog total.
+    """
+    if not getattr(study, "is_measured", lambda: False)():
+        raise EventMemoryError(
+            f"study for {getattr(event, 'entity', '?')} at "
+            f"{getattr(event, 'published_time', '?')} is not measured "
+            f"(status {getattr(study, 'status', '?')!r}) — an unmeasured event "
+            f"teaches nothing and must not occupy memory"
+        )
+
+    chart_state = {
+        field_name: (snapshot or {}).get(field_name)
+        for field_name in EVENT_MEMORY_CHART_FIELDS
+        if (snapshot or {}).get(field_name) is not None
+    }
+
+    response: dict[str, dict[str, Any]] = {}
+    for horizon in EVENT_MEMORY_RESPONSE_HORIZONS:
+        reaction = (study.reactions or {}).get(horizon)
+        if not reaction:
+            continue
+        response[horizon] = {
+            "stock_return": reaction.get("stock_return"),
+            "abnormal_return": reaction.get("abnormal_return"),
+            "volatility_ratio": reaction.get("volatility_ratio"),
+            "volume_ratio": reaction.get("volume_ratio"),
+        }
+
+    verdicts = {
+        horizon: attribution.verdict
+        for horizon, attribution in (attributions or {}).items()
+        if horizon in response
+    }
+
+    return EventMemory(
+        event_id=str(getattr(event, "event_id", "")),
+        ticker=str(getattr(event, "entity", "")).upper(),
+        published_time=str(getattr(event, "published_time", "")),
+        event_type=str(getattr(event, "event_type", "other")),
+        direction=str(getattr(event, "direction", "neutral")),
+        actor=str(getattr(event, "actor", "") or ""),
+        actor_type=str(getattr(event, "actor_type", "") or ""),
+        chart_state=chart_state,
+        context={
+            "benchmark": getattr(study, "benchmark", None),
+            "sector": getattr(study, "sector", None),
+            "model": getattr(study, "model", None),
+            "baseline_volatility": (getattr(study, "baseline", {}) or {}).get(
+                "daily_volatility"
+            ),
+            "market_regime": (snapshot or {}).get("market_regime"),
+        },
+        response=response,
+        attribution=verdicts,
+        entity_resolution_method=str(
+            (getattr(event, "entity_resolution", {}) or {}).get("method", "")
+        ),
+    )
+
+
+def remember(
+    memory: EventMemory,
+    path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Append a memory, deduplicated by event id.
+
+    Re-recording the same event is a no-op rather than an error: a re-run of
+    the pipeline must not inflate the analog count, which would quietly make
+    every historical base rate wrong.
+    """
+    problems = memory_problems(memory)
+    if problems:
+        raise EventMemoryError(
+            f"refusing to remember an incomplete memory for "
+            f"{memory.ticker or '?'}: " + "; ".join(problems)
+        )
+
+    store = Path(path) if path is not None else EVENT_MEMORY_STORE_PATH
+    for existing in load_memories(store):
+        if existing.get("event_id") == memory.event_id:
+            return existing
+
+    record = memory.to_dict()
+    store.parent.mkdir(parents=True, exist_ok=True)
+    with store.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, sort_keys=True, default=str) + "\n")
+    return record
+
+
+def load_memories(path: str | Path | None = None) -> list[dict[str, Any]]:
+    """Read every memory. Malformed lines raise (integrity is loud)."""
+    store = Path(path) if path is not None else EVENT_MEMORY_STORE_PATH
+    if not store.exists():
+        return []
+    records: list[dict[str, Any]] = []
+    with store.open("r", encoding="utf-8") as handle:
+        for number, line in enumerate(handle, start=1):
+            raw = line.strip()
+            if not raw:
+                continue
+            try:
+                records.append(json.loads(raw))
+            except json.JSONDecodeError as exc:
+                raise EventMemoryError(
+                    f"{store.name} line {number} is not valid JSON: {exc}"
+                ) from exc
+    return records
+
+
+def load_memory_objects(path: str | Path | None = None) -> list[EventMemory]:
+    """Read memories as typed objects."""
+    known = {name for name in EventMemory.__dataclass_fields__}
+    return [
+        EventMemory(**{key: value for key, value in record.items() if key in known})
+        for record in load_memories(path)
+    ]
+
+
+def chart_similarity(
+    left: dict[str, Any],
+    right: dict[str, Any],
+    fields: Iterable[str] = EVENT_MEMORY_CHART_FIELDS,
+) -> float:
+    """Similarity between two chart states, in [0, 1].
+
+    Compared field by field on a scale-free basis, so a $500 stock and a $50
+    stock with the same shape are comparable. Fields absent from either side
+    are skipped rather than treated as matching — a missing field is not
+    agreement.
+    """
+    scores: list[float] = []
+    for field_name in fields:
+        a, b = left.get(field_name), right.get(field_name)
+        if a is None or b is None:
+            continue
+        if isinstance(a, str) or isinstance(b, str):
+            scores.append(1.0 if str(a) == str(b) else 0.0)
+            continue
+        try:
+            a_value, b_value = float(a), float(b)
+        except (TypeError, ValueError):
+            continue
+        scale = max(abs(a_value), abs(b_value), 1e-9)
+        scores.append(max(0.0, 1.0 - abs(a_value - b_value) / scale))
+    return round(sum(scores) / len(scores), 6) if scores else 0.0
+
+
+def find_analogs(
+    chart_state: dict[str, Any],
+    event_type: str,
+    memories: list[EventMemory] | None = None,
+    min_similarity: float = EVENT_MEMORY_MIN_SIMILARITY,
+    exclude_event_id: str | None = None,
+    path: str | Path | None = None,
+) -> list[dict[str, Any]]:
+    """Historical events whose setup resembled this one.
+
+    Matches on chart state AND event type. An earnings surprise into an
+    overbought chart is not a comparable for a regulatory action into the
+    same chart, so similarity alone would retrieve confident nonsense.
+    """
+    pool = memories if memories is not None else load_memory_objects(path)
+    analogs: list[dict[str, Any]] = []
+    for memory in pool:
+        if exclude_event_id and memory.event_id == exclude_event_id:
+            continue
+        if memory.event_type != event_type:
+            continue
+        similarity = chart_similarity(chart_state, memory.chart_state)
+        if similarity < min_similarity:
+            continue
+        analogs.append({"similarity": similarity, "memory": memory})
+    return sorted(analogs, key=lambda entry: entry["similarity"], reverse=True)
+
+
+def analog_summary(
+    analogs: list[dict[str, Any]],
+    horizon: str = "20d",
+) -> dict[str, Any]:
+    """Summarise what happened to comparable setups, or refuse to.
+
+    A "typical response" from two examples is not typical of anything, so
+    below `EVENT_MEMORY_MIN_ANALOGS` the matches are returned with an
+    explicit `insufficient_analogs` status and no summary statistics.
+    """
+    import statistics
+
+    usable = [
+        entry for entry in analogs
+        if entry["memory"].response_at(horizon) is not None
+    ]
+
+    if len(usable) < EVENT_MEMORY_MIN_ANALOGS:
+        return {
+            "status": "insufficient_analogs",
+            "horizon": horizon,
+            "analogs": len(usable),
+            "required": EVENT_MEMORY_MIN_ANALOGS,
+            "detail": (
+                f"{len(usable)} comparable setup(s) with a measured {horizon} "
+                f"response, below the {EVENT_MEMORY_MIN_ANALOGS} required — a "
+                f"typical response from this few examples is not typical of "
+                f"anything"
+            ),
+            "memory_version": EVENT_MEMORY_VERSION,
+        }
+
+    returns = [entry["memory"].response_at(horizon) for entry in usable]
+    associated = sum(
+        1 for entry in usable if entry["memory"].is_event_associated(horizon)
+    )
+    return {
+        "status": "measured",
+        "horizon": horizon,
+        "analogs": len(usable),
+        "median_response": round(statistics.median(returns), 6),
+        "mean_response": round(statistics.fmean(returns), 6),
+        "positive_share": round(sum(1 for r in returns if r > 0) / len(returns), 4),
+        "dispersion": round(statistics.pstdev(returns), 6) if len(returns) > 1 else 0.0,
+        "mean_similarity": round(
+            statistics.fmean(entry["similarity"] for entry in usable), 4
+        ),
+        "event_associated_share": round(associated / len(usable), 4),
+        "memory_version": EVENT_MEMORY_VERSION,
+        "detail": (
+            "historical association under comparable conditions — not a forecast, "
+            "and not evidence that these events caused these moves"
+        ),
+    }
+
+
+def memory_report(path: str | Path | None = None) -> dict[str, Any]:
+    """Coverage summary over the whole memory store."""
+    memories = load_memory_objects(path)
+    by_type: dict[str, int] = {}
+    by_ticker: dict[str, int] = {}
+    associated = 0
+    for memory in memories:
+        by_type[memory.event_type] = by_type.get(memory.event_type, 0) + 1
+        by_ticker[memory.ticker] = by_ticker.get(memory.ticker, 0) + 1
+        if memory.is_event_associated():
+            associated += 1
+    return {
+        "memory_version": EVENT_MEMORY_VERSION,
+        "memories": len(memories),
+        "distinct_tickers": len(by_ticker),
+        "by_event_type": dict(sorted(by_type.items())),
+        "event_associated": associated,
+        "min_analogs": EVENT_MEMORY_MIN_ANALOGS,
+        "min_similarity": EVENT_MEMORY_MIN_SIMILARITY,
+    }

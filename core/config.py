@@ -1203,3 +1203,61 @@ def _validate_attribution_config() -> None:
 
 
 _validate_attribution_config()
+
+
+# --- Event memory (E6) -----------------------------------------------------------
+# "Store event, context, chart state, historical analogs, and 1D/5D/20D/60D
+# response as institutional memory."
+#
+# This is the store the forecasting sprints retrieve from. Its value depends
+# entirely on not remembering things that were never true, so a memory is
+# written ONLY when its event, its study and its attribution are all
+# complete — a half-recorded memory is worse than an absent one, because it
+# looks like evidence.
+EVENT_MEMORY_VERSION = "event-memory-v1"
+
+# The chart-state fields captured at the moment of the event. Drawn from the
+# shared snapshot surface so a remembered chart state and a live one are
+# described in exactly the same terms — a memory that cannot be compared with
+# the present is not institutional memory.
+EVENT_MEMORY_CHART_FIELDS = (
+    "close", "rsi", "volatility", "volume_ratio_20d", "atr_14",
+    "trend_slope_60d", "trend_vs_20d_mean", "market_regime",
+    "change_5d", "change_20d", "change_60d",
+    "price_vs_ma_50", "price_vs_ma_200",
+)
+
+# The response horizons a memory records. Aligned with the event study so a
+# remembered response and a fresh measurement always describe the same window.
+EVENT_MEMORY_RESPONSE_HORIZONS = ("1d", "5d", "20d", "60d")
+
+# Analog retrieval. Similarity is computed over the chart-state fields above,
+# and a match must clear this bar before it is offered as a comparable.
+EVENT_MEMORY_MIN_SIMILARITY = 0.7
+
+# No fewer than this many analogs makes a median response worth reporting.
+# Below it, retrieval returns the matches but refuses to summarise them —
+# a "typical response" from two examples is not typical of anything.
+EVENT_MEMORY_MIN_ANALOGS = 5
+
+
+def _validate_event_memory_config() -> None:
+    """Import-time guard: the memory contract must stay coherent."""
+    for horizon in EVENT_MEMORY_RESPONSE_HORIZONS:
+        if horizon not in LABEL_HORIZON_SESSIONS:
+            raise ValueError(
+                f"memory horizon {horizon!r} is not a declared label horizon — a "
+                f"remembered response and a fresh measurement must describe the "
+                f"same window"
+            )
+    if not 0.0 < EVENT_MEMORY_MIN_SIMILARITY <= 1.0:
+        raise ValueError("EVENT_MEMORY_MIN_SIMILARITY must be in (0, 1]")
+    if EVENT_MEMORY_MIN_ANALOGS < 2:
+        raise ValueError(
+            "a typical response needs more than one example to be typical"
+        )
+    if not EVENT_MEMORY_CHART_FIELDS:
+        raise ValueError("a memory without chart state cannot be compared to the present")
+
+
+_validate_event_memory_config()

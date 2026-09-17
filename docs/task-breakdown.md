@@ -1635,6 +1635,45 @@ unexplained, **1 event-associated**. That conservatism is the intended
 behaviour, not a defect — most apparent reactions really are common-factor
 moves.
 
+### E6. Event memory ✓ DONE
+
+Implemented 2026-09-17 in `core/event_memory.py` (`event-memory-v1`),
+append-only at `data/event_memory.jsonl`.
+
+Stores event, context, chart state, historical analogs and the
+1D/5D/20D/60D response. This is the store the forecasting sprints will
+retrieve from **without re-deriving anything**, so its value depends
+entirely on not remembering things that were never true.
+
+- **A memory is written only when complete.** Event, study and attribution
+  must all be present and measured. A half-recorded memory is worse than an
+  absent one, because it looks like evidence.
+- **An unmeasured event never enters memory** — it teaches nothing while
+  counting toward every analog total, silently shifting base rates.
+- **Chart state uses the SHARED snapshot fields** (13 of them), so a
+  remembered chart and a live one are described in identical terms.
+  Institutional memory that cannot be compared with the present is just a
+  log.
+- **Analogs match on chart state AND event type.** An earnings surprise into
+  an overbought chart is not a comparable for a regulatory action into the
+  same chart — similarity alone retrieves confident nonsense.
+- **A summary needs ≥5 analogs or it refuses**, returning
+  `insufficient_analogs` with no statistics at all. A "typical response"
+  from two examples is not typical of anything.
+- **The attribution verdict travels with every memory.** A remembered
+  response that was `confounded` is a different thing from one that was
+  `event_associated`, and forgetting which is how a memory store becomes a
+  source of false confidence. `event_associated_share` is reported in every
+  summary.
+- **Deduplicated by event id**, so a pipeline re-run cannot inflate the
+  analog count and make every historical base rate wrong.
+- Every summary disclaims being a forecast.
+- CI drift gate: `scripts/check_event_memory.py`. Verified non-vacuous by
+  two sabotages — removing deduplication and removing the analog floor —
+  both fail with precise diagnoses.
+- Acceptance: 36 tests in `tests/test_event_memory.py`. Full suite:
+  1099/1099 pass, fifteen gates green.
+
 ---
 
 ## Sprint R — Portfolio Risk Context (completing the fail-closed system)
