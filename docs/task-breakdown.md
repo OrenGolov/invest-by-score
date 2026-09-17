@@ -1423,6 +1423,54 @@ attempted break could reveal.
 
 ---
 
+## Sprint E — Event Intelligence & Market Reaction
+
+### E1. Canonical event object ✓ DONE
+
+Implemented 2026-09-17 in `core/event_contract.py` (`event-v1`).
+
+Sprint E learns how events move the chart, which requires ONE event shape
+every downstream stage agrees on — E4 (event study), E5 (attribution) and E6
+(event memory) must all read the same object, or they will quietly disagree
+about what an "event" is, and that surfaces as a mysterious modelling result
+rather than an error.
+
+- **All 16 E1 fields**, validated: event_id, published_time, effective_time,
+  entity, entities_affected, actor, actor_type, event_type, source,
+  source_quality, novelty, relevance, direction, magnitude, confidence,
+  evidence.
+- **Adapts N1; never re-classifies it.** `event_from_article` maps an
+  existing pipeline article onto the canonical shape. Re-deriving category,
+  tone or source quality here would create a second, divergent opinion about
+  the same article.
+- **`published_time` and `effective_time` are distinct**, and the PIT filter
+  keys on PUBLICATION. A Monday announcement of a Friday plant closure is
+  legitimate and common; collapsing the two is how a backtest silently uses
+  future information. `is_backdated()` makes the gap visible because an event
+  study anchored on the wrong timestamp measures the wrong window.
+- **`event_id` is deterministic** over defining content, excluding the
+  scores — rescoring an event does not make it a new event, so the same story
+  carried by two providers cannot be double-counted in event memory.
+- **CONTRADICTORY is a direction**, propagated into every event of a
+  contradictory snapshot rather than averaged to neutral.
+- **`magnitude` is a bounded unitless claim size, not an expected return** —
+  naming it a return would invite treating an unvalidated number as a
+  forecast before Sprint F exists to make real ones.
+- **Fail-closed:** a non-OK snapshot yields no events; an unsourced event is
+  a rumour and is refused; incomplete articles are skipped rather than
+  patched with a fabricated timestamp.
+- **Conservative actor typing.** Only company-issued event types claim a
+  company actor; everything else stays `unknown`. E2/E3 resolve actors
+  properly, and guessing now would put unearned confidence into the data
+  those sprints consume.
+- CI drift gate: `scripts/check_event_contract.py`. Verified non-vacuous by
+  sabotage — switching the PIT filter to `effective_time` fails it with the
+  leakage message.
+- Acceptance: 40 tests in `tests/test_event_contract.py`. Full suite:
+  913/913 pass, ten gates green.
+
+---
+
 ## Sprint R — Portfolio Risk Context (completing the fail-closed system)
 
 The W2 policy table gates single-decision quality; this sprint adds the

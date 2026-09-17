@@ -880,3 +880,69 @@ def _validate_reproducibility_config() -> None:
 
 
 _validate_reproducibility_config()
+
+
+# --- Canonical event object (E1) -------------------------------------------------
+# Sprint E learns how events move the chart. That requires ONE event shape
+# every downstream stage agrees on: the event study (E4), the attribution
+# engine (E5) and event memory (E6) must all read the same object, or they
+# will silently disagree about what an "event" is.
+EVENT_SCHEMA_VERSION = "event-v1"
+
+# Who or what produced the statement. An earnings release from the company
+# and a broker note about the company are not the same kind of evidence, and
+# E3 (influential-person intelligence) needs the distinction to exist from
+# the start rather than being retrofitted.
+ACTOR_TYPE_COMPANY = "company"
+ACTOR_TYPE_EXECUTIVE = "executive"
+ACTOR_TYPE_REGULATOR = "regulator"
+ACTOR_TYPE_ANALYST = "analyst"
+ACTOR_TYPE_INFLUENCER = "influencer"
+ACTOR_TYPE_JOURNALIST = "journalist"
+ACTOR_TYPE_UNKNOWN = "unknown"
+ACTOR_TYPES = (
+    ACTOR_TYPE_COMPANY, ACTOR_TYPE_EXECUTIVE, ACTOR_TYPE_REGULATOR,
+    ACTOR_TYPE_ANALYST, ACTOR_TYPE_INFLUENCER, ACTOR_TYPE_JOURNALIST,
+    ACTOR_TYPE_UNKNOWN,
+)
+
+# Direction is the CLAIMED polarity of the event, not a prediction and not a
+# realised return. CONTRADICTORY is a first-class value: credible evidence
+# pointing both ways must never average to neutral (master context section
+# 15), and that rule has to survive into the event object.
+EVENT_DIRECTION_POSITIVE = "positive"
+EVENT_DIRECTION_NEGATIVE = "negative"
+EVENT_DIRECTION_NEUTRAL = "neutral"
+EVENT_DIRECTION_CONTRADICTORY = "contradictory"
+EVENT_DIRECTIONS = (
+    EVENT_DIRECTION_POSITIVE, EVENT_DIRECTION_NEGATIVE,
+    EVENT_DIRECTION_NEUTRAL, EVENT_DIRECTION_CONTRADICTORY,
+)
+
+# An event with no evidence is a rumour. Every event must cite at least this
+# many source records, so nothing enters event memory unsourced.
+EVENT_MIN_EVIDENCE = 1
+
+# Magnitude is a bounded, unitless claim size — NOT an expected return.
+# Keeping it unitless prevents it being mistaken for a forecast before the
+# F-sprint exists to make real ones.
+EVENT_MAGNITUDE_MIN = 0.0
+EVENT_MAGNITUDE_MAX = 1.0
+
+
+def _validate_event_config() -> None:
+    """Import-time guard: the event vocabularies must stay coherent."""
+    if ACTOR_TYPE_UNKNOWN not in ACTOR_TYPES:
+        raise ValueError("an explicit 'unknown' actor type must exist — fail-closed")
+    if EVENT_DIRECTION_CONTRADICTORY not in EVENT_DIRECTIONS:
+        raise ValueError(
+            "CONTRADICTORY must be a direction — contradictory evidence must "
+            "never average to neutral"
+        )
+    if EVENT_MIN_EVIDENCE < 1:
+        raise ValueError("an event must cite at least one source record")
+    if EVENT_MAGNITUDE_MIN >= EVENT_MAGNITUDE_MAX:
+        raise ValueError("the magnitude band must be non-empty")
+
+
+_validate_event_config()

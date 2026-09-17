@@ -53,3 +53,6 @@ jobs:
 
       - name: M8 reproducibility drift gate
         run: python scripts/check_reproducibility.py
+
+      - name: E1 event-contract drift gate
+        run: python scripts/check_event_contract.py
