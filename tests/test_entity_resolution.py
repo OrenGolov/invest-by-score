@@ -292,3 +292,60 @@ class TestEventIntegration(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPortfolioCoverage(unittest.TestCase):
+    """The registry must cover the portfolio it is asked to resolve.
+
+    At 15 entries, 81% of the portfolio resolved to `none` — the resolver
+    was working correctly and reporting that it had no idea who most of
+    these companies were.
+    """
+
+    def setUp(self) -> None:
+        from fetch_data import PORTFOLIO_TICKERS
+
+        self.portfolio = PORTFOLIO_TICKERS
+        self.registry = build_default_entity_registry()
+
+    def test_every_portfolio_ticker_is_registered(self) -> None:
+        missing = sorted(set(self.portfolio) - set(self.registry))
+        self.assertEqual(missing, [], f"unregistered portfolio tickers: {missing}")
+
+    def test_every_legal_name_matches_itself(self) -> None:
+        """Regression: a name ending in "." could never match.
+
+        The trailing \b required a word character after the period, so
+        "Apple Inc." failed against text containing "Apple Inc." — 24 of 74
+        entries were unmatchable.
+        """
+        from core.entity_resolution import _phrase_present
+
+        for ticker, record in sorted(self.registry.items()):
+            with self.subTest(ticker=ticker):
+                self.assertTrue(
+                    _phrase_present(record.legal_name, f"{record.legal_name} reported results"),
+                    f"{record.legal_name!r} cannot match itself",
+                )
+
+    def test_funds_declare_no_executives(self) -> None:
+        """A fund has no officer who speaks for it."""
+        for ticker in ("VOO", "SOXX", "CIBR", "NASA"):
+            with self.subTest(ticker=ticker):
+                self.assertEqual(self.registry[ticker].executives, ())
+
+    def test_portfolio_wide_eligibility_is_high(self) -> None:
+        resolutions = [
+            resolve_entity(f"{self.registry[t].legal_name} reported quarterly results", t)
+            for t in self.portfolio
+        ]
+        report = resolution_report(resolutions)
+        self.assertGreater(report["eligibility_rate"], 0.95)
+
+    def test_the_remaining_rejection_is_genuine_ambiguity(self) -> None:
+        """CCEP's name contains KO's — refusing to guess is correct."""
+        resolution = resolve_entity(
+            "Coca-Cola Europacific Partners reported results", "CCEP"
+        )
+        self.assertEqual(resolution.method, ENTITY_MATCH_AMBIGUOUS)
+        self.assertIn("KO", resolution.candidates)

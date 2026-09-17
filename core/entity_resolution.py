@@ -137,8 +137,16 @@ def _phrase_present(phrase: str, text: str) -> bool:
     cleaned = str(phrase or "").strip()
     if not cleaned:
         return False
-    pattern = r"\b" + r"\s+".join(re.escape(part) for part in cleaned.split()) + r"\b"
-    return re.search(pattern, str(text or ""), flags=re.IGNORECASE) is not None
+    # A trailing \b after a non-word character (the "." in "Apple Inc.")
+    # requires a word character next, so such a name could never match even
+    # itself — 24 of 74 registry entries were unmatchable. Anchor the
+    # boundary only where the phrase actually begins/ends in a word char.
+    body = r"\s+".join(re.escape(part) for part in cleaned.split())
+    prefix = r"\b" if cleaned[0].isalnum() else ""
+    suffix = r"\b" if cleaned[-1].isalnum() else ""
+    return re.search(
+        prefix + body + suffix, str(text or ""), flags=re.IGNORECASE
+    ) is not None
 
 
 def build_default_entity_registry() -> dict[str, EntityRecord]:
@@ -153,21 +161,100 @@ def build_default_entity_registry() -> dict[str, EntityRecord]:
     about the company, which is a real claim and should be made carefully.
     """
     records = (
+        # --- Semiconductors and AI hardware ---------------------------------
         EntityRecord("NVDA", "NVIDIA Corporation", ("NVIDIA", "Nvidia"), ("Jensen Huang",)),
+        EntityRecord("AMD", "Advanced Micro Devices", ("AMD",), ("Lisa Su",)),
+        EntityRecord("INTC", "Intel Corporation", ("Intel",), ("Pat Gelsinger", "Lip-Bu Tan")),
+        EntityRecord("AVGO", "Broadcom Inc.", ("Broadcom",), ("Hock Tan",)),
+        EntityRecord("QCOM", "Qualcomm Incorporated", ("Qualcomm",), ("Cristiano Amon",)),
+        EntityRecord("MRVL", "Marvell Technology", ("Marvell",), ("Matt Murphy",)),
+        EntityRecord("ARM", "Arm Holdings", ("Arm Holdings",), ("Rene Haas",)),
+        EntityRecord("ASML", "ASML Holding", ("ASML",), ("Christophe Fouquet",)),
+        EntityRecord("KLAC", "KLA Corporation", ("KLA",), ("Rick Wallace",)),
+        EntityRecord("LRCX", "Lam Research", ("Lam Research",), ("Tim Archer",)),
+        EntityRecord("TER", "Teradyne Inc.", ("Teradyne",), ("Greg Smith",)),
+        EntityRecord("ALAB", "Astera Labs", ("Astera Labs",), ("Jitendra Mohan",)),
+        EntityRecord("SKHY", "SK hynix Inc.", ("SK hynix",), ()),
+        EntityRecord("CBRS", "Cerebras Systems", ("Cerebras",), ("Andrew Feldman",)),
+
+        # --- Mega-cap technology --------------------------------------------
         EntityRecord("AAPL", "Apple Inc.", ("Apple",), ("Tim Cook",)),
         EntityRecord("MSFT", "Microsoft Corporation", ("Microsoft",), ("Satya Nadella",)),
         EntityRecord("GOOGL", "Alphabet Inc.", ("Alphabet", "Google"), ("Sundar Pichai",)),
         EntityRecord("AMZN", "Amazon.com Inc.", ("Amazon",), ("Andy Jassy",)),
-        EntityRecord("META", "Meta Platforms Inc.", ("Meta", "Facebook"), ("Mark Zuckerberg",)),
+        EntityRecord("META", "Meta Platforms Inc.", ("Meta Platforms", "Facebook"), ("Mark Zuckerberg",)),
         EntityRecord("TSLA", "Tesla Inc.", ("Tesla",), ("Elon Musk",)),
-        EntityRecord("AMD", "Advanced Micro Devices", ("AMD",), ("Lisa Su",)),
-        EntityRecord("INTC", "Intel Corporation", ("Intel",), ("Pat Gelsinger",)),
-        EntityRecord("AVGO", "Broadcom Inc.", ("Broadcom",), ("Hock Tan",)),
-        EntityRecord("V", "Visa Inc.", ("Visa",), ()),
-        EntityRecord("BE", "Bloom Energy Corporation", ("Bloom Energy",), ()),
         EntityRecord("ORCL", "Oracle Corporation", ("Oracle",), ("Safra Catz",)),
-        EntityRecord("CRM", "Salesforce Inc.", ("Salesforce",), ("Marc Benioff",)),
+        EntityRecord("CSCO", "Cisco Systems", ("Cisco",), ("Chuck Robbins",)),
+        EntityRecord("DELL", "Dell Technologies", ("Dell",), ("Michael Dell",)),
+        EntityRecord("GLW", "Corning Incorporated", ("Corning",), ("Wendell Weeks",)),
+        EntityRecord("NOK", "Nokia Corporation", ("Nokia",), ("Justin Hotard",)),
+
+        # --- Software, data and security ------------------------------------
         EntityRecord("PLTR", "Palantir Technologies", ("Palantir",), ("Alex Karp",)),
+        EntityRecord("NOW", "ServiceNow Inc.", ("ServiceNow",), ("Bill McDermott",)),
+        EntityRecord("SNOW", "Snowflake Inc.", ("Snowflake",), ("Sridhar Ramaswamy",)),
+        EntityRecord("DDOG", "Datadog Inc.", ("Datadog",), ("Olivier Pomel",)),
+        EntityRecord("CRWD", "CrowdStrike Holdings", ("CrowdStrike",), ("George Kurtz",)),
+        EntityRecord("PANW", "Palo Alto Networks", ("Palo Alto Networks",), ("Nikesh Arora",)),
+        EntityRecord("FTNT", "Fortinet Inc.", ("Fortinet",), ("Ken Xie",)),
+        EntityRecord("OKTA", "Okta Inc.", ("Okta",), ("Todd McKinnon",)),
+        EntityRecord("ANET", "Arista Networks", ("Arista",), ("Jayshree Ullal",)),
+        EntityRecord("CGNX", "Cognex Corporation", ("Cognex",), ("Robert Willett",)),
+        EntityRecord("AXON", "Axon Enterprise", ("Axon",), ("Rick Smith",)),
+        EntityRecord("WBD", "Warner Bros. Discovery", ("Warner Bros Discovery",), ("David Zaslav",)),
+
+        # --- Fintech and consumer -------------------------------------------
+        EntityRecord("V", "Visa Inc.", ("Visa",), ("Ryan McInerney",)),
+        EntityRecord("SOFI", "SoFi Technologies", ("SoFi",), ("Anthony Noto",)),
+        EntityRecord("HOOD", "Robinhood Markets", ("Robinhood",), ("Vlad Tenev",)),
+        EntityRecord("NU", "Nu Holdings", ("Nubank",), ("David Velez",)),
+        EntityRecord("UBER", "Uber Technologies", ("Uber",), ("Dara Khosrowshahi",)),
+        EntityRecord("ABNB", "Airbnb Inc.", ("Airbnb",), ("Brian Chesky",)),
+        EntityRecord("KO", "The Coca-Cola Company", ("Coca-Cola",), ("James Quincey",)),
+        EntityRecord("CCEP", "Coca-Cola Europacific Partners", ("Coca-Cola Europacific",), ()),
+        EntityRecord("ODFL", "Old Dominion Freight Line", ("Old Dominion",), ("Marty Freeman",)),
+
+        # --- Healthcare and life sciences ------------------------------------
+        EntityRecord("LLY", "Eli Lilly and Company", ("Eli Lilly",), ("David Ricks",)),
+        EntityRecord("MRNA", "Moderna Inc.", ("Moderna",), ("Stephane Bancel",)),
+        EntityRecord("VRTX", "Vertex Pharmaceuticals", ("Vertex Pharmaceuticals",), ("Reshma Kewalramani",)),
+        EntityRecord("ISRG", "Intuitive Surgical", ("Intuitive Surgical",), ("Gary Guthart",)),
+
+        # --- Energy, utilities and industrials -------------------------------
+        EntityRecord("CEG", "Constellation Energy", ("Constellation Energy",), ("Joseph Dominguez",)),
+        EntityRecord("VST", "Vistra Corp.", ("Vistra",), ("Jim Burke",)),
+        EntityRecord("AEP", "American Electric Power", ("American Electric Power",), ("Bill Fehrman",)),
+        EntityRecord("EXC", "Exelon Corporation", ("Exelon",), ("Calvin Butler",)),
+        EntityRecord("BKR", "Baker Hughes Company", ("Baker Hughes",), ("Lorenzo Simonelli",)),
+        EntityRecord("BE", "Bloom Energy Corporation", ("Bloom Energy",), ("KR Sridhar",)),
+        EntityRecord("OKLO", "Oklo Inc.", ("Oklo",), ("Jacob DeWitte",)),
+        EntityRecord("CAT", "Caterpillar Inc.", ("Caterpillar",), ("Joe Creed",)),
+        EntityRecord("VRT", "Vertiv Holdings", ("Vertiv",), ("Giordano Albertazzi",)),
+        EntityRecord("MP", "MP Materials", ("MP Materials",), ("James Litinsky",)),
+
+        # --- Space, quantum and emerging -------------------------------------
+        EntityRecord("RKLB", "Rocket Lab USA", ("Rocket Lab",), ("Peter Beck",)),
+        EntityRecord("IONQ", "IonQ Inc.", ("IonQ",), ("Niccolo de Masi",)),
+        EntityRecord("RGTI", "Rigetti Computing", ("Rigetti",), ("Subodh Kulkarni",)),
+        EntityRecord("ONDS", "Ondas Holdings", ("Ondas",), ("Eric Brock",)),
+        EntityRecord("OUST", "Ouster Inc.", ("Ouster",), ("Angus Pacala",)),
+        EntityRecord("KEEL", "Keel Infrastructure Corp.", ("Keel Infrastructure",), ()),
+
+        # --- Digital infrastructure -------------------------------------------
+        EntityRecord("CRWV", "CoreWeave Inc.", ("CoreWeave",), ("Michael Intrator",)),
+        EntityRecord("NBIS", "Nebius Group", ("Nebius",), ("Arkady Volozh",)),
+        EntityRecord("IREN", "IREN Limited", ("Iris Energy",), ("Daniel Roberts",)),
+
+        # --- Funds and ETFs ---------------------------------------------------
+        # A fund has no officer who speaks for it, so `executives` stays empty:
+        # listing one would claim that a person's statement is evidence about
+        # the fund, which is not true.
+        EntityRecord("VOO", "Vanguard S&P 500 ETF", ("Vanguard S&P 500",), ()),
+        EntityRecord("SOXX", "iShares Semiconductor ETF", ("iShares Semiconductor",), ()),
+        EntityRecord("CIBR", "First Trust NASDAQ Cybersecurity ETF", ("First Trust Cybersecurity",), ()),
+        EntityRecord("NASA", "Tema Space Innovators ETF", ("Tema Space Innovators",), ()),
+        EntityRecord("SPCX", "Space Exploration Technologies Corp.", ("SpaceX",), ()),
     )
     return {record.ticker: record for record in records}
 
