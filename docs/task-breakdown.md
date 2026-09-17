@@ -1555,6 +1555,47 @@ the number the system is most tempted to invent.
 - Acceptance: 35 tests in `tests/test_actor_intelligence.py`. Full suite:
   994/994 pass, twelve gates green.
 
+### E4. Event study engine ✓ DONE
+
+Implemented 2026-09-17 in `core/event_study.py` (`event-study-v1`).
+
+The full chain per event — pre-event baseline → stock reaction → benchmark
+reaction → sector reaction → abnormal return → volatility response → volume
+response — across intraday / 1D / 5D / 20D / 60D. Horizons are drawn from
+`LABEL_HORIZON_SESSIONS`, so a study and a training label always describe the
+same window.
+
+- **The baseline ends BEFORE the event, with a 2-session gap.** Information
+  leaks into prices ahead of an announcement; including those sessions in
+  "normal" would fold part of the reaction into the baseline and shrink the
+  measured abnormal return toward zero. The study would quietly understate
+  exactly what it exists to measure.
+- **Anchored on PUBLICATION, not effective time** — the market reacts when it
+  is told, which is what E1 kept those timestamps distinct for.
+- **An unmatured window is ABSENT, never 0.0.** A zero would enter training
+  as a measured absence of reaction. A recent event honestly reports only
+  the horizons that elapsed.
+- **No benchmark means no abnormal return** — never a stock return
+  relabelled as abnormal. Benchmark and sector frames align by TIMESTAMP, so
+  a benchmark with different history length cannot shift the window.
+- **The model is named on every result** (`market_adjusted`, beta = 1). A
+  full market model estimating beta from the baseline is the natural v2;
+  calling this "the abnormal return" without naming the model would imply a
+  sophistication that is not there.
+- **Every result disclaims causality** (master context §37). E5 exists
+  precisely because this module cannot make that claim.
+- **Supplies E3 the returns it was refusing to invent.**
+  `observations_from_studies` joins studied events to actor observations
+  with real measured abnormal returns; anonymous events and unmeasured
+  studies are skipped rather than recorded with a fabricated reaction.
+  Verified end to end: 22 events → 22 studies → an actor track record
+  crossing the 20-observation threshold into `measured`.
+- CI drift gate: `scripts/check_event_study.py`. Verified non-vacuous by two
+  sabotages — removing the baseline gap, and zero-filling an unmeasurable
+  abnormal return — both fail with precise diagnoses.
+- Acceptance: 34 tests in `tests/test_event_study.py`. Full suite:
+  1028/1028 pass, thirteen gates green.
+
 ---
 
 ## Sprint R — Portfolio Risk Context (completing the fail-closed system)

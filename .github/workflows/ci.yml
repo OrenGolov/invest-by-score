@@ -62,3 +62,6 @@ jobs:
 
       - name: E3 actor-intelligence drift gate
         run: python scripts/check_actor_intelligence.py
+
+      - name: E4 event-study drift gate
+        run: python scripts/check_event_study.py

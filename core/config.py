@@ -1075,3 +1075,62 @@ def _validate_actor_config() -> None:
 
 
 _validate_actor_config()
+
+
+# --- Event study engine (E4) -----------------------------------------------------
+# For every event: pre-event baseline -> stock reaction -> benchmark reaction
+# -> sector reaction -> abnormal return -> volatility response -> volume
+# response, measured across the standard horizons.
+EVENT_STUDY_VERSION = "event-study-v1"
+
+# The pre-event estimation window. Everything the study calls "normal" comes
+# from here, and it ENDS before the event so the baseline can never contain
+# the reaction it is used to measure.
+EVENT_STUDY_BASELINE_SESSIONS = 60
+
+# A gap between the baseline window and the event. Information often leaks
+# into prices before an announcement is published; including those sessions
+# in "normal" would fold part of the reaction into the baseline and shrink
+# the abnormal return toward zero.
+EVENT_STUDY_BASELINE_GAP_SESSIONS = 2
+
+# Minimum usable baseline sessions. Below this the baseline is too thin to
+# describe normal behaviour, and the study refuses rather than reporting a
+# number nobody should trust.
+EVENT_STUDY_MIN_BASELINE_SESSIONS = 30
+
+# Horizons, aligned with LABEL_HORIZON_SESSIONS so an event study and a
+# training label always describe the same window. "intraday" is the event
+# session itself (open to close), which the daily bars can support honestly.
+EVENT_STUDY_HORIZONS = ("intraday", "1d", "5d", "20d", "60d")
+
+# Abnormal return model. "market_adjusted" subtracts the benchmark return
+# directly (beta = 1). A full market model would estimate beta from the
+# baseline, which is the natural v2 — it is NOT done here, and the model name
+# travels with every result so nobody mistakes one for the other.
+EVENT_STUDY_MODEL_MARKET_ADJUSTED = "market_adjusted"
+EVENT_STUDY_MODEL_MEAN_ADJUSTED = "mean_adjusted"
+EVENT_STUDY_MODELS = (
+    EVENT_STUDY_MODEL_MARKET_ADJUSTED, EVENT_STUDY_MODEL_MEAN_ADJUSTED,
+)
+
+
+def _validate_event_study_config() -> None:
+    """Import-time guard: the study windows must be coherent."""
+    if EVENT_STUDY_MIN_BASELINE_SESSIONS > EVENT_STUDY_BASELINE_SESSIONS:
+        raise ValueError(
+            "the minimum baseline cannot exceed the requested baseline window"
+        )
+    if EVENT_STUDY_MIN_BASELINE_SESSIONS < 2:
+        raise ValueError("a baseline needs at least two sessions to have dispersion")
+    if EVENT_STUDY_BASELINE_GAP_SESSIONS < 0:
+        raise ValueError("the pre-event gap cannot be negative")
+    for horizon in EVENT_STUDY_HORIZONS:
+        if horizon != "intraday" and horizon not in LABEL_HORIZON_SESSIONS:
+            raise ValueError(
+                f"event-study horizon {horizon!r} is not a declared label horizon — "
+                f"a study and a training label must describe the same window"
+            )
+
+
+_validate_event_study_config()
