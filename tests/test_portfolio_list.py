@@ -56,9 +56,13 @@ class TestPortfolioList(unittest.TestCase):
     def test_source_literals_all_have_separators(self) -> None:
         """Catch the typo at its source, not just in its result.
 
-        A merged pair that happened to be <=5 chars would slip past the
-        length check, so this reads the list's source text and requires a
-        comma between consecutive string literals.
+        The length check only catches merges longer than 5 chars
+        ("QCOM" + "CRWV" -> QCOMCRWV). A short merge slips past it:
+        "V" + "BE" -> VBE is 3 chars, so it passes both the length and
+        format checks while being just as broken — no such ticker exists,
+        and fetch_portfolio logs and skips it silently.
+
+        Reading the source text catches a merge at any length.
         """
         source = (Path(__file__).resolve().parent.parent / "fetch_data.py").read_text(
             encoding="utf-8"
