@@ -1231,6 +1231,27 @@ EVENT_MEMORY_CHART_FIELDS = (
 # remembered response and a fresh measurement always describe the same window.
 EVENT_MEMORY_RESPONSE_HORIZONS = ("1d", "5d", "20d", "60d")
 
+# Comparison scale per chart field: roughly the magnitude at which a
+# difference becomes meaningful. Similarity divides the gap by this rather
+# than by the values themselves, because a purely relative measure collapses
+# near zero — two nearly-flat slopes (+0.0012 vs -0.0009) are both "flat",
+# yet relative difference calls them 0.0 similar and drags a 0.97 match below
+# the retrieval bar. Fields absent here fall back to relative comparison.
+EVENT_MEMORY_FIELD_SCALE = {
+    "close": 20.0,              # price levels differ hugely across tickers
+    "rsi": 20.0,                # 20 RSI points is a regime apart
+    "volatility": 0.01,         # 1pp of daily vol is a different character
+    "volume_ratio_20d": 0.5,
+    "atr_14": 2.0,
+    "trend_slope_60d": 0.25,
+    "trend_vs_20d_mean": 0.03,
+    "change_5d": 0.03,
+    "change_20d": 0.08,
+    "change_60d": 0.15,
+    "price_vs_ma_50": 0.08,
+    "price_vs_ma_200": 0.15,
+}
+
 # Analog retrieval. Similarity is computed over the chart-state fields above,
 # and a match must clear this bar before it is offered as a comparable.
 EVENT_MEMORY_MIN_SIMILARITY = 0.7
@@ -1258,6 +1279,12 @@ def _validate_event_memory_config() -> None:
         )
     if not EVENT_MEMORY_CHART_FIELDS:
         raise ValueError("a memory without chart state cannot be compared to the present")
+    for name, scale in EVENT_MEMORY_FIELD_SCALE.items():
+        if scale <= 0:
+            raise ValueError(
+                f"EVENT_MEMORY_FIELD_SCALE[{name!r}] must be positive — a zero "
+                f"scale would make every difference infinite"
+            )
 
 
 _validate_event_memory_config()

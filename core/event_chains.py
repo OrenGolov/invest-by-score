@@ -230,6 +230,11 @@ def build_chains(
     ordered.sort(key=lambda pair: (pair[0], str(getattr(pair[1], "event_id", ""))))
 
     chains: list[EventChain] = []
+    # Per key: (chain, initial_stamp, previous_event). The window is measured
+    # from the INITIAL claim so a chain cannot grow without bound, but each
+    # link is classified against the PREVIOUS one so the story is read as a
+    # sequence. Classifying everything against the initial claim made a
+    # corroborated reversal look like a second reversal.
     open_chains: dict[tuple[str, str], tuple[EventChain, Any, Any]] = {}
 
     for stamp, event in ordered:
@@ -240,9 +245,9 @@ def build_chains(
         existing = open_chains.get(key)
 
         if existing is not None:
-            chain, initial_event, initial_stamp = existing
+            chain, initial_stamp, previous_event = existing
             if (stamp - initial_stamp).days <= window_days:
-                link_type, reason = classify_link(initial_event, event)
+                link_type, reason = classify_link(previous_event, event)
                 chain.links.append(ChainLink(
                     event_id=str(getattr(event, "event_id", "")),
                     published_time=str(getattr(event, "published_time", "")),
@@ -252,6 +257,7 @@ def build_chains(
                     reason=reason,
                 ))
                 chain.status = _settle_status(chain.links)
+                open_chains[key] = (chain, initial_stamp, event)
                 continue
 
         chain = EventChain(
@@ -270,7 +276,7 @@ def build_chains(
             )],
         )
         chains.append(chain)
-        open_chains[key] = (chain, event, stamp)
+        open_chains[key] = (chain, stamp, event)
 
     return chains
 

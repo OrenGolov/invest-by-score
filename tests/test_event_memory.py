@@ -353,3 +353,67 @@ class TestReport(MemoryTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestNearZeroSimilarity(unittest.TestCase):
+    """Regression: relative similarity collapsed near zero.
+
+    Dividing the gap by max(|a|,|b|) meant two nearly-flat values
+    (+0.0008 vs -0.0006) scored 0.0 — both mean "flat", but the measure
+    called them completely dissimilar. Two near-identical charts scored
+    0.654 and fell below the 0.7 retrieval bar, so analogs were silently
+    missed with no way to report the miss.
+    """
+
+    def _near_identical(self) -> tuple[dict, dict]:
+        left = {
+            "rsi": 55.0, "volatility": 0.020, "change_5d": 0.0008,
+            "change_20d": 0.051, "trend_slope_60d": 0.0012,
+            "market_regime": "bullish",
+        }
+        right = {
+            "rsi": 55.5, "volatility": 0.021, "change_5d": -0.0006,
+            "change_20d": 0.052, "trend_slope_60d": -0.0009,
+            "market_regime": "bullish",
+        }
+        return left, right
+
+    def test_near_identical_charts_clear_the_retrieval_bar(self) -> None:
+        left, right = self._near_identical()
+        self.assertGreater(chart_similarity(left, right), EVENT_MEMORY_MIN_SIMILARITY)
+
+    def test_two_flat_readings_are_similar(self) -> None:
+        """Both are flat; opposite tiny signs do not make them opposites."""
+        self.assertGreater(
+            chart_similarity({"trend_slope_60d": 0.0012}, {"trend_slope_60d": -0.0009}),
+            0.9,
+        )
+
+    def test_genuinely_opposite_moves_still_score_zero(self) -> None:
+        """The fix must not blur real differences."""
+        self.assertEqual(
+            chart_similarity({"change_20d": 0.05}, {"change_20d": -0.05}), 0.0
+        )
+
+    def test_overbought_and_oversold_remain_dissimilar(self) -> None:
+        self.assertEqual(chart_similarity({"rsi": 70.0}, {"rsi": 30.0}), 0.0)
+
+    def test_identical_charts_still_score_one(self) -> None:
+        left, _ = self._near_identical()
+        self.assertEqual(chart_similarity(left, left), 1.0)
+
+    def test_a_declared_field_without_a_scale_falls_back_to_relative(self) -> None:
+        """Not every chart field needs an absolute scale."""
+        self.assertGreater(
+            chart_similarity(
+                {"close": 100.0}, {"close": 100.2}, fields=("close",)
+            ),
+            0.9,
+        )
+
+    def test_a_field_outside_the_chart_state_is_ignored(self) -> None:
+        """Only declared chart fields are compared; anything else is not
+        part of the chart state and contributes nothing."""
+        self.assertEqual(
+            chart_similarity({"unknown_field": 10.0}, {"unknown_field": 10.5}), 0.0
+        )

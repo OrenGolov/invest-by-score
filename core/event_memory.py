@@ -56,6 +56,7 @@ from typing import Any, Iterable
 
 from core.config import (
     EVENT_MEMORY_CHART_FIELDS,
+    EVENT_MEMORY_FIELD_SCALE,
     EVENT_MEMORY_MIN_ANALOGS,
     EVENT_MEMORY_MIN_SIMILARITY,
     EVENT_MEMORY_RESPONSE_HORIZONS,
@@ -274,10 +275,15 @@ def chart_similarity(
 ) -> float:
     """Similarity between two chart states, in [0, 1].
 
-    Compared field by field on a scale-free basis, so a $500 stock and a $50
-    stock with the same shape are comparable. Fields absent from either side
-    are skipped rather than treated as matching — a missing field is not
-    agreement.
+    Compared field by field. Fields with a declared scale in
+    `EVENT_MEMORY_FIELD_SCALE` use it; the rest fall back to a relative
+    comparison, which keeps a $500 stock and a $50 stock with the same shape
+    comparable.
+
+    Only the fields in `fields` are compared — a value outside that list is
+    not part of the chart state and is ignored. Fields absent from either
+    side are skipped rather than treated as matching, because a missing
+    field is not agreement.
     """
     scores: list[float] = []
     for field_name in fields:
@@ -291,7 +297,13 @@ def chart_similarity(
             a_value, b_value = float(a), float(b)
         except (TypeError, ValueError):
             continue
-        scale = max(abs(a_value), abs(b_value), 1e-9)
+        # Absolute scale where one exists, relative otherwise. A purely
+        # relative measure collapses near zero: two nearly-flat slopes are
+        # both "flat", but relative difference calls them 0.0 similar and
+        # drags an otherwise-0.97 match below the retrieval bar.
+        scale = EVENT_MEMORY_FIELD_SCALE.get(field_name)
+        if scale is None:
+            scale = max(abs(a_value), abs(b_value), 1e-9)
         scores.append(max(0.0, 1.0 - abs(a_value - b_value) / scale))
     return round(sum(scores) / len(scores), 6) if scores else 0.0
 

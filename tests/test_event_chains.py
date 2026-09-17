@@ -316,3 +316,53 @@ class TestReport(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSequentialClassification(unittest.TestCase):
+    """Regression: links were classified against the INITIAL claim.
+
+    A story reversed and then independently corroborated recorded TWO
+    reversals instead of a reversal plus a confirmation of it — so a
+    well-corroborated reversal was indistinguishable from a single
+    unconfirmed flip, and `contested` could never arise that way.
+    """
+
+    def test_a_corroborated_reversal_records_a_confirmation(self) -> None:
+        chain = build_chains([
+            _event(1, 5, EVENT_DIRECTION_NEGATIVE),
+            _event(2, 7, EVENT_DIRECTION_POSITIVE),
+            _event(3, 9, EVENT_DIRECTION_POSITIVE, source="bloomberg"),
+        ])[0]
+        types = [link.link_type for link in chain.links]
+        self.assertEqual(
+            types, [CHAIN_LINK_INITIAL, CHAIN_LINK_REVERSAL, CHAIN_LINK_CONFIRMATION]
+        )
+
+    def test_a_corroborated_reversal_is_contested(self) -> None:
+        chain = build_chains([
+            _event(1, 5, EVENT_DIRECTION_NEGATIVE),
+            _event(2, 7, EVENT_DIRECTION_POSITIVE),
+            _event(3, 9, EVENT_DIRECTION_POSITIVE, source="bloomberg"),
+        ])[0]
+        self.assertEqual(chain.status, CHAIN_STATUS_CONTESTED)
+
+    def test_a_flip_back_records_a_second_reversal(self) -> None:
+        """Negative -> positive -> negative really is two reversals."""
+        chain = build_chains([
+            _event(1, 5, EVENT_DIRECTION_NEGATIVE),
+            _event(2, 7, EVENT_DIRECTION_POSITIVE),
+            _event(3, 9, EVENT_DIRECTION_NEGATIVE),
+        ])[0]
+        self.assertEqual(chain.link_counts()[CHAIN_LINK_REVERSAL], 2)
+
+    def test_the_window_is_still_measured_from_the_initial_claim(self) -> None:
+        """Classification moved to the previous link; the window did not.
+
+        Otherwise a slowly-evolving story could extend a chain indefinitely,
+        one link at a time.
+        """
+        chains = build_chains([
+            _event(1, 1), _event(2, 10, source="bloomberg"),
+            _event(3, 19, source="ft"),
+        ])
+        self.assertGreater(len(chains), 1)
