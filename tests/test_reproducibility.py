@@ -39,6 +39,7 @@ from core.reproducibility import (
 )
 from core.training import BASELINE_ESTIMATORS, train_baseline
 from core.training_dataset import build_training_dataset
+from tests._dataset_fixture import shared_dataset
 
 _FIXTURE = pathlib.Path(__file__).resolve().parent.parent / "data" / "NVDA_5y_1d.parquet"
 _FOLDS = {"fold_sessions": 60, "embargo_sessions": 60, "holdout_sessions": 60}
@@ -53,12 +54,7 @@ _STOCHASTIC = ("random_forest", "gradient_boosting")
 class ReproducibilityTestCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        if not _FIXTURE.exists():
-            raise unittest.SkipTest(f"fixture {_FIXTURE.name} not available")
-        frame = pd.read_parquet(_FIXTURE)
-        frame.index = pd.DatetimeIndex(frame.index)
-        times = [ts.strftime("%Y-%m-%d %H:%M:%S") for ts in frame.index[-700:-400]]
-        cls.dataset = build_training_dataset({"NVDA": times}, {"NVDA": frame})
+        cls.dataset = shared_dataset(-700, -400)
 
 
 class TestGuaranteeHolds(ReproducibilityTestCase):

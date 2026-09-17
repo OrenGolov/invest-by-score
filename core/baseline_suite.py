@@ -38,7 +38,7 @@ a promotion can only ever be backed by a real measured comparison.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Any, Iterable
+from typing import Any
 
 from core.config import (
     BASELINE_MIN_WINNING_FOLD_RATIO,

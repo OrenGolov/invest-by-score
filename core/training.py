@@ -53,8 +53,10 @@ from typing import Any, Iterable
 import numpy as np
 
 from core.config import (
+    BACKTEST_EMBARGO_SESSIONS,
+    BACKTEST_FOLD_SESSIONS,
+    BACKTEST_HOLDOUT_SESSIONS,
     TRAINING_ARTIFACT_HASH_BASIS,
-    TRAINING_BASELINE_FAMILIES,
     TRAINING_DEFAULT_SEED,
     TRAINING_PIPELINE_VERSION,
 )
@@ -377,9 +379,22 @@ def train_baseline(
     )
     targets = np.array([float(row.forward_return) for row in rows], dtype=float)
 
-    geometry = build_walk_forward_folds(
-        len(rows), fold_sessions, embargo_sessions, holdout_sessions
-    )
+    try:
+        geometry = build_walk_forward_folds(
+            len(rows), fold_sessions, embargo_sessions, holdout_sessions
+        )
+    except ValueError as exc:
+        # Thin history is an ordinary, expected condition — recent listings
+        # and short cached frames hit it constantly. Raise it as a
+        # TrainingError so a caller's `except TrainingError` sees it, and
+        # name the shortfall rather than leaving a bare geometry message.
+        raise TrainingError(
+            f"{estimator!r} cannot be trained on {len(rows)} rows: {exc}. "
+            f"A walk-forward fit needs at least "
+            f"{2 * (fold_sessions or BACKTEST_FOLD_SESSIONS) + (embargo_sessions or BACKTEST_EMBARGO_SESSIONS) + (holdout_sessions or BACKTEST_HOLDOUT_SESSIONS)} "
+            f"rows at this geometry — a recent listing or a short cached frame "
+            f"will not have them."
+        ) from exc
 
     fold_results: list[FoldResult] = []
     parameters_by_fold: list[dict[str, Any]] = []

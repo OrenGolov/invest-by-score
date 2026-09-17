@@ -56,9 +56,8 @@ Pure and deterministic: no wall-clock, no randomness, no provider reads.
 from __future__ import annotations
 
 import json
-import math
 from dataclasses import asdict, dataclass, field
-from typing import Any, Iterable, Sequence
+from typing import Any, Sequence
 
 import numpy as np
 
@@ -175,6 +174,15 @@ def fit_calibration(
             f"{CALIBRATION_MIN_SAMPLES}-observation minimum — there is no "
             f"honest probability to expose, so calibration is refused"
         )
+    if not np.all(np.isfinite(scores)):
+        count = int((~np.isfinite(scores)).sum())
+        raise CalibrationError(
+            f"{count} of {scores.size} predictions are NaN or infinite — a "
+            f"calibration fitted on them would be meaningless, and the raw "
+            f"library error would not say so"
+        )
+    if not np.all(np.isfinite(np.asarray(actuals, dtype=float))):
+        raise CalibrationError("actuals contain NaN or infinite values")
     if np.unique(outcomes).size < 2:
         raise CalibrationError(
             "all outcomes are identical — a calibration fitted on a single "

@@ -144,6 +144,11 @@ class TrainingDataset:
     dataset_hash: str = ""
     feature_set_hash: str = ""
     versions: dict[str, str] = field(default_factory=dict)
+    # V6 survivorship verdict for the tickers this dataset was built from.
+    # A single-ticker dataset cannot be survivorship-biased in the usual
+    # sense, but a MULTI-ticker one silently can: every name someone types
+    # today is a name that survived to be typed.
+    survivorship: dict[str, Any] = field(default_factory=dict)
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -160,6 +165,7 @@ class TrainingDataset:
             "excluded": list(self.excluded),
             "versions": dict(self.versions),
             "rows": [row.to_dict() for row in self.rows],
+            "survivorship": dict(self.survivorship),
         }
 
     def report(self) -> dict[str, Any]:
@@ -178,6 +184,7 @@ class TrainingDataset:
             "excluded_count": len(self.excluded),
             "exclusion_reasons": dict(sorted(reasons.items())),
             "versions": dict(self.versions),
+            "survivorship": dict(self.survivorship),
         }
 
 
@@ -343,6 +350,7 @@ def build_training_dataset(
     target_horizon: str = TRAINING_DEFAULT_TARGET_HORIZON,
     registry: FeatureRegistry | None = None,
     model_family: str | None = None,
+    require_survivorship_safe: bool = False,
 ) -> TrainingDataset:
     """Build the official training dataset. The only sanctioned generator.
 
@@ -433,6 +441,9 @@ def build_training_dataset(
 
     rows.sort(key=lambda entry: (entry.prediction_time, entry.ticker))
     feature_digest = feature_set_hash(declared, active)
+    survivorship = _survivorship_verdict(
+        sorted(prediction_times_by_ticker), rows, require_survivorship_safe
+    )
     return TrainingDataset(
         rows=rows,
         feature_names=sorted({str(name) for name in declared}),
@@ -440,6 +451,7 @@ def build_training_dataset(
         excluded=excluded,
         dataset_hash=dataset_hash(rows, feature_digest, target_horizon),
         feature_set_hash=feature_digest,
+        survivorship=survivorship,
         versions={
             "dataset": TRAINING_DATASET_VERSION,
             "schema": TRAINING_DATASET_SCHEMA_VERSION,
@@ -449,6 +461,73 @@ def build_training_dataset(
             "ensemble": ENSEMBLE_VERSION,
         },
     )
+
+
+def _survivorship_verdict(
+    tickers: list[str],
+    rows: list[TrainingRow],
+    require_safe: bool,
+) -> dict[str, Any]:
+    """Judge a dataset's ticker set against the V6 point-in-time ledger.
+
+    The backtest engine already enforces this; the dataset builder did not,
+    so a MULTI-ticker training set could silently inherit survivorship bias.
+    Every ticker someone types today is one that survived to be typed, and a
+    model trained only on survivors learns that companies do not fail.
+
+    Single-ticker datasets are reported `single_ticker`: the bias is a
+    property of universe CONSTRUCTION, and a one-name set makes no claim
+    about a universe. Fail-closed when `require_safe` is set.
+    """
+    from core.universe import (
+        STATUS_POINT_IN_TIME_COMPLETE,
+        latest_entries_by_ticker,
+        universe_survivorship_status,
+    )
+
+    if len(tickers) <= 1:
+        return {
+            "status": "single_ticker",
+            "tickers": len(tickers),
+            "detail": (
+                "a one-ticker dataset makes no universe claim, so survivorship "
+                "bias does not apply; it does apply as soon as a second ticker "
+                "is added"
+            ),
+        }
+
+    earliest = rows[0].prediction_time if rows else None
+    entries = latest_entries_by_ticker()
+    if not entries:
+        verdict = {
+            "status": "unverifiable",
+            "tickers": len(tickers),
+            "detail": (
+                "the point-in-time universe ledger (data/universe.jsonl) is "
+                "empty, so this ticker set cannot be checked for survivorship "
+                "bias — seed it with seed_portfolio_universe()"
+            ),
+        }
+    else:
+        status = universe_survivorship_status(list(tickers), entries, earliest)
+        verdict = {
+            "status": status,
+            "tickers": len(tickers),
+            "as_of": earliest,
+            "detail": (
+                "ticker set is point-in-time complete at the earliest "
+                "prediction time"
+                if status == STATUS_POINT_IN_TIME_COMPLETE
+                else f"ticker set is {status} against the universe ledger"
+            ),
+        }
+
+    if require_safe and verdict["status"] != STATUS_POINT_IN_TIME_COMPLETE:
+        raise TrainingDatasetError(
+            f"refusing to build a multi-ticker dataset that is not "
+            f"survivorship-safe: {verdict['detail']}"
+        )
+    return verdict
 
 
 def persist_training_dataset(
