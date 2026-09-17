@@ -56,3 +56,6 @@ jobs:
 
       - name: E1 event-contract drift gate
         run: python scripts/check_event_contract.py
+
+      - name: E2 entity-resolution drift gate
+        run: python scripts/check_entity_resolution.py

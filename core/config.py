@@ -946,3 +946,65 @@ def _validate_event_config() -> None:
 
 
 _validate_event_config()
+
+
+# --- Entity resolution (E2) ------------------------------------------------------
+# "Bad resolution must not silently enter training."
+#
+# The N1 relevance heuristic returns 0.0 both for an article that is clearly
+# about another company AND for one whose entity could not be resolved at
+# all. Those are different failures: the first is a correct exclusion, the
+# second is an UNKNOWN that must be visible. E2 separates them.
+ENTITY_RESOLVER_VERSION = "entity-resolver-v1"
+
+# How an entity mention was matched, strongest first. The method is recorded
+# on every resolution so a downstream consumer can see WHY a match was made,
+# not merely that it was.
+ENTITY_MATCH_TICKER = "ticker"          # exact symbol, provider-tagged or in text
+ENTITY_MATCH_LEGAL_NAME = "legal_name"  # full registered name
+ENTITY_MATCH_ALIAS = "alias"            # a curated alias of the company
+ENTITY_MATCH_EXECUTIVE = "executive"    # a named officer speaking for the company
+ENTITY_MATCH_NONE = "none"              # nothing matched
+ENTITY_MATCH_AMBIGUOUS = "ambiguous"    # matched more than one entity
+ENTITY_MATCH_METHODS = (
+    ENTITY_MATCH_TICKER, ENTITY_MATCH_LEGAL_NAME, ENTITY_MATCH_ALIAS,
+    ENTITY_MATCH_EXECUTIVE, ENTITY_MATCH_NONE, ENTITY_MATCH_AMBIGUOUS,
+)
+
+# Confidence per match method. An executive mention is weaker evidence than a
+# ticker: a CEO can be quoted about the industry rather than the company.
+ENTITY_MATCH_CONFIDENCE = {
+    ENTITY_MATCH_TICKER: 1.0,
+    ENTITY_MATCH_LEGAL_NAME: 0.9,
+    ENTITY_MATCH_ALIAS: 0.8,
+    ENTITY_MATCH_EXECUTIVE: 0.6,
+    ENTITY_MATCH_AMBIGUOUS: 0.0,
+    ENTITY_MATCH_NONE: 0.0,
+}
+
+# Below this, a resolution is not usable as training evidence. It is still
+# RECORDED — the rejection is data about coverage — but it cannot silently
+# become a labelled example.
+ENTITY_MIN_TRAINING_CONFIDENCE = 0.6
+
+# Tickers short enough to collide with ordinary words. A bare "V" or "BE" in
+# a headline is not evidence about Visa or Bloom Energy, so these require a
+# name or alias match rather than a bare symbol token.
+ENTITY_AMBIGUOUS_TICKER_MAX_LENGTH = 2
+
+
+def _validate_entity_config() -> None:
+    """Import-time guard: the resolver vocabularies must stay coherent."""
+    missing = set(ENTITY_MATCH_METHODS) - set(ENTITY_MATCH_CONFIDENCE)
+    if missing:
+        raise ValueError(f"match methods without a confidence: {sorted(missing)}")
+    for method in (ENTITY_MATCH_NONE, ENTITY_MATCH_AMBIGUOUS):
+        if ENTITY_MATCH_CONFIDENCE[method] != 0.0:
+            raise ValueError(f"{method!r} must carry zero confidence")
+    if not 0.0 < ENTITY_MIN_TRAINING_CONFIDENCE <= 1.0:
+        raise ValueError("ENTITY_MIN_TRAINING_CONFIDENCE must be in (0, 1]")
+    if ENTITY_AMBIGUOUS_TICKER_MAX_LENGTH < 1:
+        raise ValueError("the ambiguous-ticker length guard must be positive")
+
+
+_validate_entity_config()

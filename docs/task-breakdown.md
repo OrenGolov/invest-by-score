@@ -1469,6 +1469,52 @@ rather than an error.
 - Acceptance: 40 tests in `tests/test_event_contract.py`. Full suite:
   913/913 pass, ten gates green.
 
+### E2. Entity resolution ✓ DONE
+
+Implemented 2026-09-17 in `core/entity_resolution.py` (`entity-resolver-v1`).
+
+**The defect it fixes.** The N1 relevance heuristic returned `0.0` for two
+very different situations: an article correctly identified as being about
+another company, and an article about the right company that the resolver
+simply could not attribute. Collapsing them made coverage gaps invisible —
+"we have no news about this company" was indistinguishable from "we have
+news we could not attribute".
+
+- **Five match methods with explicit confidence:** ticker (1.0), legal_name
+  (0.9), alias (0.8), executive (0.6), plus `ambiguous` and `none` at 0.0.
+  Every resolution records WHY it decided, not only what it decided.
+- **An executive mention now resolves** ("Jensen Huang announces a GPU" →
+  NVDA), but at 0.6 — deliberately weaker than a direct match, because a CEO
+  is frequently quoted about the industry, a rival or the economy rather
+  than their own company.
+- **Ambiguity is a resolution, not an error.** Text naming two registered
+  companies resolves to `ambiguous` with zero confidence and names the other
+  candidates, rather than being arbitrarily assigned.
+- **Short tickers require a name.** A bare "V" or "BE" is an ordinary
+  English word, so tickers at or below two characters must match by name or
+  alias — the same class of error that produced `QCOMCRWV` in the portfolio
+  list.
+- **Phrase matching respects word boundaries:** "Metaverse" is not "Meta",
+  and "Advanced Micro Devices" does not match those three words scattered
+  through a sentence.
+- **A registry, not a regex.** Aliases and executives are curated data with
+  a visible owner, so a wrong alias is a one-line fix rather than a buried
+  pattern. `registry_problems` refuses a shared alias, which would otherwise
+  make every mention of it ambiguous.
+- **Wired into E1.** Every event carries its `entity_resolution`, and
+  `events_from_news_snapshot(..., require_resolved_entity=True)` drops
+  unresolved events before they can become training rows. An event with NO
+  recorded resolution is treated as unresolved — an absent resolution is the
+  most silent failure of all.
+- **Rejections are recorded, not discarded.** `resolution_report` separates
+  `none` from `ambiguous` because they call for different fixes: a registry
+  gap versus genuinely hard source material.
+- CI drift gate: `scripts/check_entity_resolution.py`. Verified non-vacuous
+  by two sabotages — removing the short-ticker guard and removing the
+  ambiguity check both fail it.
+- Acceptance: 41 tests in `tests/test_entity_resolution.py`. Full suite:
+  954/954 pass, eleven gates green.
+
 ---
 
 ## Sprint R — Portfolio Risk Context (completing the fail-closed system)

@@ -99,6 +99,11 @@ class Event:
     confidence: float = 0.0
     event_id: str = ""
     schema_version: str = EVENT_SCHEMA_VERSION
+    # E2: how this event's entity was resolved. Recorded so a consumer can
+    # see WHY the event was attributed to this entity — and so an event that
+    # failed resolution is visibly different from one that resolved cleanly,
+    # rather than both arriving as ordinary events.
+    entity_resolution: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.effective_time is None:
@@ -145,6 +150,16 @@ class Event:
         on an effect it has not been told about.
         """
         return str(self.published_time) <= str(as_of)
+
+    def is_entity_resolved(self) -> bool:
+        """Whether the entity attribution is strong enough for training.
+
+        An event with no recorded resolution is treated as UNRESOLVED rather
+        than assumed good: E2's rule is that bad resolution must not enter
+        training silently, and an absent resolution is the most silent case
+        of all.
+        """
+        return bool((self.entity_resolution or {}).get("training_eligible"))
 
     def is_backdated(self) -> bool:
         """Whether the effect predates its publication.
@@ -341,9 +356,20 @@ def event_from_article(
     )
 
 
+def _resolution_payload(article: dict, entity: str) -> dict[str, Any]:
+    """Resolve an article's entity and record the verdict (E2)."""
+    from core.entity_resolution import resolve_article
+
+    resolution = resolve_article(article, entity)
+    payload = resolution.to_dict()
+    payload["training_eligible"] = resolution.is_training_eligible()
+    return payload
+
+
 def events_from_news_snapshot(
     snapshot: dict,
     effective_times: dict[str, str] | None = None,
+    require_resolved_entity: bool = False,
 ) -> list[Event]:
     """Adapt every article in an N1 news snapshot into canonical events.
 
@@ -371,6 +397,13 @@ def events_from_news_snapshot(
         event = event_from_article(
             article, entity, source, effective_times.get(record_id)
         )
+        event.entity_resolution = _resolution_payload(article, entity)
+        if require_resolved_entity and not event.is_entity_resolved():
+            # Fail-closed mode for training data: an event whose entity could
+            # not be resolved is dropped rather than labelled. The resolution
+            # verdict stays available via resolve_article for coverage
+            # reporting, so the gap is measurable, not merely absent.
+            continue
         if status == "CONTRADICTORY":
             event.direction = EVENT_DIRECTION_CONTRADICTORY
             event.event_id = event.canonical_id()
