@@ -710,3 +710,53 @@ FORECAST_TARGETS = (
 # explicit, honest value — never a missing field — and M6 will refuse to
 # expose an uncalibrated probability as if it were calibrated.
 CALIBRATION_UNCALIBRATED = "uncalibrated"
+
+
+# --- Calibration and uncertainty (M6 / board M4) ---------------------------------
+# "Never expose arbitrary probability numbers as if they were calibrated."
+# A raw model score is not a probability. It becomes one only by being mapped
+# through a calibration fitted on VALIDATION folds, and that map is versioned
+# and travels with the artifact.
+CALIBRATION_VERSION = "calibration-v1"
+
+# Isotonic preferred; Platt (logistic) fallback for small folds, because
+# isotonic regression overfits badly on thin data.
+CALIBRATION_METHOD_ISOTONIC = "isotonic"
+CALIBRATION_METHOD_PLATT = "platt"
+CALIBRATION_METHODS = (CALIBRATION_METHOD_ISOTONIC, CALIBRATION_METHOD_PLATT)
+
+# Below this many out-of-sample observations, isotonic is not trustworthy and
+# the fitter falls back to Platt. Recorded in the artifact so a reader knows
+# which method actually ran and why.
+CALIBRATION_MIN_ISOTONIC_SAMPLES = 100
+
+# A calibration fitted on fewer than this many observations is refused
+# outright — there is no honest probability to expose.
+CALIBRATION_MIN_SAMPLES = 30
+
+# Reliability-curve bin count. Ten deciles is the conventional default and
+# keeps per-bin counts meaningful at our sample sizes.
+CALIBRATION_RELIABILITY_BINS = 10
+
+# Prediction intervals are reported at this level. 0.80 (10th-90th) rather
+# than 0.95: at fold counts this small, a 95% band derived from fold
+# dispersion would imply precision the data cannot support.
+PREDICTION_INTERVAL_LEVEL = 0.80
+
+
+def _validate_calibration_config() -> None:
+    """Import-time guard: the calibration thresholds must be coherent."""
+    if CALIBRATION_MIN_SAMPLES < 2:
+        raise ValueError("CALIBRATION_MIN_SAMPLES must allow at least two observations")
+    if CALIBRATION_MIN_ISOTONIC_SAMPLES < CALIBRATION_MIN_SAMPLES:
+        raise ValueError(
+            "CALIBRATION_MIN_ISOTONIC_SAMPLES must be >= CALIBRATION_MIN_SAMPLES — "
+            "the isotonic threshold cannot sit below the refusal threshold"
+        )
+    if not 0.0 < PREDICTION_INTERVAL_LEVEL < 1.0:
+        raise ValueError("PREDICTION_INTERVAL_LEVEL must be strictly between 0 and 1")
+    if CALIBRATION_RELIABILITY_BINS < 2:
+        raise ValueError("CALIBRATION_RELIABILITY_BINS must be at least 2")
+
+
+_validate_calibration_config()

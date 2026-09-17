@@ -113,6 +113,12 @@ class FoldResult:
     train_end_time: str
     validation_start_time: str
     metrics: dict[str, float] = field(default_factory=dict)
+    # M6: calibration must be fitted on VALIDATION folds only, so the raw
+    # out-of-sample predictions and their actuals are retained per fold.
+    # Without them a calibration map could only be fitted in-sample, which
+    # is exactly the mistake calibration exists to avoid.
+    predictions: list[float] = field(default_factory=list)
+    actuals: list[float] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -401,6 +407,8 @@ def train_baseline(
             train_end_time=rows[train_end].prediction_time,
             validation_start_time=rows[validation_start].prediction_time,
             metrics=_metrics(validation_y, predicted),
+            predictions=[round(float(value), 10) for value in predicted],
+            actuals=[round(float(value), 10) for value in validation_y],
         ))
 
     if not fold_results:

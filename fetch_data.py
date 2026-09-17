@@ -77,7 +77,6 @@ PORTFOLIO_TICKERS = [
     "AMD",
     "INTC",
     "IREN",
-    "QCOM",
     "BE",
     "FTNT",
     "CRWD",
@@ -95,7 +94,6 @@ PORTFOLIO_TICKERS = [
     "RGTI",
     "IONQ",
     "NBIS",
-    "CRWV",
     "GLW",
     "NOK",
     "LRCX",
@@ -111,6 +109,8 @@ PORTFOLIO_TICKERS = [
     "KEEL",
     "OUST",
     "VST",
+    "QCOM",
+    "CRWV",
     "TER",
     "ARM",
     "ASML",
@@ -126,8 +126,11 @@ PORTFOLIO_TICKERS = [
     "AXON",
     "DDOG",
     "WBD",
-    "CSCO"
-
+    "CSCO",
+    "OKLO",
+    "KO",
+    "SNOW",
+    "SKHY",
 ]
 
 

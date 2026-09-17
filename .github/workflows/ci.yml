@@ -47,3 +47,6 @@ jobs:
 
       - name: M4 baseline-suite drift gate
         run: python scripts/check_baseline_suite.py
+
+      - name: M6 calibration drift gate
+        run: python scripts/check_calibration.py

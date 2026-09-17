@@ -1268,23 +1268,59 @@ the rest plus the rules that make them mean something.
 `models/manifest.json` was regenerated — the committed-manifest drift test
 caught the hash change immediately, which is the check working as designed.
 
-### M4. Calibration and score mapping
+### M4. Calibration and score mapping ✓ DONE
 
-- Calibrate raw model output to probabilities on validation folds only
-  (isotonic preferred, Platt fallback for small folds); calibration map is
-  versioned and shipped with the artifact.
-- Documented, monotone mapping calibrated-probability → 0–10 score with
-  confidence/uncertainty band derived from fold-wise dispersion. The 0–10
-  score remains *not* a probability of profit (design-doc language).
-- The evidence-confidence-v2 model (current) is retained as the
-  no-model/uncertainty overlay: final confidence = min(model confidence,
-  evidence confidence) until V-series evidence justifies replacement — the
-  replacement itself is a gated promotion, not a cutover.
-- Acceptance: calibration reliability curve reported per fold; mapping
-  monotonicity unit-tested; a model prediction without calibration artifacts
-  is rejected.
+> Board M4 and master-context M6 are the same task; this entry satisfies
+> both. Implemented 2026-09-17 in `core/calibration.py` (`calibration-v1`).
 
-### M5. Promotion gates and drift hooks
+The binding rule: **never expose arbitrary probability numbers as if they
+were calibrated.** A raw model score is not a probability — `0.7` out of a
+booster means nothing until mapped through a calibration fitted on held-out
+data and measured against what happened.
+
+- **Enforced in code, not in a comment.** `calibrated_probability(score,
+  None)` raises `UncalibratedProbabilityError`. There is no passthrough, so
+  an uncalibrated number cannot reach a caller by accident.
+- **Isotonic preferred, Platt below `CALIBRATION_MIN_ISOTONIC_SAMPLES`**
+  (100), because isotonic overfits thin samples. The substitution is
+  RECORDED in `fallback_reason` so a reader never guesses which ran. Below
+  `CALIBRATION_MIN_SAMPLES` (30), or on a single outcome class, calibration
+  is refused outright — a map nobody should trust is worse than a refusal.
+- **Measured out-of-fold.** This is the part that matters. Measuring a map on
+  the data it was fitted to reports in-sample calibration, which is
+  near-perfect by construction: the first real run returned ECE exactly
+  `0.0`, which was a red flag rather than a success. `_out_of_fold_probabilities`
+  now fits on the other folds and scores each held-out fold, so no
+  observation is scored by a map that saw it. Runs with fewer than three
+  folds fall back to in-sample and say so via `measurement_basis` rather
+  than reporting flattering numbers silently.
+- **Monotone by construction** in both methods — a higher raw score can never
+  yield a lower probability — and isotonic clamps outside its fitted range
+  rather than extrapolating into scores it never saw.
+- **Every M6 requirement:** `fit_calibration`/`apply` (probability
+  calibration), `reliability_curve`, `brier_score`, `log_loss`,
+  `expected_calibration_error` + `max_calibration_error`,
+  `prediction_interval`, `CalibrationReport.uncertainty`, `fold_dispersion`.
+  Empty reliability bins are omitted, not zeroed: no observations is not the
+  same as never happened.
+- **M3 change:** `FoldResult` now retains each fold's out-of-sample
+  predictions and actuals. Calibration cannot be fitted on validation folds
+  if the validation predictions were discarded.
+- CI drift gate: `scripts/check_calibration.py` (~3s). Verified non-vacuous
+  by two sabotages: letting an uncalibrated score pass through, and
+  switching the measurement back to in-sample. Both fail the gate with
+  precise messages.
+- Acceptance: 43 tests in `tests/test_calibration.py`. Full suite: 799/799
+  pass.
+
+Honest first numbers on a real gradient_boosting run (400 out-of-fold
+observations, 5 folds): Brier 0.351, log loss 6.14, ECE 0.233, MCE 0.748,
+fold directional accuracy 0.26-0.58 (std 0.107). The model is badly
+calibrated and highly dispersed across folds. That is the correct reading —
+no model has beaten the baseline (M4-BL), so there is nothing here that
+should be trusted yet, and the numbers now say so plainly.
+
+### M5. Promotion gates and drift hooks### M5. Promotion gates and drift hooks
 
 - Promotion checklist automated in `scripts/promote.py`: OOS metrics beat
   incumbent on the pre-registered primary metric, no regression on veto-rate
