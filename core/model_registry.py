@@ -56,7 +56,12 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from core.config import (
+    CALIBRATION_UNCALIBRATED,
     CURRENT_SCORE_VERSION,
+    FORECAST_TARGETS,
+    FORECAST_TARGET_RETURN,
+    LABEL_HORIZON_SESSIONS,
+    MODEL_ARTIFACT_VERSION,
     FUNDAMENTAL_FEATURE_VERSION,
     LONG_TERM_SCORE_VERSION,
     MARKET_FEATURE_VERSION,
@@ -109,6 +114,20 @@ class ModelEntry:
     oos_comparison: dict[str, Any] = field(default_factory=dict)
     registry_version: str = MODEL_REGISTRY_VERSION
 
+    # --- M5 artifact provenance ---------------------------------------------
+    # What produced this artifact, and what contract it was fitted for. A
+    # deterministic scorer leaves the training fields None; a TRAINED model
+    # must populate them (enforced by entry_problems).
+    code_commit: str | None = None
+    hyperparameters: dict[str, Any] = field(default_factory=dict)
+    seed: int | None = None
+    artifact_hash: str | None = None
+    calibration_version: str = CALIBRATION_UNCALIBRATED
+    forecast_target: str = FORECAST_TARGET_RETURN
+    horizon: str | None = None
+    universe: str | None = None
+    artifact_version: str = MODEL_ARTIFACT_VERSION
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
@@ -124,12 +143,28 @@ class ModelEntry:
             "approved_by": self.approved_by,
             "parent_version": self.parent_version,
             "dataset_hash": self.dataset_hash,
+            "code_commit": self.code_commit,
+            "artifact_hash": self.artifact_hash,
+            "calibration_version": self.calibration_version,
+            "seed": self.seed,
+            "forecast_target": self.forecast_target,
+            "horizon": self.horizon,
+            "universe": self.universe,
         }
         canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     def is_live_eligible(self) -> bool:
         return self.status in MODEL_LIVE_ELIGIBLE_STATUSES
+
+    def is_trained(self) -> bool:
+        """Whether this entry describes a fitted artifact.
+
+        A deterministic rule-based scorer has no artifact and no seed; a
+        trained model has both. The distinction decides which provenance
+        fields are mandatory.
+        """
+        return bool(self.artifact_hash)
 
 
 def entry_problems(entry: ModelEntry) -> list[str]:
@@ -157,6 +192,45 @@ def entry_problems(entry: ModelEntry) -> list[str]:
         problems.append("a retired model must record retired_at")
     if entry.parent_version is not None and entry.parent_version == entry.model_version:
         problems.append("parent_version cannot be the model itself")
+
+    # --- M5 artifact provenance ---------------------------------------------
+    if entry.forecast_target not in FORECAST_TARGETS:
+        problems.append(
+            f"forecast_target {entry.forecast_target!r} is not a known target "
+            f"(known: {sorted(FORECAST_TARGETS)}) — two models over the same "
+            f"features predicting different things are not interchangeable"
+        )
+    if entry.horizon is not None and str(entry.horizon) not in LABEL_HORIZON_SESSIONS:
+        problems.append(
+            f"horizon {entry.horizon!r} is not a declared label horizon "
+            f"(known: {sorted(LABEL_HORIZON_SESSIONS)})"
+        )
+    if not str(entry.calibration_version or "").strip():
+        problems.append(
+            "calibration_version is required — 'uncalibrated' is an honest "
+            "value, a missing field is not"
+        )
+    if entry.seed is not None and (not isinstance(entry.seed, int) or isinstance(entry.seed, bool)):
+        problems.append(f"seed must be an int, got {type(entry.seed).__name__}")
+
+    if entry.is_trained():
+        # A fitted artifact must be reproducible: without these, nobody can
+        # rebuild it or say what produced it.
+        for required, label in (
+            (entry.code_commit, "code_commit"),
+            (entry.dataset_hash, "dataset_hash"),
+            (entry.horizon, "horizon"),
+            (entry.universe, "universe"),
+        ):
+            if not str(required or "").strip():
+                problems.append(
+                    f"a trained artifact must record {label} — otherwise it "
+                    f"cannot be reproduced or audited"
+                )
+        if entry.seed is None:
+            problems.append("a trained artifact must record its seed")
+        if not entry.hyperparameters:
+            problems.append("a trained artifact must record its hyperparameters")
     return problems
 
 
@@ -435,6 +509,70 @@ def _seed_entry(model_version: str, family: str, feature_set_version: str) -> Mo
                 "comparison. Any TRAINED successor must beat it through promote()."
             )
         },
+    )
+
+
+def code_commit() -> str:
+    """The commit that produced an artifact.
+
+    Reuses the V4 manifest helper — one implementation, so a research run and
+    a model entry can never disagree about which commit they came from.
+    """
+    from core.backtest.manifest import _code_commit
+
+    return _code_commit()
+
+
+def entry_from_training_run(
+    run,
+    model_version: str,
+    universe: str,
+    forecast_target: str = FORECAST_TARGET_RETURN,
+    parent_version: str | None = None,
+    calibration_version: str = CALIBRATION_UNCALIBRATED,
+) -> ModelEntry:
+    """Build a registry entry from a completed M3 training run.
+
+    Provenance is CAPTURED from the run rather than retyped by the caller:
+    the dataset hash, feature-set version, artifact hash, seed and
+    hyperparameters all come from the object that actually produced the
+    model. Hand-copying them is how a registry drifts from reality.
+
+    The entry is born `candidate`. Reaching `approved` still requires the M2
+    promotion gate — an out-of-sample win against the incumbent plus a human
+    approver — so registering a trained model never implies it is trusted.
+    """
+    missing = [
+        name for name, value in (
+            ("dataset_hash", run.dataset_hash),
+            ("artifact_hash", run.artifact_hash),
+            ("feature_set_hash", run.feature_set_hash),
+        ) if not str(value or "").strip()
+    ]
+    if missing:
+        raise ModelRegistryError(
+            f"training run cannot become a registry entry: missing {missing}"
+        )
+    return ModelEntry(
+        model_version=model_version,
+        family=run.model_family,
+        feature_set_version=run.feature_set_hash,
+        training_data_cutoff=(
+            run.folds[-1].validation_start_time if run.folds else None
+        ),
+        artifact_uri=None,
+        status=MODEL_STATUS_CANDIDATE,
+        metrics=dict(run.metrics),
+        parent_version=parent_version,
+        dataset_hash=run.dataset_hash,
+        code_commit=code_commit(),
+        hyperparameters=dict(run.hyperparameters),
+        seed=run.seed,
+        artifact_hash=run.artifact_hash,
+        calibration_version=calibration_version,
+        forecast_target=forecast_target,
+        horizon=run.target_horizon,
+        universe=universe,
     )
 
 

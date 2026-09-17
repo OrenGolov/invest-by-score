@@ -23,7 +23,11 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from core.config import MODEL_STATUS_APPROVED, MODEL_STATUS_RETIRED  # noqa: E402
+from core.config import (  # noqa: E402
+    MODEL_STATUS_APPROVED,
+    MODEL_STATUS_CANDIDATE,
+    MODEL_STATUS_RETIRED,
+)
 from core.model_registry import (  # noqa: E402
     ModelEntry,
     ModelNotApprovedError,
@@ -141,6 +145,78 @@ def main() -> int:
     elif retired.status != MODEL_STATUS_RETIRED:
         failures.append(f"retired model has status {retired.status}")
 
+    # 6b. M5 artifact provenance: a trained artifact must be reproducible.
+    from types import SimpleNamespace
+
+    from core.config import CALIBRATION_UNCALIBRATED
+    from core.model_registry import entry_from_training_run, entry_problems
+
+    def _trained(**overrides) -> ModelEntry:
+        payload = dict(
+            model_version="gate-trained-v1", family="boosting",
+            feature_set_version="fs-gate", dataset_hash="d" * 64,
+            code_commit="abc1234", hyperparameters={"n_estimators": 100},
+            seed=42, artifact_hash="a" * 64, horizon="20d",
+            universe="universe-ledger-v1",
+        )
+        payload.update(overrides)
+        return ModelEntry(**payload)
+
+    if entry_problems(_trained()):
+        failures.append(
+            f"a fully-provenanced trained entry was rejected: {entry_problems(_trained())[:2]}"
+        )
+    for missing in ("code_commit", "dataset_hash", "horizon", "universe"):
+        if not entry_problems(_trained(**{missing: None})):
+            failures.append(
+                f"a trained artifact missing {missing} was accepted — it could "
+                f"not be reproduced or audited"
+            )
+    if not entry_problems(_trained(seed=None)):
+        failures.append("a trained artifact without a seed was accepted")
+    if not entry_problems(_trained(hyperparameters={})):
+        failures.append("a trained artifact without hyperparameters was accepted")
+    if not entry_problems(_trained(forecast_target="vibes")):
+        failures.append("an unknown forecast_target was accepted")
+    if not entry_problems(_trained(calibration_version="")):
+        failures.append(
+            "a blank calibration_version was accepted — 'uncalibrated' is "
+            "honest, a missing field is not"
+        )
+
+    # Deterministic scorers must stay exempt: they have no artifact.
+    for entry in registry.all_models().values():
+        if entry.is_trained():
+            failures.append(f"seeded scorer {entry.model_version} claims to be trained")
+        if entry_problems(entry):
+            failures.append(f"seeded scorer {entry.model_version}: {entry_problems(entry)[:1]}")
+
+    # Provenance must be CAPTURED from a run, not retyped.
+    synthetic_run = SimpleNamespace(
+        model_family="boosting", dataset_hash="d" * 64, feature_set_hash="f" * 64,
+        artifact_hash="a" * 64, seed=42, hyperparameters={"n_estimators": 100},
+        target_horizon="20d", metrics={"rmse": 0.1},
+        folds=[SimpleNamespace(validation_start_time="2026-01-05 00:00:00")],
+    )
+    captured = entry_from_training_run(synthetic_run, "gate-captured-v1", universe="u-v1")
+    if captured.status != MODEL_STATUS_CANDIDATE:
+        failures.append(
+            f"a model built from a training run is born {captured.status!r}; it "
+            f"must be a candidate — registering is not trusting"
+        )
+    for label, expected, actual in (
+        ("dataset_hash", synthetic_run.dataset_hash, captured.dataset_hash),
+        ("artifact_hash", synthetic_run.artifact_hash, captured.artifact_hash),
+        ("seed", synthetic_run.seed, captured.seed),
+        ("horizon", synthetic_run.target_horizon, captured.horizon),
+    ):
+        if expected != actual:
+            failures.append(f"entry_from_training_run did not capture {label}")
+    if not captured.code_commit:
+        failures.append("entry_from_training_run did not capture code_commit")
+    if captured.calibration_version != CALIBRATION_UNCALIBRATED:
+        failures.append("a fresh artifact is not marked uncalibrated")
+
     # 7. No hardcoded literals in the orchestrator.
     source = (REPO_ROOT / "core" / "orchestrator.py").read_text(encoding="utf-8")
     for literal in ('model_version="market-data-v1"',
@@ -163,6 +239,7 @@ def main() -> int:
     print("  live gate refuses unregistered/candidate/retired; override is audited.")
     print("  promotion refuses without OOS evidence, on a loss, or without a human approver.")
     print("  retirement preserves entries; orchestrator holds no hardcoded versions.")
+    print("  M5: trained artifacts must carry full provenance; run provenance is captured.")
     return 0
 
 

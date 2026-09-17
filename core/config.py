@@ -688,3 +688,25 @@ def _validate_baseline_suite_config() -> None:
 
 
 _validate_baseline_suite_config()
+
+
+# --- Model artifact registry extension (M5) --------------------------------------
+# M5 completes the M2 entry with the provenance a TRAINED artifact needs:
+# code commit, artifact hash, calibration version, seed, hyperparameters, and
+# the forecast contract (target, horizon, universe) the model was fitted for.
+MODEL_ARTIFACT_VERSION = "model-artifact-v1"
+
+# What a model predicts. Declared per entry so two models over the same
+# features are never confused for one another — an expected-return model and
+# a direction classifier are not interchangeable.
+FORECAST_TARGET_RETURN = "expected_return"
+FORECAST_TARGET_DIRECTION = "probability_up"
+FORECAST_TARGET_VOLATILITY = "expected_volatility"
+FORECAST_TARGETS = (
+    FORECAST_TARGET_RETURN, FORECAST_TARGET_DIRECTION, FORECAST_TARGET_VOLATILITY,
+)
+
+# A trained model must name its calibration state. "uncalibrated" is an
+# explicit, honest value — never a missing field — and M6 will refuse to
+# expose an uncalibrated probability as if it were calibrated.
+CALIBRATION_UNCALIBRATED = "uncalibrated"

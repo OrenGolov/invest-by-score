@@ -1218,6 +1218,56 @@ it** — every trained model scores between 0.41 and 0.51. No model has earned
 promotion. That is the expected and correct outcome at this stage, and the
 reason M4 exists before M5-M8.
 
+### M5-AR. Model artifact registry ✓ DONE
+
+> Master-context M5 ("Model Artifact Registry"). Tracked with a `-AR` suffix;
+> this board's M5 slot is promotion gates and drift hooks — see the numbering
+> table above.
+
+Completed 2026-09-17 as an extension of the board's M2 registry rather than a
+second registry. Eight of the sixteen M5 fields already existed; this adds
+the rest plus the rules that make them mean something.
+
+- **New fields on `ModelEntry`:** `code_commit`, `hyperparameters`, `seed`,
+  `artifact_hash`, `calibration_version`, `forecast_target`, `horizon`,
+  `universe` (`model-artifact-v1`). All sixteen M5 fields are now recorded,
+  asserted by a test that names each one.
+- **Trained artifacts must be reproducible.** `is_trained()` distinguishes a
+  fitted artifact from a deterministic rule-based scorer. A trained entry
+  must carry code_commit, dataset_hash, horizon, universe, a seed and
+  hyperparameters — without them nobody can rebuild it or say what produced
+  it. The seeded scorers stay exempt because they genuinely have no artifact,
+  and a gate check asserts they never claim otherwise.
+- **`forecast_target` is a closed vocabulary** (`expected_return`,
+  `probability_up`, `expected_volatility`). Two models over the same features
+  predicting different things are not interchangeable, and the registry now
+  refuses to blur them.
+- **`calibration_version` is mandatory and defaults to `"uncalibrated"`** —
+  an honest value. A missing field is not, so a blank is refused. M6 will
+  build on this rather than having to infer calibration state.
+- **Provenance is captured, never retyped.** `entry_from_training_run()`
+  reads the dataset hash, feature-set version, artifact hash, seed,
+  hyperparameters and horizon off the M3 run that actually produced the
+  model, and `code_commit()` reuses the V4 manifest helper so a research run
+  and a model entry can never disagree about which commit they came from.
+  Hand-copying these is how a registry drifts from reality.
+- **Registering is not trusting.** An entry built from a training run is born
+  `candidate`, and the live gate refuses it until the M2 promotion gate
+  passes — an out-of-sample win against the incumbent (M4) plus a human
+  approver.
+- **Provenance is part of artifact identity:** the canonical hash now covers
+  code_commit, artifact_hash, seed, horizon, universe, forecast_target and
+  calibration_version, so two entries differing in any of them cannot share a
+  hash.
+- CI gate: extended `scripts/check_model_registry.py` rather than adding an
+  eighth gate. Verified non-vacuous by sabotage: disabling the trained-artifact
+  rule makes it fail with four precise messages.
+- Acceptance: 62 tests in `tests/test_model_registry.py` (18 new). Full
+  suite: 751/751 pass.
+
+`models/manifest.json` was regenerated — the committed-manifest drift test
+caught the hash change immediately, which is the check working as designed.
+
 ### M4. Calibration and score mapping
 
 - Calibrate raw model output to probabilities on validation folds only

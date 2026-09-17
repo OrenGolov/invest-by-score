@@ -18,8 +18,10 @@ import pathlib
 import tempfile
 import unittest
 import unittest.mock
+from types import SimpleNamespace
 
 from core.config import (
+    CALIBRATION_UNCALIBRATED,
     MODEL_REGISTRY_VERSION,
     MODEL_STATUS_APPROVED,
     MODEL_STATUS_CANDIDATE,
@@ -32,6 +34,7 @@ from core.model_registry import (
     ModelRegistryError,
     approver_problems,
     build_default_model_registry,
+    entry_from_training_run,
     entry_problems,
     load_model_manifest,
     load_model_registry,
@@ -397,3 +400,152 @@ class TestAuditTrailCarriesResolutions(unittest.TestCase):
             with self.subTest(agent=agent):
                 self.assertEqual(record["status"], MODEL_STATUS_APPROVED)
                 self.assertFalse(record["override"])
+
+
+class TestArtifactProvenance(unittest.TestCase):
+    """M5: a trained artifact must record what produced it."""
+
+    def _trained(self, **overrides) -> ModelEntry:
+        payload = dict(
+            model_version="gb-v1",
+            family="boosting",
+            feature_set_version="fs-abc",
+            dataset_hash="d" * 64,
+            code_commit="abc1234",
+            hyperparameters={"n_estimators": 100},
+            seed=42,
+            artifact_hash="a" * 64,
+            horizon="20d",
+            universe="universe-ledger-v1",
+        )
+        payload.update(overrides)
+        return ModelEntry(**payload)
+
+    def test_all_m5_fields_are_recorded(self) -> None:
+        recorded = self._trained().to_dict()
+        for required in (
+            "model_version", "feature_set_version", "training_data_cutoff",
+            "dataset_hash", "code_commit", "hyperparameters", "seed",
+            "artifact_hash", "calibration_version", "metrics", "status",
+            "parent_version", "approved_by", "forecast_target", "horizon",
+            "universe",
+        ):
+            with self.subTest(field=required):
+                self.assertIn(required, recorded)
+
+    def test_valid_trained_entry_has_no_problems(self) -> None:
+        self.assertEqual(entry_problems(self._trained()), [])
+
+    def test_trained_artifact_requires_its_provenance(self) -> None:
+        """Without these an artifact cannot be reproduced or audited."""
+        for field_name in ("code_commit", "dataset_hash", "horizon", "universe"):
+            with self.subTest(missing=field_name):
+                problems = entry_problems(self._trained(**{field_name: None}))
+                self.assertTrue(any(field_name in p for p in problems))
+
+    def test_trained_artifact_requires_a_seed(self) -> None:
+        problems = entry_problems(self._trained(seed=None))
+        self.assertTrue(any("seed" in p for p in problems))
+
+    def test_trained_artifact_requires_hyperparameters(self) -> None:
+        problems = entry_problems(self._trained(hyperparameters={}))
+        self.assertTrue(any("hyperparameters" in p for p in problems))
+
+    def test_deterministic_scorer_needs_no_training_provenance(self) -> None:
+        """A rule-based scorer has no artifact, so the rules do not apply."""
+        for entry in build_default_model_registry().all_models().values():
+            with self.subTest(model=entry.model_version):
+                self.assertFalse(entry.is_trained())
+                self.assertEqual(entry_problems(entry), [])
+
+    def test_unknown_forecast_target_is_refused(self) -> None:
+        problems = entry_problems(self._trained(forecast_target="vibes"))
+        self.assertTrue(any("forecast_target" in p for p in problems))
+
+    def test_unknown_horizon_is_refused(self) -> None:
+        problems = entry_problems(self._trained(horizon="999d"))
+        self.assertTrue(any("horizon" in p for p in problems))
+
+    def test_calibration_version_is_required(self) -> None:
+        """'uncalibrated' is honest; a blank field is not."""
+        problems = entry_problems(self._trained(calibration_version=""))
+        self.assertTrue(any("calibration_version" in p for p in problems))
+
+    def test_calibration_defaults_to_uncalibrated(self) -> None:
+        self.assertEqual(self._trained().calibration_version, CALIBRATION_UNCALIBRATED)
+
+    def test_non_integer_seed_is_refused(self) -> None:
+        problems = entry_problems(self._trained(seed="42"))
+        self.assertTrue(any("seed" in p for p in problems))
+
+    def test_provenance_is_part_of_artifact_identity(self) -> None:
+        """Two entries differing in provenance must not share a hash."""
+        base = self._trained()
+        for field_name, value in (
+            ("code_commit", "different"),
+            ("artifact_hash", "b" * 64),
+            ("seed", 7),
+            ("horizon", "5d"),
+            ("universe", "other-universe"),
+            ("forecast_target", "probability_up"),
+            ("calibration_version", "isotonic-v1"),
+        ):
+            with self.subTest(changed=field_name):
+                self.assertNotEqual(
+                    base.canonical_hash(), self._trained(**{field_name: value}).canonical_hash()
+                )
+
+
+class TestEntryFromTrainingRun(unittest.TestCase):
+    """Provenance is captured from the run, never retyped."""
+
+    def _run(self):
+        return SimpleNamespace(
+            model_family="boosting",
+            dataset_hash="d" * 64,
+            feature_set_hash="f" * 64,
+            artifact_hash="a" * 64,
+            seed=42,
+            hyperparameters={"n_estimators": 100},
+            target_horizon="20d",
+            metrics={"rmse": 0.12},
+            folds=[SimpleNamespace(validation_start_time="2026-01-05 00:00:00")],
+        )
+
+    def test_entry_captures_run_provenance(self) -> None:
+        entry = entry_from_training_run(self._run(), "gb-v1", universe="universe-ledger-v1")
+        self.assertEqual(entry.dataset_hash, "d" * 64)
+        self.assertEqual(entry.artifact_hash, "a" * 64)
+        self.assertEqual(entry.feature_set_version, "f" * 64)
+        self.assertEqual(entry.seed, 42)
+        self.assertEqual(entry.horizon, "20d")
+        self.assertEqual(entry.hyperparameters, {"n_estimators": 100})
+        self.assertEqual(entry_problems(entry), [])
+
+    def test_entry_is_born_candidate(self) -> None:
+        """Registering a trained model never implies it is trusted."""
+        entry = entry_from_training_run(self._run(), "gb-v1", universe="u-v1")
+        self.assertEqual(entry.status, MODEL_STATUS_CANDIDATE)
+        self.assertIsNone(entry.approved_by)
+
+    def test_candidate_from_a_run_is_refused_by_the_live_gate(self) -> None:
+        registry = build_default_model_registry()
+        registry.register(entry_from_training_run(self._run(), "gb-v1", universe="u-v1"))
+        with self.assertRaises(ModelNotApprovedError):
+            require_live_model("gb-v1", registry)
+
+    def test_code_commit_is_captured(self) -> None:
+        entry = entry_from_training_run(self._run(), "gb-v1", universe="u-v1")
+        self.assertTrue(entry.code_commit)
+
+    def test_run_without_artifact_hash_is_refused(self) -> None:
+        run = self._run()
+        run.artifact_hash = ""
+        with self.assertRaises(ModelRegistryError):
+            entry_from_training_run(run, "gb-v1", universe="u-v1")
+
+    def test_run_without_dataset_hash_is_refused(self) -> None:
+        run = self._run()
+        run.dataset_hash = ""
+        with self.assertRaises(ModelRegistryError):
+            entry_from_training_run(run, "gb-v1", universe="u-v1")
