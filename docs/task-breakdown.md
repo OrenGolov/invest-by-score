@@ -1364,6 +1364,52 @@ serving?* — was an accident of naming. A model's role is now declared.
 `models/manifest.json` was regenerated; the drift test caught the hash change
 immediately.
 
+### M8-RG. ML reproducibility gate ✓ DONE
+
+> Master-context M8. Implemented 2026-09-17 in `core/reproducibility.py`
+> (`reproducibility-v1`).
+
+The rule's last clause — "within explicitly defined reproducibility
+guarantees" — carries the weight. A blanket "bit-identical forever" claim
+would be false the moment numpy changes a summation order, and a guarantee
+that is quietly false is worse than none. So the promise is stated in
+config, verified, and its limits are published with every artifact.
+
+**GUARANTEED** (same environment, same inputs): identical fitted parameters
+and artifact hash, identical predictions/metrics/run hash, and the same
+across separate processes.
+
+**NOT GUARANTEED** (deliberately): bit-identical artifacts across library
+versions or platforms, or stability across a formula change. The environment
+block records python/numpy/sklearn/platform so such a divergence is
+*attributable* rather than mysterious, and `explanation()` reports it as
+expected rather than as a bug.
+
+- **Two identities, deliberately separate.** `artifact_hash` identifies the
+  FITTED MODEL (estimator + feature surface + parameters); `run_hash`
+  identifies the CONFIGURATION, seed included.
+- **Bug found and fixed:** the artifact hash previously included the seed, so
+  `historical_mean` and `ridge` — deterministic algorithms that never consult
+  it — reported a different artifact under a different seed. A false
+  difference on every deterministic estimator is exactly the noise that
+  trains people to ignore a gate. The seed now lives only in run identity.
+- **Zero tolerance.** Within one environment the same inputs must produce the
+  same floats, not merely close ones; a tolerance would hide the
+  nondeterminism the gate exists to catch. Guarded at import.
+- CI gate: `scripts/check_reproducibility.py` (~24s), including a
+  **cross-process** check that trains in a fresh interpreter — in-process
+  caching or a warm RNG cannot fake it.
+- Acceptance: 24 tests in `tests/test_reproducibility.py`. Full suite:
+  857/857 pass, nine CI gates green.
+
+**A hole the sabotage run found.** The first version of the gate ran the
+same-process check on `ridge` and `gradient_boosting` only, using
+`random_forest` purely for divergence checks. Removing RandomForest's seed
+therefore left the gate GREEN — the sabotage passed. Fixed by covering every
+stochastic estimator in the same-process check; re-sabotaging now fails with
+a precise message. Worth recording: the gate was wrong in a way that only an
+attempted break could reveal.
+
 ### M5. Promotion gates and drift hooks### M5. Promotion gates and drift hooks
 
 - Promotion checklist automated in `scripts/promote.py`: OOS metrics beat

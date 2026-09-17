@@ -814,3 +814,69 @@ def _validate_champion_challenger_config() -> None:
 
 
 _validate_champion_challenger_config()
+
+
+# --- ML reproducibility gate (M8) ------------------------------------------------
+# "Same data, features, seed, code, configuration must produce identical model
+# artifacts/predictions WITHIN EXPLICITLY DEFINED REPRODUCIBILITY GUARANTEES."
+#
+# The last clause is the important one. A blanket "bit-identical forever"
+# claim would be false the moment numpy changes a summation order, so this
+# states exactly what is guaranteed and what is not.
+REPRODUCIBILITY_VERSION = "reproducibility-v1"
+
+# GUARANTEED — same process, same environment, same inputs:
+#   * identical fitted parameters, so an identical artifact hash;
+#   * identical predictions, metrics and run hash;
+#   * identical results across separate processes on the same machine.
+#
+# NOT GUARANTEED — and deliberately so:
+#   * bit-identical artifacts across different library versions. BLAS
+#     summation order and estimator internals change between releases; the
+#     environment block records the versions so a divergence can be explained
+#     rather than merely detected.
+#   * bit-identical artifacts across platforms, for the same reason.
+#   * stability across a code change that alters a formula. That is what the
+#     *_VERSION constants exist to make visible.
+REPRODUCIBILITY_GUARANTEES = (
+    "same_process_identical_parameters",
+    "cross_process_identical_parameters",
+    "identical_predictions",
+    "identical_metrics",
+    "identical_run_hash",
+)
+
+REPRODUCIBILITY_NON_GUARANTEES = (
+    "cross_library_version_bitwise",
+    "cross_platform_bitwise",
+    "stability_across_formula_changes",
+)
+
+# Numeric tolerance when comparing predictions. Zero: within one environment
+# the same inputs must produce the SAME floats, not merely close ones. A
+# tolerance here would hide exactly the nondeterminism this gate exists to
+# catch.
+REPRODUCIBILITY_TOLERANCE = 0.0
+
+# The environment fields recorded with every run, so a cross-environment
+# divergence can be attributed instead of guessed at.
+REPRODUCIBILITY_ENVIRONMENT_KEYS = ("python", "numpy", "sklearn", "platform")
+
+
+def _validate_reproducibility_config() -> None:
+    """Import-time guard: the guarantees must not contradict themselves."""
+    overlap = set(REPRODUCIBILITY_GUARANTEES) & set(REPRODUCIBILITY_NON_GUARANTEES)
+    if overlap:
+        raise ValueError(
+            f"a property cannot be both guaranteed and not guaranteed: {sorted(overlap)}"
+        )
+    if REPRODUCIBILITY_TOLERANCE != 0.0:
+        raise ValueError(
+            "REPRODUCIBILITY_TOLERANCE must be exactly 0.0 — a tolerance would "
+            "hide the nondeterminism this gate exists to catch"
+        )
+    if not REPRODUCIBILITY_ENVIRONMENT_KEYS:
+        raise ValueError("at least one environment key must be recorded")
+
+
+_validate_reproducibility_config()

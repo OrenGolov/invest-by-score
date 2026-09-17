@@ -50,3 +50,6 @@ jobs:
 
       - name: M6 calibration drift gate
         run: python scripts/check_calibration.py
+
+      - name: M8 reproducibility drift gate
+        run: python scripts/check_reproducibility.py

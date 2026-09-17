@@ -422,9 +422,14 @@ def train_baseline(
     # Hash the FITTED PARAMETERS, not pickle bytes: joblib output embeds
     # library versions and is not byte-stable across environments, which
     # would make the M8 reproducibility guarantee untestable in CI.
+    # M8: the artifact hash identifies the FITTED MODEL, so it covers the
+    # parameters, the estimator and the feature surface — but NOT the seed.
+    # A seed that changed nothing about the fitted parameters did not produce
+    # a different artifact, and hashing it in would report a false difference
+    # for the deterministic estimators (historical_mean, ridge). The seed is
+    # part of the RUN identity instead, via run_hash().
     artifact_payload = {
         "estimator": estimator,
-        "seed": seed,
         "feature_names": feature_names,
         "folds": parameters_by_fold,
     }
