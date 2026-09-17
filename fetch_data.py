@@ -111,8 +111,6 @@ PORTFOLIO_TICKERS = [
     "KEEL",
     "OUST",
     "VST",
-    "QCOM"
-    "CRWV",
     "TER",
     "ARM",
     "ASML",
