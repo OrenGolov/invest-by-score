@@ -353,3 +353,61 @@ class EngineCoverageTests(unittest.TestCase):
         basis = result["manifest"]["provider_overrides"]["price_basis"]
         self.assertIn("split-adjusted", basis)
         self.assertIn("NOT reinvested", basis)
+
+
+class TestSeededPortfolioLedger(unittest.TestCase):
+    """The committed ledger (data/universe.jsonl), seeded 2026-09-17.
+
+    Seeding does NOT eliminate survivorship bias — it makes the bias
+    detectable. The ledger records only names listed today, so a subset of
+    the portfolio is correctly flagged biased, and the honest limitation is
+    that genuinely delisted companies are still absent until a real
+    index-constituent adapter connects.
+    """
+
+    def setUp(self) -> None:
+        from core.universe import latest_entries_by_ticker
+
+        self.entries = latest_entries_by_ticker()
+        if not self.entries:
+            self.skipTest("universe ledger not seeded")
+
+    def test_every_portfolio_ticker_is_in_the_ledger(self) -> None:
+        from fetch_data import PORTFOLIO_TICKERS
+
+        missing = sorted(set(PORTFOLIO_TICKERS) - set(self.entries))
+        self.assertEqual(missing, [], f"tickers absent from the ledger: {missing}")
+
+    def test_starts_are_recorded_as_unverified_not_fabricated(self) -> None:
+        """We know these are listed now; we do not know when they listed."""
+        for ticker, entry in sorted(self.entries.items()):
+            with self.subTest(ticker=ticker):
+                self.assertIsNone(entry["listed_from"])
+                self.assertIsNone(entry["listed_to"])
+
+    def test_the_full_portfolio_is_point_in_time_complete(self) -> None:
+        from core.universe import (
+            STATUS_POINT_IN_TIME_COMPLETE,
+            universe_survivorship_status,
+        )
+        from fetch_data import PORTFOLIO_TICKERS
+
+        self.assertEqual(
+            universe_survivorship_status(list(PORTFOLIO_TICKERS), self.entries, "2025-01-01"),
+            STATUS_POINT_IN_TIME_COMPLETE,
+        )
+
+    def test_a_subset_is_correctly_flagged_biased(self) -> None:
+        """This is the point: the ledger now DETECTS the hazard."""
+        from core.universe import STATUS_SURVIVORSHIP_BIASED, universe_survivorship_status
+
+        self.assertEqual(
+            universe_survivorship_status(["NVDA", "MSFT"], self.entries, "2025-01-01"),
+            STATUS_SURVIVORSHIP_BIASED,
+        )
+
+    def test_seeding_is_idempotent(self) -> None:
+        from core.universe import seed_portfolio_universe
+        from fetch_data import PORTFOLIO_TICKERS
+
+        self.assertEqual(seed_portfolio_universe(PORTFOLIO_TICKERS, "2026-09-17"), 0)
