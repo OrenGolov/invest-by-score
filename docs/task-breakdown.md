@@ -1169,6 +1169,55 @@ First result, recorded honestly: on a 500-row NVDA dataset the pure
 earned promotion, and `scripts/train.py` says so explicitly when a pure
 baseline wins. That is the point of establishing baselines first.
 
+### M4-BL. Baseline model suite ✓ DONE
+
+> Master-context M4 ("Baseline Model Suite"). Tracked with a `-BL` suffix
+> because this board's M4 slot is calibration — see the numbering table
+> above.
+
+Implemented 2026-09-17 in `core/baseline_suite.py` (`baseline-suite-v1`),
+with `mean_reversion` and `logistic` added to `core/training.py` to complete
+the family list.
+
+- **Eight baselines across all seven M4 families:** `historical_mean`
+  (baseline_mean), `momentum`, `mean_reversion`, `ridge` + `elastic_net`
+  (linear), `logistic`, `random_forest` (tree), `gradient_boosting`.
+  `mean_reversion` is the deliberate mirror of `momentum` — the opposing
+  hypothesis, so if momentum has an edge this must lose by a similar margin.
+  `logistic` classifies direction and maps back to a signed magnitude so it
+  is comparable with the regressors on the same metrics; a single-class
+  training window degrades to that class rather than raising, and records it.
+- **The incumbent is the best SIMPLE baseline, not the best model.** A
+  trained model must clear historical_mean / momentum / mean_reversion before
+  it is interesting at all. Comparing a boosted tree only against ridge would
+  let a whole family of complexity in through the side door.
+- **Comparisons must be like-for-like.** `comparison_problems` refuses runs
+  that differ in dataset hash, target horizon or feature set rather than
+  trusting the caller — comparing across different data is the most common
+  way a "win" turns out to be an artefact.
+- **A win must be real.** Three bars: beat the incumbent, beat it by at least
+  `BASELINE_PROMOTION_MARGIN` (0.02), and win at least
+  `BASELINE_MIN_WINNING_FOLD_RATIO` (0.6) of paired folds. A hair-thin margin
+  or one lucky fold is refused.
+- **The rule connects to M2.** `promotion_comparison` emits exactly the
+  `oos_comparison` shape `ModelRegistry.promote` demands, and REFUSES to emit
+  one for a losing verdict — so the measurement and the gate cannot disagree.
+  A test drives the whole path: measured win → comparison → approved model.
+- **"Nothing earned promotion" is a first-class result**, returned as a
+  populated report with per-candidate reasons — never an exception, never a
+  silently chosen best-of.
+- CI drift gate: `scripts/check_baseline_suite.py` (0.3s, synthetic runs).
+  Verified non-vacuous by sabotage: disabling the fold-consistency check
+  makes it fail with "a one-lucky-fold candidate was promoted".
+- Acceptance: 28 tests in `tests/test_baseline_suite.py`. Full suite:
+  733/733 pass.
+
+Current standing on real data (600-row NVDA, 5 folds): the incumbent is
+`historical_mean` at 0.6025 directional accuracy, and **no candidate beats
+it** — every trained model scores between 0.41 and 0.51. No model has earned
+promotion. That is the expected and correct outcome at this stage, and the
+reason M4 exists before M5-M8.
+
 ### M4. Calibration and score mapping
 
 - Calibrate raw model output to probabilities on validation folds only

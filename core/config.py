@@ -658,3 +658,33 @@ TRAINING_BASELINE_FAMILIES = ("linear", "tree", "boosting")
 # output embeds library versions and is not byte-stable across environments,
 # which would make the M8 reproducibility guarantee untestable in CI.
 TRAINING_ARTIFACT_HASH_BASIS = "fitted_parameters"
+
+
+# --- Baseline model suite (M4) ---------------------------------------------------
+# "No advanced model is promoted without beating the incumbent out-of-sample."
+# The incumbent is the best SIMPLE baseline, not the best model: a trained
+# model must clear historical_mean / momentum / mean_reversion before it is
+# interesting at all.
+BASELINE_SUITE_VERSION = "baseline-suite-v1"
+
+# A candidate must beat the incumbent by at least this much on the primary
+# metric. Beating it by 0.0001 is noise, and promoting on noise is how a
+# backtest-overfit model reaches production.
+BASELINE_PROMOTION_MARGIN = 0.02
+
+# ...and must win at least this share of paired folds. A single lucky fold is
+# not an edge; the win has to be consistent across the walk-forward windows.
+BASELINE_MIN_WINNING_FOLD_RATIO = 0.6
+
+
+def _validate_baseline_suite_config() -> None:
+    """Import-time guard: the promotion bars must be meaningful."""
+    if BASELINE_PROMOTION_MARGIN <= 0:
+        raise ValueError("BASELINE_PROMOTION_MARGIN must be positive — a zero margin promotes noise")
+    if not 0.5 < BASELINE_MIN_WINNING_FOLD_RATIO <= 1.0:
+        raise ValueError(
+            "BASELINE_MIN_WINNING_FOLD_RATIO must be above 0.5 (a majority) and at most 1.0"
+        )
+
+
+_validate_baseline_suite_config()

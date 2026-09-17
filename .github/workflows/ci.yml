@@ -44,3 +44,6 @@ jobs:
 
       - name: M3 training-pipeline drift gate
         run: python scripts/check_training_pipeline.py
+
+      - name: M4 baseline-suite drift gate
+        run: python scripts/check_baseline_suite.py

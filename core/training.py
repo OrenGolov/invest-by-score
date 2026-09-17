@@ -75,19 +75,23 @@ TRAINING_RUN_STORE_PATH = (
 BASELINE_ESTIMATORS: tuple[str, ...] = (
     "historical_mean",
     "momentum",
+    "mean_reversion",
     "ridge",
     "elastic_net",
+    "logistic",
     "random_forest",
     "gradient_boosting",
 )
 
 # The pure baselines need no third-party library and must be beaten before
 # any trained model earns its place (master context M4).
-_PURE_BASELINES = ("historical_mean", "momentum")
+_PURE_BASELINES = ("historical_mean", "momentum", "mean_reversion")
 
 _FAMILY_BY_ESTIMATOR = {
     "historical_mean": "baseline_mean",
     "momentum": "momentum",
+    "mean_reversion": "mean_reversion",
+    "logistic": "logistic",
     "ridge": "linear",
     "elastic_net": "linear",
     "random_forest": "tree",
@@ -180,12 +184,16 @@ def _build_estimator(name: str, seed: int):
         return None
     try:
         from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
-        from sklearn.linear_model import ElasticNet, Ridge
+        from sklearn.linear_model import ElasticNet, Ridge  # noqa: F401
     except ImportError as exc:  # pragma: no cover - dependency is pinned
         raise TrainingError(
             f"estimator {name!r} requires scikit-learn, which is not installed"
         ) from exc
 
+    if name == "logistic":
+        from sklearn.linear_model import LogisticRegression
+
+        return LogisticRegression(random_state=seed, max_iter=2000)
     if name == "ridge":
         return Ridge(alpha=1.0, random_state=seed)
     if name == "elastic_net":
@@ -224,7 +232,39 @@ def _fit_predict(
         direction = np.sign(validation_x[:, 0]) if validation_x.size else np.zeros(0)
         return direction * magnitude, {"magnitude": round(magnitude, 10)}
 
+    if name == "mean_reversion":
+        # The opposing hypothesis to momentum: fade the recent move. Mirror
+        # of the momentum baseline so the two are directly comparable — if
+        # momentum has an edge, this must lose by the same margin.
+        magnitude = float(np.mean(np.abs(train_y))) if train_y.size else 0.0
+        direction = -np.sign(validation_x[:, 0]) if validation_x.size else np.zeros(0)
+        return direction * magnitude, {"magnitude": round(magnitude, 10)}
+
     estimator = _build_estimator(name, seed)
+    if name == "logistic":
+        # Direction is the natural target for a classifier. A single-class
+        # training window has no decision to make, so it falls back to that
+        # class rather than raising — recorded in the parameters.
+        labels = np.sign(train_y)
+        magnitude = float(np.mean(np.abs(train_y))) if train_y.size else 0.0
+        if np.unique(labels).size < 2:
+            only = float(labels[0]) if labels.size else 0.0
+            return (
+                np.full(len(validation_x), only * magnitude),
+                {"degenerate_single_class": only, "magnitude": round(magnitude, 10)},
+            )
+        estimator.fit(train_x, labels)
+        predicted_direction = np.asarray(estimator.predict(validation_x), dtype=float)
+        return (
+            predicted_direction * magnitude,
+            {
+                "coef": [round(float(v), 10) for v in np.ravel(estimator.coef_)],
+                "intercept": round(float(np.ravel(estimator.intercept_)[0]), 10),
+                "magnitude": round(magnitude, 10),
+            },
+        )
+
+
     estimator.fit(train_x, train_y)
     predictions = np.asarray(estimator.predict(validation_x), dtype=float)
 
