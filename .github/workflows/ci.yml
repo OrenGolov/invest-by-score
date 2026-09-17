@@ -59,3 +59,6 @@ jobs:
 
       - name: E2 entity-resolution drift gate
         run: python scripts/check_entity_resolution.py
+
+      - name: E3 actor-intelligence drift gate
+        run: python scripts/check_actor_intelligence.py

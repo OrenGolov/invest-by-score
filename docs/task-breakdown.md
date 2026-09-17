@@ -1515,6 +1515,46 @@ news we could not attribute".
 - Acceptance: 41 tests in `tests/test_entity_resolution.py`. Full suite:
   954/954 pass, eleven gates green.
 
+### E3. Influential person intelligence ✓ DONE
+
+Implemented 2026-09-17 in `core/actor_intelligence.py` (`actor-registry-v1`).
+
+E3 tracks identity, role, organization, historical relevance, topic
+specialization, source credibility, statement frequency, novelty and
+historical market impact — the inputs for eventually learning
+`actor × topic × company → historical market response`.
+
+**The property that matters most is about NOT knowing things.** E3 exists
+before E4 measures any market reaction, so an actor's "historical impact" is
+the number the system is most tempted to invent.
+
+- **Impact is `unmeasured` below `ACTOR_MIN_OBSERVATIONS` (20), and reports
+  NO numbers there** — not a mean over three events that a consumer could
+  mistake for a finding. Statements with no measured reaction do not count
+  toward a track record at all.
+- **Credibility is labelled a PRIOR.** `credibility()` returns
+  `basis: "prior"` with a detail saying it is not a measurement. Presenting a
+  guessed number as measured is exactly the failure M6 exists to prevent.
+- **Measured impact disclaims causality** — an abnormal return following a
+  statement is association, not cause (master context §37).
+- **Insider standing is company-specific.** A CEO's guidance IS company
+  guidance, but that same CEO commenting on a rival is external there, and
+  drops from 0.75 to 0.50 credibility.
+- **Topic specialisation is bounded** (+0.15 on-topic, −0.20 off-topic). A
+  CEO on their own product line is stronger evidence than the same CEO on
+  macro policy, but specialisation informs rather than dominates.
+- **Statement frequency is recorded, not scored.** A daily commentator
+  plausibly carries less information per statement, but that is a hypothesis
+  for E6 to test with evidence rather than a weight to bake in now.
+- **Derived from E2, not maintained twice.** 67 actors built from the entity
+  registry's executives. Funds contribute none — no officer speaks for an
+  ETF, and listing one would be a false claim.
+- CI drift gate: `scripts/check_actor_intelligence.py`. Verified non-vacuous
+  by two sabotages: removing the impact threshold and removing the
+  company-specific insider check both fail it.
+- Acceptance: 35 tests in `tests/test_actor_intelligence.py`. Full suite:
+  994/994 pass, twelve gates green.
+
 ---
 
 ## Sprint R — Portfolio Risk Context (completing the fail-closed system)

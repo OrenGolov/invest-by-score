@@ -1008,3 +1008,70 @@ def _validate_entity_config() -> None:
 
 
 _validate_entity_config()
+
+
+# --- Influential person intelligence (E3) ----------------------------------------
+# E3 tracks WHO speaks, and eventually learns actor x topic x company ->
+# historical market response. The learning part belongs to E4/E6, which
+# measure reactions; E3's job is to make the actor a first-class, versioned
+# object so those measurements have something stable to attach to.
+ACTOR_REGISTRY_VERSION = "actor-registry-v1"
+
+# An actor's standing relative to the company they are speaking about.
+# INSIDER binds them to the company (a CEO's guidance IS company guidance);
+# EXTERNAL does not (an analyst's opinion is about the company, not from it).
+# The distinction decides whether a statement can be treated as the company
+# speaking.
+ACTOR_STANDING_INSIDER = "insider"
+ACTOR_STANDING_EXTERNAL = "external"
+ACTOR_STANDING_UNKNOWN = "unknown"
+ACTOR_STANDINGS = (
+    ACTOR_STANDING_INSIDER, ACTOR_STANDING_EXTERNAL, ACTOR_STANDING_UNKNOWN,
+)
+
+# Baseline credibility by standing, before any measured track record exists.
+# These are PRIORS, not findings: E3 has no market-impact history yet, and
+# pretending otherwise would be the "arbitrary number presented as measured"
+# failure M6 exists to prevent.
+ACTOR_BASE_CREDIBILITY = {
+    ACTOR_STANDING_INSIDER: 0.75,
+    ACTOR_STANDING_EXTERNAL: 0.50,
+    ACTOR_STANDING_UNKNOWN: 0.25,
+}
+
+# An actor needs this many observed statements before any per-actor
+# historical impact may be reported. Below it, the actor is tracked but its
+# impact is UNMEASURED — a two-statement "track record" is noise.
+ACTOR_MIN_OBSERVATIONS = 20
+
+# How much a topic specialisation can raise or lower relevance. A CEO
+# speaking about their own product line is stronger evidence than the same
+# CEO on macro policy; the adjustment is bounded so specialisation can
+# inform a judgement without dominating it.
+ACTOR_TOPIC_BONUS = 0.15
+ACTOR_OFF_TOPIC_PENALTY = 0.20
+
+
+def _validate_actor_config() -> None:
+    """Import-time guard: the actor vocabularies must stay coherent."""
+    missing = set(ACTOR_STANDINGS) - set(ACTOR_BASE_CREDIBILITY)
+    if missing:
+        raise ValueError(f"standings without a base credibility: {sorted(missing)}")
+    if ACTOR_BASE_CREDIBILITY[ACTOR_STANDING_INSIDER] <= ACTOR_BASE_CREDIBILITY[
+        ACTOR_STANDING_EXTERNAL
+    ]:
+        raise ValueError(
+            "an insider must start more credible about their own company than an "
+            "external commentator"
+        )
+    if ACTOR_MIN_OBSERVATIONS < 2:
+        raise ValueError(
+            "a track record needs more than one observation to be a record"
+        )
+    for name, value in (("ACTOR_TOPIC_BONUS", ACTOR_TOPIC_BONUS),
+                        ("ACTOR_OFF_TOPIC_PENALTY", ACTOR_OFF_TOPIC_PENALTY)):
+        if not 0.0 <= value <= 0.5:
+            raise ValueError(f"{name} must be a bounded adjustment in [0, 0.5]")
+
+
+_validate_actor_config()
