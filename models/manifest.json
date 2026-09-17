@@ -23,10 +23,14 @@
       "registry_version": "model-registry-v1",
       "retired_at": null,
       "retired_reason": "",
+      "role": "champion",
+      "role_changed_at": "2026-09-16T00:00:00+00:00",
+      "role_reason": "Reigning champion of its contract since the registry was created; a trained successor must pass the promotion gate and be crowned.",
       "seed": null,
+      "shadow_observations": 0,
       "status": "approved",
       "training_data_cutoff": null,
-      "universe": null
+      "universe": "fundamental_view"
     },
     {
       "approved_at": "2026-09-16T00:00:00+00:00",
@@ -51,10 +55,14 @@
       "registry_version": "model-registry-v1",
       "retired_at": null,
       "retired_reason": "",
+      "role": "champion",
+      "role_changed_at": "2026-09-16T00:00:00+00:00",
+      "role_reason": "Reigning champion of its contract since the registry was created; a trained successor must pass the promotion gate and be crowned.",
       "seed": null,
+      "shadow_observations": 0,
       "status": "approved",
       "training_data_cutoff": null,
-      "universe": null
+      "universe": "market_quality"
     },
     {
       "approved_at": "2026-09-16T00:00:00+00:00",
@@ -79,12 +87,16 @@
       "registry_version": "model-registry-v1",
       "retired_at": null,
       "retired_reason": "",
+      "role": "champion",
+      "role_changed_at": "2026-09-16T00:00:00+00:00",
+      "role_reason": "Reigning champion of its contract since the registry was created; a trained successor must pass the promotion gate and be crowned.",
       "seed": null,
+      "shadow_observations": 0,
       "status": "approved",
       "training_data_cutoff": null,
-      "universe": null
+      "universe": "technical_view"
     }
   ],
-  "registry_hash": "aeff582a698bd80469f7943835052cc9e5347cfa6d2c71e8dfdba71329d1e48b",
+  "registry_hash": "8f49ecc2cf049bb14bd4cff02b5da899e1fc531a30006d43e7586f2eecc3ee70",
   "registry_version": "model-registry-v1"
 }

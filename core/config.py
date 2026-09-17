@@ -760,3 +760,57 @@ def _validate_calibration_config() -> None:
 
 
 _validate_calibration_config()
+
+
+# --- Champion / challenger (M7) --------------------------------------------------
+# One Champion per forecast contract, any number of Challengers, and every
+# new model begins in SHADOW. A model's ROLE is declared, never inferred:
+# before M7 the "incumbent" was whichever approved version sorted last by
+# string, which made the most important question in the registry an accident
+# of naming.
+CHAMPION_CHALLENGER_VERSION = "champion-challenger-v1"
+
+# SHADOW: runs alongside production, predictions recorded, never consulted.
+#   Every model starts here — there is no path that registers a model
+#   directly into a serving role.
+# CHALLENGER: a shadow model that has earned evaluation against the champion.
+# CHAMPION: the single model serving a forecast contract.
+MODEL_ROLE_SHADOW = "shadow"
+MODEL_ROLE_CHALLENGER = "challenger"
+MODEL_ROLE_CHAMPION = "champion"
+MODEL_ROLES = (MODEL_ROLE_SHADOW, MODEL_ROLE_CHALLENGER, MODEL_ROLE_CHAMPION)
+
+# Only a champion may back a live decision. A challenger is measured, not
+# trusted; a shadow model is not even consulted.
+MODEL_SERVING_ROLES = (MODEL_ROLE_CHAMPION,)
+
+# The role every newly registered model takes, with no way to override it at
+# registration time.
+MODEL_DEFAULT_ROLE = MODEL_ROLE_SHADOW
+
+# A shadow model must accumulate this many recorded out-of-sample
+# observations before it may be promoted to challenger. Promotion from
+# shadow is not a formality — an unmeasured model has earned nothing.
+SHADOW_MIN_OBSERVATIONS = 100
+
+
+def _validate_champion_challenger_config() -> None:
+    """Import-time guard: the role model must stay coherent."""
+    if MODEL_DEFAULT_ROLE != MODEL_ROLE_SHADOW:
+        raise ValueError(
+            f"MODEL_DEFAULT_ROLE must be {MODEL_ROLE_SHADOW!r} — every new model "
+            f"begins in shadow (M7), got {MODEL_DEFAULT_ROLE!r}"
+        )
+    if set(MODEL_SERVING_ROLES) - set(MODEL_ROLES):
+        raise ValueError("MODEL_SERVING_ROLES must be a subset of MODEL_ROLES")
+    if MODEL_ROLE_SHADOW in MODEL_SERVING_ROLES:
+        raise ValueError("a shadow model must never be a serving role")
+    if MODEL_ROLE_CHALLENGER in MODEL_SERVING_ROLES:
+        raise ValueError(
+            "a challenger is measured, not trusted — it must never serve live"
+        )
+    if SHADOW_MIN_OBSERVATIONS < 1:
+        raise ValueError("SHADOW_MIN_OBSERVATIONS must be positive")
+
+
+_validate_champion_challenger_config()

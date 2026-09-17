@@ -1320,6 +1320,50 @@ calibrated and highly dispersed across folds. That is the correct reading —
 no model has beaten the baseline (M4-BL), so there is nothing here that
 should be trusted yet, and the numbers now say so plainly.
 
+### M7-CC. Champion / challenger ✓ DONE
+
+> Master-context M7. Implemented 2026-09-17 as an extension of the M2/M5
+> registry (`champion-challenger-v1`), not a new module.
+
+**The gap it closed.** The registry had no role at all. `incumbent()`
+returned whichever approved model sorted last by version string, so with
+three approved models the most important question — *which model is actually
+serving?* — was an accident of naming. A model's role is now declared.
+
+- **Role is distinct from lifecycle status.** `approved` means governance
+  cleared it; `champion` means it serves. `is_live_eligible()` requires
+  BOTH, so an approved challenger is measured rather than trusted, and an
+  approved shadow model is not even consulted.
+- **Every model is born `shadow`** (`MODEL_DEFAULT_ROLE`, guarded at import).
+  No code path registers a model directly into a serving role.
+- **shadow → challenger requires evidence:** `SHADOW_MIN_OBSERVATIONS` (100)
+  recorded out-of-sample observations. An unmeasured model has earned
+  nothing.
+- **challenger → champion requires governance approval**, so crowning cannot
+  substitute for the M2 promotion gate (an OOS win plus a human approver).
+- **Crowning is a SWAP, not an addition.** `crown_champion` demotes the
+  incumbent in the same operation, which is what makes "exactly one
+  champion" impossible to violate halfway through. The outgoing champion
+  keeps its entry and artifact and becomes a challenger — nothing is
+  deleted.
+- **Championship is per forecast contract** `(target, horizon, universe)`. A
+  20d expected-return champion and a 5d direction champion are not rivals —
+  they answer different questions. `role_problems()` reports any contract
+  with more than one champion, and `champion()` raises rather than picking
+  one.
+- **The three seeded scorers are champions of their own contracts**
+  (`market_quality`, `technical_view`, `fundamental_view`). They are
+  complementary ensemble components, not competitors for one slot, so all
+  three serve simultaneously without violating the invariant.
+- CI: extended `scripts/check_model_registry.py` rather than adding a ninth
+  gate. Verified non-vacuous by sabotage — disabling the demotion makes it
+  fail with two messages, including the two-champion invariant breach.
+- Acceptance: 34 tests in `tests/test_champion_challenger.py`. Full suite:
+  833/833 pass.
+
+`models/manifest.json` was regenerated; the drift test caught the hash change
+immediately.
+
 ### M5. Promotion gates and drift hooks### M5. Promotion gates and drift hooks
 
 - Promotion checklist automated in `scripts/promote.py`: OOS metrics beat

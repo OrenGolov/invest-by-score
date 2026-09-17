@@ -57,6 +57,14 @@ from typing import Any, Iterable
 
 from core.config import (
     CALIBRATION_UNCALIBRATED,
+    CHAMPION_CHALLENGER_VERSION,
+    MODEL_DEFAULT_ROLE,
+    MODEL_ROLES,
+    MODEL_ROLE_CHALLENGER,
+    MODEL_ROLE_CHAMPION,
+    MODEL_ROLE_SHADOW,
+    MODEL_SERVING_ROLES,
+    SHADOW_MIN_OBSERVATIONS,
     CURRENT_SCORE_VERSION,
     FORECAST_TARGETS,
     FORECAST_TARGET_RETURN,
@@ -128,6 +136,15 @@ class ModelEntry:
     universe: str | None = None
     artifact_version: str = MODEL_ARTIFACT_VERSION
 
+    # --- M7 champion / challenger -------------------------------------------
+    # The model's SERVING role, distinct from its lifecycle status. A model
+    # can be `approved` (governance cleared it) yet still `shadow` (nothing
+    # consults it). Both must line up before it serves.
+    role: str = MODEL_DEFAULT_ROLE
+    role_changed_at: str | None = None
+    role_reason: str = ""
+    shadow_observations: int = 0
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
@@ -150,12 +167,30 @@ class ModelEntry:
             "forecast_target": self.forecast_target,
             "horizon": self.horizon,
             "universe": self.universe,
+            "role": self.role,
         }
         canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     def is_live_eligible(self) -> bool:
-        return self.status in MODEL_LIVE_ELIGIBLE_STATUSES
+        """Approved by governance AND serving as champion.
+
+        Both are required. An approved challenger is measured, not trusted;
+        an approved shadow model is not even consulted.
+        """
+        return (
+            self.status in MODEL_LIVE_ELIGIBLE_STATUSES
+            and self.role in MODEL_SERVING_ROLES
+        )
+
+    def forecast_contract(self) -> tuple[str, str | None, str | None]:
+        """What this model forecasts: (target, horizon, universe).
+
+        Championship is per contract. A 20d expected-return champion and a
+        5d direction champion are not rivals — they answer different
+        questions, so each contract has exactly one champion.
+        """
+        return (self.forecast_target, self.horizon, self.universe)
 
     def is_trained(self) -> bool:
         """Whether this entry describes a fitted artifact.
@@ -231,6 +266,24 @@ def entry_problems(entry: ModelEntry) -> list[str]:
             problems.append("a trained artifact must record its seed")
         if not entry.hyperparameters:
             problems.append("a trained artifact must record its hyperparameters")
+
+    # --- M7 role ------------------------------------------------------------
+    if entry.role not in MODEL_ROLES:
+        problems.append(
+            f"role {entry.role!r} is not a known role (known: {sorted(MODEL_ROLES)})"
+        )
+    if entry.role in MODEL_SERVING_ROLES and entry.status != MODEL_STATUS_APPROVED:
+        problems.append(
+            f"a {entry.role} must be approved, not {entry.status!r} — a serving "
+            f"role cannot outrank governance"
+        )
+    if entry.role != MODEL_DEFAULT_ROLE and not str(entry.role_changed_at or "").strip():
+        problems.append(
+            f"role {entry.role!r} must record role_changed_at — a model does not "
+            f"leave shadow silently"
+        )
+    if entry.shadow_observations < 0:
+        problems.append("shadow_observations cannot be negative")
     return problems
 
 
@@ -404,6 +457,167 @@ class ModelRegistry:
         entry.oos_comparison = dict(oos_comparison)
         return entry
 
+    def _require(self, model_version: str) -> ModelEntry:
+        """Fetch a registered model or raise. Shared by the role transitions."""
+        entry = self.get(model_version)
+        if entry is None:
+            raise ModelRegistryError(f"model_version {model_version!r} is not registered")
+        return entry
+
+    # --- M7 champion / challenger ------------------------------------------
+
+    def champion(self, contract: tuple[str, str | None, str | None]) -> ModelEntry | None:
+        """The single champion serving a forecast contract, if any."""
+        serving = [
+            entry for entry in self._entries.values()
+            if entry.forecast_contract() == contract and entry.is_live_eligible()
+        ]
+        if not serving:
+            return None
+        if len(serving) > 1:
+            raise ModelRegistryError(
+                f"contract {contract} has {len(serving)} champions "
+                f"({sorted(e.model_version for e in serving)}) — exactly one "
+                f"model may serve a contract"
+            )
+        return serving[0]
+
+    def challengers(self, contract: tuple[str, str | None, str | None]) -> list[ModelEntry]:
+        """Every challenger evaluating against this contract's champion."""
+        return sorted(
+            (
+                entry for entry in self._entries.values()
+                if entry.forecast_contract() == contract
+                and entry.role == MODEL_ROLE_CHALLENGER
+            ),
+            key=lambda entry: entry.model_version,
+        )
+
+    def shadows(self, contract: tuple[str, str | None, str | None] | None = None) -> list[ModelEntry]:
+        """Models recording predictions but consulted by nothing."""
+        return sorted(
+            (
+                entry for entry in self._entries.values()
+                if entry.role == MODEL_ROLE_SHADOW
+                and (contract is None or entry.forecast_contract() == contract)
+            ),
+            key=lambda entry: entry.model_version,
+        )
+
+    def record_shadow_observations(self, model_version: str, count: int) -> ModelEntry:
+        """Accrue out-of-sample observations for a shadow model."""
+        entry = self._require(model_version)
+        if entry.role != MODEL_ROLE_SHADOW:
+            raise ModelRegistryError(
+                f"{model_version!r} is a {entry.role}, not a shadow model — "
+                f"shadow observations only accrue before promotion"
+            )
+        if count < 0:
+            raise ModelRegistryError("observation count cannot be negative")
+        entry.shadow_observations += int(count)
+        return entry
+
+    def promote_to_challenger(
+        self,
+        model_version: str,
+        changed_at: str,
+        reason: str = "",
+    ) -> ModelEntry:
+        """shadow -> challenger. Requires accumulated shadow evidence.
+
+        A model must have run in shadow long enough to be measurable before
+        it may be evaluated against the champion. An unmeasured model has
+        earned nothing.
+        """
+        entry = self._require(model_version)
+        if entry.role != MODEL_ROLE_SHADOW:
+            raise ModelRegistryError(
+                f"{model_version!r} is already a {entry.role} — only a shadow "
+                f"model is promoted to challenger"
+            )
+        if entry.status == MODEL_STATUS_RETIRED:
+            raise ModelRegistryError(f"{model_version!r} is retired")
+        if entry.shadow_observations < SHADOW_MIN_OBSERVATIONS:
+            raise ModelRegistryError(
+                f"{model_version!r} has {entry.shadow_observations} shadow "
+                f"observations, below the {SHADOW_MIN_OBSERVATIONS} required — "
+                f"an unmeasured model has earned nothing"
+            )
+        if not str(changed_at or "").strip():
+            raise ModelRegistryError("changed_at is required")
+        entry.role = MODEL_ROLE_CHALLENGER
+        entry.role_changed_at = str(changed_at)
+        entry.role_reason = str(reason)
+        return entry
+
+    def crown_champion(
+        self,
+        model_version: str,
+        changed_at: str,
+        reason: str = "",
+    ) -> dict[str, Any]:
+        """challenger -> champion, demoting the incumbent in the same act.
+
+        Championship is exclusive per forecast contract, so crowning is a
+        SWAP rather than an addition: the outgoing champion becomes a
+        challenger and keeps its entry. Doing both in one operation is what
+        makes "exactly one champion" impossible to violate halfway.
+
+        The model must already be approved — this is a serving decision, not
+        a governance one, and it cannot substitute for the M2 promotion gate.
+        """
+        entry = self._require(model_version)
+        if entry.role != MODEL_ROLE_CHALLENGER:
+            raise ModelRegistryError(
+                f"{model_version!r} is a {entry.role} — only a challenger is "
+                f"crowned champion, and every model starts in shadow"
+            )
+        if entry.status != MODEL_STATUS_APPROVED:
+            raise ModelRegistryError(
+                f"{model_version!r} has status {entry.status!r} — a champion must "
+                f"be approved through the promotion gate first (an OOS win plus "
+                f"a human approver)"
+            )
+        if not str(changed_at or "").strip():
+            raise ModelRegistryError("changed_at is required")
+
+        contract = entry.forecast_contract()
+        outgoing = self.champion(contract)
+
+        if outgoing is not None:
+            outgoing.role = MODEL_ROLE_CHALLENGER
+            outgoing.role_changed_at = str(changed_at)
+            outgoing.role_reason = (
+                f"demoted; {model_version} crowned champion of {contract}"
+            )
+        entry.role = MODEL_ROLE_CHAMPION
+        entry.role_changed_at = str(changed_at)
+        entry.role_reason = str(reason)
+        return {
+            "contract": contract,
+            "champion": entry.model_version,
+            "demoted": outgoing.model_version if outgoing else None,
+            "challengers": [e.model_version for e in self.challengers(contract)],
+            "version": CHAMPION_CHALLENGER_VERSION,
+        }
+
+    def role_problems(self) -> list[str]:
+        """Every contract must have at most one champion."""
+        problems: list[str] = []
+        by_contract: dict[tuple, list[str]] = {}
+        for entry in self._entries.values():
+            if entry.is_live_eligible():
+                by_contract.setdefault(entry.forecast_contract(), []).append(
+                    entry.model_version
+                )
+        for contract, versions in sorted(by_contract.items(), key=lambda kv: str(kv[0])):
+            if len(versions) > 1:
+                problems.append(
+                    f"contract {contract} has {len(versions)} champions "
+                    f"({sorted(versions)}) — exactly one model may serve"
+                )
+        return problems
+
     def retire(self, model_version: str, retired_at: str, reason: str = "") -> ModelEntry:
         """approved -> retired. Never deletes the entry or its artifact."""
         entry = self.get(model_version)
@@ -482,7 +696,12 @@ def require_live_model(
     }
 
 
-def _seed_entry(model_version: str, family: str, feature_set_version: str) -> ModelEntry:
+def _seed_entry(
+    model_version: str,
+    family: str,
+    feature_set_version: str,
+    universe: str = "portfolio_list_snapshot",
+) -> ModelEntry:
     """A deterministic scorer that backs today's live score path.
 
     These are rule-based, not trained, so they carry no dataset hash or
@@ -509,6 +728,19 @@ def _seed_entry(model_version: str, family: str, feature_set_version: str) -> Mo
                 "comparison. Any TRAINED successor must beat it through promote()."
             )
         },
+        # M7: each seeded scorer is the reigning champion of its OWN contract.
+        # They are complementary components of one ensemble, not rivals for a
+        # single slot — the technical, fundamental and market-quality views
+        # answer different questions and all three serve simultaneously.
+        # `universe` distinguishes their contracts so "exactly one champion
+        # per contract" holds without pretending they compete.
+        role=MODEL_ROLE_CHAMPION,
+        role_changed_at="2026-09-16T00:00:00+00:00",
+        role_reason=(
+            "Reigning champion of its contract since the registry was created; "
+            "a trained successor must pass the promotion gate and be crowned."
+        ),
+        universe=universe,
     )
 
 
@@ -579,13 +811,20 @@ def entry_from_training_run(
 def build_default_model_registry() -> ModelRegistry:
     """The canonical registry backing the live score path."""
     registry = ModelRegistry()
-    registry.register(_seed_entry("market-data-v1", "technical_analysis", MARKET_FEATURE_VERSION))
+    registry.register(_seed_entry(
+        "market-data-v1", "technical_analysis", MARKET_FEATURE_VERSION,
+        universe="market_quality",
+    ))
     registry.register(_seed_entry(
         "technical-v1",
         "technical_analysis",
         f"{CURRENT_SCORE_VERSION}+{LONG_TERM_SCORE_VERSION}",
+        universe="technical_view",
     ))
-    registry.register(_seed_entry("fundamental-v1", "technical_analysis", FUNDAMENTAL_FEATURE_VERSION))
+    registry.register(_seed_entry(
+        "fundamental-v1", "technical_analysis", FUNDAMENTAL_FEATURE_VERSION,
+        universe="fundamental_view",
+    ))
     return registry
 
 

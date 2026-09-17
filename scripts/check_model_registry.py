@@ -217,6 +217,99 @@ def main() -> int:
     if captured.calibration_version != CALIBRATION_UNCALIBRATED:
         failures.append("a fresh artifact is not marked uncalibrated")
 
+    # 6c. M7 champion / challenger: roles are declared, never inferred.
+    from core.config import (
+        MODEL_ROLE_CHALLENGER,
+        MODEL_ROLE_CHAMPION,
+        MODEL_ROLE_SHADOW,
+        SHADOW_MIN_OBSERVATIONS,
+    )
+
+    AT = "2026-09-17T00:00:00+00:00"
+
+    def _m7_model(version: str, horizon: str = "20d") -> ModelEntry:
+        return ModelEntry(
+            model_version=version, family="boosting", feature_set_version="fs-1",
+            dataset_hash="d" * 64, code_commit="abc1234",
+            hyperparameters={"n_estimators": 100}, seed=42, artifact_hash="a" * 64,
+            horizon=horizon, universe="gate_universe",
+        )
+
+    def _m7_comparison(candidate: str, incumbent: str | None) -> dict:
+        return {
+            "primary_metric": "oos_sharpe", "candidate_value": 1.4,
+            "incumbent_value": 1.1, "sample": 500,
+            "candidate_version": candidate, "incumbent_version": incumbent,
+        }
+
+    roles = build_default_model_registry()
+
+    # Every model is born shadow and serves nothing.
+    born = roles.register(_m7_model("gate-m7-a"))
+    if born.role != MODEL_ROLE_SHADOW:
+        failures.append(f"a new model is born {born.role!r}; M7 requires shadow")
+    if born.is_live_eligible():
+        failures.append("a shadow model is live-eligible")
+
+    # Shadow -> challenger requires evidence.
+    try:
+        roles.promote_to_challenger("gate-m7-a", AT)
+        failures.append("an unmeasured shadow model was promoted to challenger")
+    except ModelRegistryError:
+        pass
+    roles.record_shadow_observations("gate-m7-a", SHADOW_MIN_OBSERVATIONS)
+    roles.promote_to_challenger("gate-m7-a", AT)
+    if born.role != MODEL_ROLE_CHALLENGER:
+        failures.append(f"a measured shadow model became {born.role!r}, not challenger")
+    if born.is_live_eligible():
+        failures.append("a challenger is live-eligible — it must be measured, not trusted")
+
+    # Challenger -> champion requires governance approval.
+    try:
+        roles.crown_champion("gate-m7-a", AT)
+        failures.append(
+            "an unapproved challenger was crowned — crowning must not substitute "
+            "for the promotion gate"
+        )
+    except ModelRegistryError:
+        pass
+    roles.promote("gate-m7-a", "oren", AT, _m7_comparison("gate-m7-a", None))
+    roles.crown_champion("gate-m7-a", AT)
+    if not roles.get("gate-m7-a").is_live_eligible():
+        failures.append("a crowned champion does not serve")
+
+    # Crowning demotes the incumbent atomically.
+    roles.register(_m7_model("gate-m7-b"))
+    roles.record_shadow_observations("gate-m7-b", SHADOW_MIN_OBSERVATIONS)
+    roles.promote_to_challenger("gate-m7-b", AT)
+    roles.promote("gate-m7-b", "oren", AT, _m7_comparison("gate-m7-b", "gate-m7-a"))
+    swap = roles.crown_champion("gate-m7-b", AT)
+    if swap.get("demoted") != "gate-m7-a":
+        failures.append(f"crowning did not demote the incumbent (got {swap.get('demoted')!r})")
+    if roles.get("gate-m7-a").role != MODEL_ROLE_CHALLENGER:
+        failures.append("the outgoing champion was not demoted to challenger")
+    if roles.get("gate-m7-a") is None:
+        failures.append("the outgoing champion was DELETED")
+    if roles.role_problems():
+        failures.append(f"role invariant broken after a swap: {roles.role_problems()}")
+
+    # Exactly one champion per contract, and corruption is reported.
+    roles.get("gate-m7-a").role = MODEL_ROLE_CHAMPION
+    if not roles.role_problems():
+        failures.append(
+            "two champions on one contract were NOT reported — the invariant is unchecked"
+        )
+    roles.get("gate-m7-a").role = MODEL_ROLE_CHALLENGER
+
+    # The seeded scorers must still serve after the role model landed.
+    for entry in registry.all_models().values():
+        if entry.role != MODEL_ROLE_CHAMPION:
+            failures.append(f"seeded scorer {entry.model_version} is {entry.role!r}")
+        if not entry.is_live_eligible():
+            failures.append(f"seeded scorer {entry.model_version} no longer serves")
+    if registry.role_problems():
+        failures.append(f"default registry violates the role invariant: {registry.role_problems()}")
+
     # 7. No hardcoded literals in the orchestrator.
     source = (REPO_ROOT / "core" / "orchestrator.py").read_text(encoding="utf-8")
     for literal in ('model_version="market-data-v1"',
@@ -240,6 +333,7 @@ def main() -> int:
     print("  promotion refuses without OOS evidence, on a loss, or without a human approver.")
     print("  retirement preserves entries; orchestrator holds no hardcoded versions.")
     print("  M5: trained artifacts must carry full provenance; run provenance is captured.")
+    print("  M7: every model born shadow; crowning demotes atomically; one champion per contract.")
     return 0
 
 
