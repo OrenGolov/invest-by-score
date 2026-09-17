@@ -1596,6 +1596,45 @@ same window.
 - Acceptance: 34 tests in `tests/test_event_study.py`. Full suite:
   1028/1028 pass, thirteen gates green.
 
+### E5. Confounder / attribution engine ✓ DONE
+
+Implemented 2026-09-17 in `core/attribution.py` (`event-attribution-v1`).
+
+E4 measures what happened; E5 asks how much of it was the market, the sector
+or the company, and how much is left over near the event. That leftover is
+**event-associated, never event-caused** — a residual is a question, not an
+answer.
+
+- **Additive by construction:** `stock = market + sector_excess +
+  stock_specific`, asserted over 200 random shapes in the CI gate rather
+  than one hand-picked example.
+- **The sector component is EXCESS over market, not the raw sector return.**
+  A sector ETF already contains market beta, so subtracting the raw return
+  would count the market twice and push the surplus into the residual — the
+  one number nobody would notice was wrong.
+- **A residual must clear TWO bars:** a large share of the movement (common
+  factors did not explain it) AND a large magnitude in baseline sigma (not
+  noise on a quiet day). A residual that is 90% of a 0.1% move is refused as
+  `unexplained`.
+- **Overlapping events confound by default.** Another event for the same
+  entity inside the window means no single one can claim the residual — the
+  most common confounder in event studies and the easiest to forget.
+  Another company's news is correctly not a confounder.
+- **Missing market context is `inconclusive`, never `event_associated`.**
+  Without a benchmark the residual is just the raw return relabelled.
+- **No verdict claims causation.** Every result carries the note, and the
+  strongest verdict is still only an association.
+- CI drift gate: `scripts/check_attribution.py`. Verified non-vacuous by two
+  sabotages — using the raw sector return, and dropping the magnitude bar —
+  both fail with precise diagnoses.
+- Acceptance: 35 tests in `tests/test_attribution_engine.py`. Full suite:
+  1063/1063 pass, fourteen gates green.
+
+On real NVDA/QQQ data across 30 studied horizons: 11 confounded, 18
+unexplained, **1 event-associated**. That conservatism is the intended
+behaviour, not a defect — most apparent reactions really are common-factor
+moves.
+
 ---
 
 ## Sprint R — Portfolio Risk Context (completing the fail-closed system)

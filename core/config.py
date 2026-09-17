@@ -1134,3 +1134,72 @@ def _validate_event_study_config() -> None:
 
 
 _validate_event_study_config()
+
+
+# --- Confounder / attribution engine (E5) ----------------------------------------
+# "Never automatically claim causality — decompose observed movement into
+# market component + sector component + stock-specific component +
+# event-associated residual."
+#
+# E4 measures what happened. E5 asks how much of it was the market, the
+# sector, or the company, and how much is left over near the event. The
+# leftover is EVENT-ASSOCIATED, never event-caused: a residual is a question,
+# not an answer.
+EVENT_ATTRIBUTION_VERSION = "event-attribution-v1"
+
+# The decomposition is additive by construction:
+#
+#     stock = market + sector_excess + stock_specific
+#
+# where sector_excess = sector - market. Using the RAW sector return would
+# count market beta twice (a sector ETF already contains it) and hand the
+# error to the residual, which is the one number nobody would notice was
+# wrong.
+ATTRIBUTION_COMPONENTS = (
+    "market", "sector_excess", "stock_specific",
+)
+
+# How confidently the residual can be associated with the event at all.
+# These are CONFOUNDING verdicts, not significance tests: they say whether
+# other explanations have been ruled out enough to make the association
+# interesting, never whether the event caused anything.
+ATTRIBUTION_CONFOUNDED = "confounded"          # market/sector explains most of it
+ATTRIBUTION_UNEXPLAINED = "unexplained"        # residual dominates, no attribution
+ATTRIBUTION_EVENT_ASSOCIATED = "event_associated"
+ATTRIBUTION_INCONCLUSIVE = "inconclusive"      # not enough context to judge
+ATTRIBUTION_VERDICTS = (
+    ATTRIBUTION_CONFOUNDED, ATTRIBUTION_UNEXPLAINED,
+    ATTRIBUTION_EVENT_ASSOCIATED, ATTRIBUTION_INCONCLUSIVE,
+)
+
+# A residual must exceed this share of the total absolute movement before it
+# is called event-associated at all. Below it, common factors explain the
+# move and the event adds nothing worth recording.
+ATTRIBUTION_MIN_RESIDUAL_SHARE = 0.5
+
+# ...and must be at least this many baseline standard deviations. A residual
+# that is large in share but tiny in magnitude is noise on a quiet day.
+ATTRIBUTION_MIN_RESIDUAL_SIGMA = 1.5
+
+# A window containing this many OTHER events cannot be attributed to any one
+# of them. Overlapping events are the most common confounder in event
+# studies and the easiest to forget.
+ATTRIBUTION_MAX_OVERLAPPING_EVENTS = 0
+
+
+def _validate_attribution_config() -> None:
+    """Import-time guard: the attribution thresholds must be meaningful."""
+    if not 0.0 < ATTRIBUTION_MIN_RESIDUAL_SHARE <= 1.0:
+        raise ValueError("ATTRIBUTION_MIN_RESIDUAL_SHARE must be in (0, 1]")
+    if ATTRIBUTION_MIN_RESIDUAL_SIGMA <= 0.0:
+        raise ValueError(
+            "ATTRIBUTION_MIN_RESIDUAL_SIGMA must be positive — a zero threshold "
+            "would call every flicker event-associated"
+        )
+    if ATTRIBUTION_MAX_OVERLAPPING_EVENTS < 0:
+        raise ValueError("the overlapping-event allowance cannot be negative")
+    if ATTRIBUTION_EVENT_ASSOCIATED not in ATTRIBUTION_VERDICTS:
+        raise ValueError("the event-associated verdict must be declared")
+
+
+_validate_attribution_config()

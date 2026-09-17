@@ -65,3 +65,6 @@ jobs:
 
       - name: E4 event-study drift gate
         run: python scripts/check_event_study.py
+
+      - name: E5 attribution drift gate
+        run: python scripts/check_attribution.py
