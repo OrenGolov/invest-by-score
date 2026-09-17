@@ -1261,3 +1261,75 @@ def _validate_event_memory_config() -> None:
 
 
 _validate_event_memory_config()
+
+
+# --- Event revision / contradiction learning (E7) --------------------------------
+# "Store event chains (initial claim -> correction -> confirmation ->
+# reversal) — the evolution itself becomes training information."
+#
+# A story that was reported, corrected, then reversed is a DIFFERENT kind of
+# evidence from one that was reported once and stood. Treating the four
+# reports as four independent events would quadruple-count a single story and
+# hide the fact that the market learned it was wrong.
+EVENT_CHAIN_VERSION = "event-chain-v1"
+
+# How a later event relates to an earlier one in the same chain.
+CHAIN_LINK_INITIAL = "initial_claim"
+CHAIN_LINK_CORRECTION = "correction"      # amends details, direction intact
+CHAIN_LINK_CONFIRMATION = "confirmation"  # independent corroboration
+CHAIN_LINK_REVERSAL = "reversal"          # the claim was wrong
+CHAIN_LINK_DUPLICATE = "duplicate"        # same story, no new information
+CHAIN_LINKS = (
+    CHAIN_LINK_INITIAL, CHAIN_LINK_CORRECTION, CHAIN_LINK_CONFIRMATION,
+    CHAIN_LINK_REVERSAL, CHAIN_LINK_DUPLICATE,
+)
+
+# A chain's settled state, which is what downstream learning should read.
+CHAIN_STATUS_OPEN = "open"              # only an initial claim so far
+CHAIN_STATUS_CONFIRMED = "confirmed"
+CHAIN_STATUS_CORRECTED = "corrected"
+CHAIN_STATUS_REVERSED = "reversed"
+CHAIN_STATUS_CONTESTED = "contested"    # confirmed AND reversed — unresolved
+CHAIN_STATUSES = (
+    CHAIN_STATUS_OPEN, CHAIN_STATUS_CONFIRMED, CHAIN_STATUS_CORRECTED,
+    CHAIN_STATUS_REVERSED, CHAIN_STATUS_CONTESTED,
+)
+
+# Events for the same entity and type within this many days are candidates
+# for the same chain. Beyond it they are separate stories, not an evolution.
+EVENT_CHAIN_WINDOW_DAYS = 14
+
+# Reliability weight by settled state. A reversed claim is not merely
+# uninformative — it is evidence the source got it wrong, so it weighs less
+# than an unconfirmed one. These are PRIORS for chain handling, not measured
+# source scores; L4 learns those from outcomes.
+CHAIN_RELIABILITY_WEIGHT = {
+    CHAIN_STATUS_CONFIRMED: 1.0,
+    CHAIN_STATUS_OPEN: 0.7,
+    CHAIN_STATUS_CORRECTED: 0.6,
+    CHAIN_STATUS_CONTESTED: 0.3,
+    CHAIN_STATUS_REVERSED: 0.1,
+}
+
+
+def _validate_event_chain_config() -> None:
+    """Import-time guard: the chain vocabularies must stay coherent."""
+    missing = set(CHAIN_STATUSES) - set(CHAIN_RELIABILITY_WEIGHT)
+    if missing:
+        raise ValueError(f"chain statuses without a weight: {sorted(missing)}")
+    if CHAIN_RELIABILITY_WEIGHT[CHAIN_STATUS_REVERSED] >= CHAIN_RELIABILITY_WEIGHT[
+        CHAIN_STATUS_OPEN
+    ]:
+        raise ValueError(
+            "a reversed claim must weigh less than an unconfirmed one — a "
+            "reversal is evidence the source was wrong"
+        )
+    if CHAIN_RELIABILITY_WEIGHT[CHAIN_STATUS_CONFIRMED] <= CHAIN_RELIABILITY_WEIGHT[
+        CHAIN_STATUS_CONTESTED
+    ]:
+        raise ValueError("a confirmed claim must outweigh a contested one")
+    if EVENT_CHAIN_WINDOW_DAYS < 1:
+        raise ValueError("the chain window must be at least a day")
+
+
+_validate_event_chain_config()

@@ -1674,6 +1674,44 @@ entirely on not remembering things that were never true.
 - Acceptance: 36 tests in `tests/test_event_memory.py`. Full suite:
   1099/1099 pass, fifteen gates green.
 
+### E7. Event revision / contradiction learning ✓ DONE
+
+Implemented 2026-09-17 in `core/event_chains.py` (`event-chain-v1`).
+**Sprint E is complete.**
+
+Stores event chains — initial claim → correction → confirmation → reversal —
+because the evolution itself is training information. A story reported,
+corrected, then reversed is a fundamentally different kind of evidence from
+one reported once that stood.
+
+- **A story counts ONCE.** Four reports of one claim would otherwise become
+  four events in every downstream base rate. `deduplicate_events` returns
+  one id per chain — the initial claim, the moment the story first became
+  knowable.
+- **A REVERSED claim weighs less than an unconfirmed one** (0.1 vs 0.7). A
+  reversal is positive evidence the source got it wrong, not an absence of
+  evidence. Treating it as neutral would lose the most useful signal in the
+  chain. Guarded at import.
+- **`contested` is a real state.** A claim both confirmed and reversed is
+  unresolved, not an average of the two — the same failure N1 already
+  refuses at the article level.
+- **Classification is conservative:** only an explicit directional flip is a
+  reversal; a new source in the same direction confirms; the same source
+  repeating is a duplicate carrying no new information; CONTRADICTORY is
+  never treated as the opposite of a direction, because it is already
+  unresolved.
+- **The 14-day window separates distinct stories**, so a year of earnings
+  reports does not collapse into one chain. Entity and event type are hard
+  filters. An unparseable timestamp is skipped rather than positioned by
+  guesswork.
+- `chain_report` exposes the **reversal rate** — how often a source's claims
+  turn out to be wrong, which is the training information E7 exists for.
+- CI drift gate: `scripts/check_event_chains.py`. Verified non-vacuous by
+  sabotage — collapsing `contested` into `confirmed` fails it with two
+  messages.
+- Acceptance: 39 tests in `tests/test_event_chains.py`. Full suite:
+  1138/1138 pass, sixteen gates green.
+
 ---
 
 ## Sprint R — Portfolio Risk Context (completing the fail-closed system)

@@ -71,3 +71,6 @@ jobs:
 
       - name: E6 event-memory drift gate
         run: python scripts/check_event_memory.py
+
+      - name: E7 event-chain drift gate
+        run: python scripts/check_event_chains.py
