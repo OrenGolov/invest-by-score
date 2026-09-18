@@ -321,3 +321,58 @@ class ContractValidationTests(unittest.TestCase):
 
     def test_min_bars_covers_every_timeframe(self):
         self.assertEqual(set(TIMEFRAME_MIN_BARS), set(TIMEFRAME_ORDER))
+
+
+class PartialBucketDisclosureTests(unittest.TestCase):
+    """A resampled bucket is LABELLED at period end.
+
+    So the final yearly bucket can be stamped 2025-12-31 while its newest
+    source bar is 2025-06-01 — six months of label that is not data. Left
+    undisclosed, `last_bar_time` reports a date after the real history and a
+    year-over-year comparison puts half a year against full years.
+    """
+
+    @staticmethod
+    def _monthly(n=101, start="2018-01-01"):
+        index = pd.date_range(start, periods=n, freq="MS")
+        closes = [100.0 + i for i in range(n)]
+        return pd.DataFrame(
+            {"Open": closes, "High": closes, "Low": closes,
+             "Close": closes, "Volume": [1] * n},
+            index=index,
+        )
+
+    def test_a_partial_final_yearly_bucket_is_flagged(self):
+        state = build_timeframe_state("yearly", self._monthly(), "2026-06-15")
+        self.assertTrue(state.partial_final_bucket)
+
+    def test_the_true_last_source_bar_is_reported(self):
+        state = build_timeframe_state("yearly", self._monthly(), "2026-06-15")
+        self.assertIsNotNone(state.last_source_bar)
+        self.assertLess(
+            pd.Timestamp(state.last_source_bar), pd.Timestamp(state.last_bar_time),
+            "a partial bucket must expose a source bar earlier than its label",
+        )
+
+    def test_the_partial_bucket_explains_itself(self):
+        state = build_timeframe_state("yearly", self._monthly(), "2026-06-15")
+        self.assertIn("partial period", state.reason)
+
+    def test_a_non_resampled_timeframe_is_never_flagged_partial(self):
+        """Daily bars are not bucketed, so the label IS the bar."""
+        dates = pd.date_range("2026-01-01", periods=60, freq="D")
+        state = build_timeframe_state("daily", _frame(dates), "2026-09-15")
+        self.assertFalse(state.partial_final_bucket)
+        self.assertIsNone(state.last_source_bar)
+
+    def test_a_complete_final_bucket_is_not_flagged(self):
+        """When the source history ends exactly at a year end, nothing is partial."""
+        index = pd.date_range("2018-01-01", periods=96, freq="MS")  # through 2025-12
+        closes = [100.0 + i for i in range(96)]
+        frame = pd.DataFrame(
+            {"Open": closes, "High": closes, "Low": closes,
+             "Close": closes, "Volume": [1] * 96},
+            index=index,
+        )
+        state = build_timeframe_state("yearly", frame, "2027-06-15")
+        self.assertFalse(state.partial_final_bucket)

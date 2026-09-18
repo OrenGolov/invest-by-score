@@ -114,18 +114,25 @@ def eligible_bars(
     return eligible, unclosed_count, future_count
 
 
-def _resample_yearly(frame: pd.DataFrame, rule: str) -> pd.DataFrame:
+def _resample_yearly(frame: pd.DataFrame, rule: str) -> tuple[pd.DataFrame, str | None]:
     """Aggregate already-eligible bars onto a coarser clock.
 
     Only closed bars reach this function, so the aggregate cannot contain
     information that did not exist at as_of.
+
+    Returns `(aggregated, last_source_bar)`. The second value exists because
+    resampling LABELS each bucket at period end: a bucket fed by Jan-Jun 2025
+    is stamped 2025-12-31, so `last_bar_time` would otherwise report a date six
+    months after the newest real bar, and a year-over-year comparison would put
+    half a year against full years. Reporting the true last source bar is what
+    lets `partial_final_bucket` be honest about it.
     """
     if frame.empty:
-        return frame
+        return frame, None
     aggregated = frame.resample(rule).agg(
         {"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}
     )
-    return aggregated.dropna(subset=["Close"])
+    return aggregated.dropna(subset=["Close"]), str(frame.index[-1])
 
 
 def classify_trend(first_close: float, last_close: float) -> str:
@@ -180,8 +187,9 @@ def build_timeframe_state(
         return _empty(STATUS_INVALID, f"{timeframe}: payload missing {', '.join(missing)}")
 
     eligible, unclosed, future = eligible_bars(frame, as_of, str(spec["close_after"]))
+    last_source_bar: str | None = None
     if spec.get("resample"):
-        eligible = _resample_yearly(eligible, str(spec["resample"]))
+        eligible, last_source_bar = _resample_yearly(eligible, str(spec["resample"]))
     eligible = eligible.dropna(subset=["Close"])
 
     if eligible.empty:
@@ -212,6 +220,17 @@ def build_timeframe_state(
         state.change_pct = change_pct
         return state
 
+    # A resampled bucket is labelled at period END, so comparing the label to
+    # the newest source bar would flag EVERY year: a monthly bar is stamped at
+    # month START, so a complete December reads 2025-12-01 against a 2025-12-31
+    # label. The real question is whether the source reaches the bucket's final
+    # PERIOD, so the comparison is made one source period back from the label.
+    partial_final = False
+    if last_source_bar is not None:
+        label = pd.Timestamp(eligible.index[-1])
+        source_period = pd.Timedelta(str(spec["close_after"])) / 12  # monthly feed
+        partial_final = pd.Timestamp(last_source_bar) < label - source_period
+
     return TimeframeState(
         timeframe=timeframe,
         interval=interval,
@@ -224,7 +243,13 @@ def build_timeframe_state(
         trend=classify_trend(first_close, last_close),
         excluded_unclosed_bars=unclosed,
         excluded_future_bars=future,
-        reason="",
+        last_source_bar=last_source_bar,
+        partial_final_bucket=partial_final,
+        reason=(
+            f"the final {timeframe} bucket is labelled {eligible.index[-1]} but its "
+            f"newest source bar is {last_source_bar} — it is a partial period"
+            if partial_final else ""
+        ),
     )
 
 

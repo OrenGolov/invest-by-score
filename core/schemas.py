@@ -333,6 +333,12 @@ class TimeframeState:
     trend: str | None
     excluded_unclosed_bars: int = 0
     excluded_future_bars: int = 0
+    # Resampled timeframes LABEL each bucket at period end, so `last_bar_time`
+    # can sit months after the newest real bar. `last_source_bar` is that real
+    # bar, and `partial_final_bucket` says the final aggregate is incomplete --
+    # without which a year-over-year read compares half a year against full ones.
+    last_source_bar: str | None = None
+    partial_final_bucket: bool = False
     reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:

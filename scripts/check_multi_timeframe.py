@@ -126,6 +126,24 @@ def main() -> int:
     if TIMEFRAME_SPECS["yearly"]["interval"] != "1mo" or not TIMEFRAME_SPECS["yearly"]["resample"]:
         failures.append("yearly must be resampled from monthly bars (W5: one price truth)")
 
+    # 6b. a resampled bucket labelled at period end must disclose a partial
+    # final period, or last_bar_time reports a date past the real history.
+    monthly_index = pd.date_range("2018-01-01", periods=101, freq="MS")
+    monthly = _frame([100.0 + i for i in range(101)])
+    monthly.index = monthly_index
+    yearly_state = build_timeframe_state("yearly", monthly, AS_OF)
+    if not yearly_state.partial_final_bucket:
+        failures.append(
+            "a yearly bucket fed by a part-year of source bars was not flagged "
+            "partial — last_bar_time reports a period-end label months after the "
+            "newest real bar"
+        )
+    if yearly_state.last_source_bar is None:
+        failures.append("a resampled timeframe did not report its true last source bar")
+    daily_state = build_timeframe_state("daily", _frame(pd.date_range("2026-01-01", periods=60)), AS_OF)
+    if daily_state.partial_final_bucket:
+        failures.append("a non-resampled timeframe was wrongly flagged partial")
+
     # 7. PIT monotonicity
     fetcher = _fetcher(_healthy_frames())
     late = build_timeframe_snapshot("MSFT", "2026-09-15", fetcher=fetcher)
