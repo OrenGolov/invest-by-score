@@ -51,6 +51,8 @@ HEALTHY = {
     "ICSA": [{"reference_date": "2024-03-09", "value": 190.0}],
     "A191RL1Q225SBEA": [{"reference_date": "2023-10-01", "value": 3.1}],
     "DGS10": [{"reference_date": "2024-03-13", "value": 4.2}],
+    "DGS30": [{"reference_date": "2024-03-13", "value": 4.4}],
+    "VIXCLS": [{"reference_date": "2024-03-13", "value": 14.5}],
 }
 RISK_OFF = {
     "FEDFUNDS": [{"reference_date": "2024-03-01", "value": 5.5}],
@@ -58,6 +60,8 @@ RISK_OFF = {
     "ICSA": [{"reference_date": "2024-03-09", "value": 500.0}],
     "A191RL1Q225SBEA": [{"reference_date": "2023-10-01", "value": 0.5}],
     "DGS10": [{"reference_date": "2024-03-13", "value": 1.0}],
+    "DGS30": [{"reference_date": "2024-03-13", "value": 1.8}],
+    "VIXCLS": [{"reference_date": "2024-03-13", "value": 38.0}],
 }
 RISK_ON = {
     "FEDFUNDS": [{"reference_date": "2024-03-01", "value": 1.5}],
@@ -65,6 +69,8 @@ RISK_ON = {
     "ICSA": [{"reference_date": "2024-03-09", "value": 180.0}],
     "A191RL1Q225SBEA": [{"reference_date": "2023-10-01", "value": 3.5}],
     "DGS10": [{"reference_date": "2024-03-13", "value": 4.0}],
+    "DGS30": [{"reference_date": "2024-03-13", "value": 4.5}],
+    "VIXCLS": [{"reference_date": "2024-03-13", "value": 12.0}],
 }
 
 
@@ -143,10 +149,11 @@ class RegistryTests(unittest.TestCase):
         "lookback_periods", "description",
     )
 
-    def test_five_logical_series_exist(self):
+    def test_the_logical_series_set_is_pinned(self):
         self.assertEqual(
             set(MACRO_SERIES_REGISTRY),
-            {"fed_funds", "cpi_yoy", "initial_claims", "gdp_growth", "10y_yield"},
+            {"fed_funds", "cpi_yoy", "initial_claims", "gdp_growth",
+             "10y_yield", "30y_yield", "vix"},
         )
 
     def test_every_series_carries_the_full_field_contract(self):
@@ -357,7 +364,7 @@ class VintageTests(unittest.TestCase):
         self.assertEqual(snapshot["status"], "OK")
         pipeline = snapshot["pipeline"]
         self.assertEqual(pipeline["vintage_source_used"], {})
-        self.assertEqual(len(pipeline["vintage_gaps"]), 5)
+        self.assertEqual(len(pipeline["vintage_gaps"]), len(MACRO_SERIES_REGISTRY))
         self.assertEqual(pipeline["current_vintage_fallback"], list(MACRO_SERIES_REGISTRY))
         # Values still arrive (from the disclosed fallback), vintage block
         # marks the none-source degradation explicitly.
@@ -389,6 +396,86 @@ class RegimeTests(unittest.TestCase):
         self.assertEqual(regime, "neutral")
         self.assertEqual(score, 0.5)
         self.assertEqual(reasoning, "no_signals")
+
+
+class VixAndLongYieldSignalTests(unittest.TestCase):
+    """VIX + 30Y joined the risk-regime signal set (macro-adapter-v3).
+
+    VIX is the ONE inverted series in the set: every other signal reads
+    "higher = more risk-on", but a high VIX is the market pricing fear. A
+    sign error here would turn a panic into a buy signal, so the inversion
+    is pinned in both directions and in isolation.
+    """
+
+    def _only(self, **kwargs):
+        base = dict(fed_funds=None, cpi_yoy=None, initial_claims=None,
+                    gdp_growth=None, yield_10y=None)
+        base.update(kwargs)
+        return compute_risk_regime(**base)
+
+    def test_a_vix_spike_is_risk_off(self):
+        regime, score, reasoning = self._only(vix=38.0)
+        self.assertEqual(regime, "risk_off")
+        self.assertLess(score, 0.5)
+        self.assertIn("vix-stress", reasoning)
+
+    def test_a_calm_vix_is_risk_on(self):
+        regime, score, reasoning = self._only(vix=12.0)
+        self.assertEqual(regime, "risk_on")
+        self.assertGreater(score, 0.5)
+        self.assertIn("vix-calm", reasoning)
+
+    def test_vix_is_inverted_relative_to_every_other_signal(self):
+        """The property that makes VIX different, stated as a test."""
+        high_vix, _, _ = self._only(vix=45.0)
+        high_yield, _, _ = self._only(yield_30y=4.8)
+        self.assertEqual(high_vix, "risk_off")
+        self.assertEqual(high_yield, "risk_on")
+
+    def test_an_elevated_30y_is_risk_on_like_the_10y(self):
+        regime, _, reasoning = self._only(yield_30y=4.8)
+        self.assertEqual(regime, "risk_on")
+        self.assertIn("yields-30y-elevated", reasoning)
+
+    def test_a_depressed_30y_is_risk_off(self):
+        regime, _, reasoning = self._only(yield_30y=1.5)
+        self.assertEqual(regime, "risk_off")
+        self.assertIn("yields-30y-depressed", reasoning)
+
+    def test_absent_new_series_leave_the_legacy_signal_set_untouched(self):
+        """Back-compat: the five-series call must score exactly as before."""
+        legacy = compute_risk_regime(
+            fed_funds=1.5, cpi_yoy=1.2, initial_claims=180.0,
+            gdp_growth=3.5, yield_10y=4.0,
+        )
+        explicit_none = compute_risk_regime(
+            fed_funds=1.5, cpi_yoy=1.2, initial_claims=180.0,
+            gdp_growth=3.5, yield_10y=4.0, yield_30y=None, vix=None,
+        )
+        self.assertEqual(legacy, explicit_none)
+        self.assertNotIn("vix", legacy[2])
+
+    def test_widening_the_signal_set_dilutes_each_signal(self):
+        """Intentional and versioned, not accidental.
+
+        The regime score is the MEAN of available signals, so adding series
+        reduces each one's share. This is why MACRO_ADAPTER_VERSION moved
+        to v3 — historical scores change.
+        """
+        five = compute_risk_regime(
+            fed_funds=5.5, cpi_yoy=4.0, initial_claims=500.0,
+            gdp_growth=0.5, yield_10y=1.0,
+        )[1]
+        seven = compute_risk_regime(
+            fed_funds=5.5, cpi_yoy=4.0, initial_claims=500.0,
+            gdp_growth=0.5, yield_10y=1.0, yield_30y=4.8, vix=12.0,
+        )[1]
+        # Two risk-on signals added to a risk-off set pull the score up.
+        self.assertGreater(seven, five)
+
+    def test_the_registry_declares_vix_inverted_in_its_description(self):
+        """A future reader must not have to infer the inversion from code."""
+        self.assertIn("invert", MACRO_SERIES_REGISTRY["vix"].description.lower())
 
 
 class SnapshotTests(unittest.TestCase):
@@ -431,22 +518,22 @@ class SnapshotTests(unittest.TestCase):
                 patch("core.macro_adapter.fetch_fred_series", side_effect=_empty_fetch):
             snapshot = build_macro_snapshot("MSFT", AS_OF)
         self.assertEqual(snapshot["status"], "INCOMPLETE")
-        self.assertEqual(len(snapshot["pipeline"]["missing_series"]), 5)
+        self.assertEqual(len(snapshot["pipeline"]["missing_series"]), len(MACRO_SERIES_REGISTRY))
 
     def test_healthy_run_is_ok_with_per_series_evidence(self):
         snapshot = _snapshot(HEALTHY)
         self.assertEqual(snapshot["status"], "OK")
-        self.assertEqual(len(snapshot["series_values"]), 5)
+        self.assertEqual(len(snapshot["series_values"]), len(MACRO_SERIES_REGISTRY))
         self.assertEqual(snapshot["series_values"]["fed_funds"], 5.33)
-        self.assertEqual(snapshot["regime"], "neutral")  # mixed signals net to 0.58
-        self.assertAlmostEqual(snapshot["regime_score"], 0.58, places=4)
-        self.assertEqual(len(snapshot["per_series_contributions"]), 5)
+        self.assertEqual(snapshot["regime"], "neutral")  # mixed signals net to 0.6071
+        self.assertAlmostEqual(snapshot["regime_score"], 0.6071, places=4)
+        self.assertEqual(len(snapshot["per_series_contributions"]), len(MACRO_SERIES_REGISTRY))
         for entry in snapshot["per_series_contributions"]:
             self.assertTrue(entry["source_record_ids"], f"{entry['series_id']} has no evidence id")
         self.assertEqual(snapshot["sector_loadings"]["rates"], -0.8)  # MSFT -> Information Technology
         pipeline = snapshot["pipeline"]
         self.assertEqual(pipeline["pending_releases"], 0)
-        self.assertEqual(pipeline["series_count"], 5)
+        self.assertEqual(pipeline["series_count"], len(MACRO_SERIES_REGISTRY))
         self.assertIn("regime_reasoning", pipeline)
 
     def test_risk_on_and_risk_off_tilts(self):
@@ -572,7 +659,7 @@ class ScoreEngineIntegrationTests(unittest.TestCase):
             with_macro = build_score("MSFT", "2024-01-02", persist_audit=False)
         baseline = build_score("MSFT", "2024-01-02", persist_audit=False)
         macro_line = with_macro.ensemble_breakdown["agents"]["macroeconomic"]
-        self.assertEqual(macro_line["score_current"], 7.9)  # 5 + 5 * 0.58
+        self.assertEqual(macro_line["score_current"], 8.0355)  # 5 + 5 * 0.6071
         self.assertAlmostEqual(macro_line["effective_weight_current"], 0.10 / 0.90, places=6)
         self.assertEqual(
             with_macro.ensemble_breakdown["agents"]["technical_analysis"]["score_current"],

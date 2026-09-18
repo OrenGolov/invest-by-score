@@ -51,6 +51,12 @@ from core.config import (
     MACRO_RISKON_THRESHOLD,
     MACRO_SCORE_BASE,
     MACRO_SCORE_SPAN,
+    MACRO_VIX_CALM,
+    MACRO_VIX_ELEVATED,
+    MACRO_VIX_STRESS,
+    MACRO_YIELD_30Y_DEPRESSED,
+    MACRO_YIELD_30Y_ELEVATED,
+    MACRO_YIELD_30Y_NORMAL,
 )
 from core.macro_registry import (
     MACRO_SERIES_REGISTRY,
@@ -364,6 +370,8 @@ def compute_risk_regime(
     initial_claims: float | None,
     gdp_growth: float | None,
     yield_10y: float | None,
+    yield_30y: float | None = None,
+    vix: float | None = None,
 ) -> tuple[str, float, str]:
     """INDICATOR ANALYSIS + RISK REGIME CLASSIFICATION v1.
 
@@ -448,6 +456,40 @@ def compute_risk_regime(
         else:
             signals.append(-0.05)
             reasoning_parts.append("yields-low")
+
+    # 30Y Yield: the long end. Same orientation as the 10Y (higher = risk-on
+    # term premium / growth expectations) but banded one notch higher, since
+    # the 30Y normally trades above the 10Y.
+    if yield_30y is not None:
+        if yield_30y > MACRO_YIELD_30Y_ELEVATED:
+            signals.append(0.3)
+            reasoning_parts.append("yields-30y-elevated")
+        elif yield_30y > MACRO_YIELD_30Y_NORMAL:
+            signals.append(0.1)
+            reasoning_parts.append("yields-30y-normal")
+        elif yield_30y < MACRO_YIELD_30Y_DEPRESSED:
+            signals.append(-0.25)
+            reasoning_parts.append("yields-30y-depressed")
+        else:
+            signals.append(-0.05)
+            reasoning_parts.append("yields-30y-low")
+
+    # VIX: INVERTED relative to every other series here — a HIGH reading is
+    # risk-OFF. Getting the sign wrong would turn a panic into a buy signal,
+    # so the inversion is pinned by its own regression test.
+    if vix is not None:
+        if vix > MACRO_VIX_STRESS:
+            signals.append(-0.4)
+            reasoning_parts.append("vix-stress")
+        elif vix > MACRO_VIX_ELEVATED:
+            signals.append(-0.2)
+            reasoning_parts.append("vix-elevated")
+        elif vix < MACRO_VIX_CALM:
+            signals.append(0.3)
+            reasoning_parts.append("vix-calm")
+        else:
+            signals.append(0.05)
+            reasoning_parts.append("vix-normal")
 
     # Mean signal = risk score offset from 0.5
     if signals:
@@ -617,6 +659,8 @@ def build_macro_snapshot(ticker: str, as_of: str, timeout: float = MACRO_PROVIDE
         initial_claims=series_values.get("initial_claims"),
         gdp_growth=series_values.get("gdp_growth"),
         yield_10y=series_values.get("10y_yield"),
+        yield_30y=series_values.get("30y_yield"),
+        vix=series_values.get("vix"),
     )
 
     # Map risk_score to 0-10 scale.
