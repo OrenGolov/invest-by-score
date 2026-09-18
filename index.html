@@ -305,6 +305,58 @@
       `).join('');
     }
 
+    // Macro context rows pinned to the TOP of the weights panel. These are
+    // macro SERIES (inputs to the macroeconomic agent), not ensemble agents —
+    // they carry no weight of their own, so they render as context with an
+    // explicit status rather than a number that looks like a weight.
+    const PINNED_MACRO_SERIES = [
+      { key: 'vix', label: 'VIX', note: 'implied volatility — inverted: high = risk-off' },
+      { key: '10y_yield', label: '10Y Treasury Yield', note: 'long rate' },
+      { key: '30y_yield', label: '30Y Treasury Yield', note: 'ultra-long rate / term premium' },
+    ];
+
+    function renderPinnedMacroRows(agentOutputs = []) {
+      const macro = (agentOutputs || []).find(a => a && a.agent === 'macroeconomic');
+      const payload = (macro && macro.payload) || {};
+      const values = payload.series_values || {};
+      const status = macro ? macro.status : 'UNAVAILABLE';
+      return PINNED_MACRO_SERIES.map(series => {
+        const raw = values[series.key];
+        const shown = (raw === undefined || raw === null)
+          ? `<span class="muted">${escapeHtml(status)}</span>`
+          : `<span class="strong">${escapeHtml(String(raw))}</span>`;
+        return `
+        <div class="metric-row">
+          <span class="muted">${escapeHtml(series.label)}<br><small class="muted">${escapeHtml(series.note)}</small></span>
+          ${shown}
+        </div>`;
+      }).join('');
+    }
+
+    function renderWeightRows(weights, agents, horizon = 'current') {
+      if (!weights || typeof weights !== 'object' || !Object.keys(weights).length) {
+        return '<div class="muted">No ensemble weights available.</div>';
+      }
+      // Heaviest first, so the agent actually carrying the score reads first.
+      const ordered = Object.entries(weights).sort((a, b) => Number(b[1]) - Number(a[1]));
+      return ordered.map(([agent, weight]) => {
+        const line = (agents || {})[agent] || {};
+        const status = line.status ? String(line.status) : '';
+        const pct = (Number(weight) * 100).toFixed(1);
+        const effective = horizon === 'long'
+          ? line.effective_weight_long
+          : line.effective_weight_current;
+        const effNote = (effective !== undefined && effective !== null && Number(effective) !== Number(weight))
+          ? ` <small class="muted">(effective ${(Number(effective) * 100).toFixed(1)}%)</small>`
+          : '';
+        return `
+        <div class="metric-row">
+          <span class="muted">${escapeHtml(agent.replace(/_/g, ' '))}${status ? ` <small class="muted">[${escapeHtml(status)}]</small>` : ''}</span>
+          <span class="strong">${pct}%${effNote}</span>
+        </div>`;
+      }).join('');
+    }
+
     function renderRecommendationOptions(options = []) {
       if (!options.length) return '<div class="muted">No recommendation options available.</div>';
       return options.map(option => `
@@ -490,6 +542,28 @@
             </div>
             <div style="margin-top: 14px;">
               <div><strong>Historical comparison:</strong> ${escapeHtml(data.scoring_breakdown?.historical_comparison || 'N/A')}</div>
+            </div>
+          </div>
+
+          <div class="panel full-width">
+            <h2>Scoring Weights</h2>
+            <div class="muted" style="margin-bottom: 10px;">
+              Macro context first, then the governed ensemble weights behind this score.
+            </div>
+            <div style="margin-bottom: 14px;">
+              <div><strong>Macro context:</strong></div>
+              ${renderPinnedMacroRows(decision.agent_outputs || [])}
+            </div>
+            <div>
+              <div><strong>Ensemble weights (current-time):</strong></div>
+              ${renderWeightRows(decision.ensemble_breakdown?.weights_current, decision.ensemble_breakdown?.agents)}
+            </div>
+            <div style="margin-top: 14px;">
+              <div><strong>Ensemble weights (long-term):</strong></div>
+              ${renderWeightRows(decision.ensemble_breakdown?.weights_long, decision.ensemble_breakdown?.agents, 'long')}
+            </div>
+            <div style="margin-top: 14px;" class="muted">
+              Ensemble version: ${escapeHtml(String(decision.ensemble_breakdown?.calculation_version || 'N/A'))}
             </div>
           </div>
 

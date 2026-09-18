@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 import tempfile
 import unittest
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -1094,6 +1095,23 @@ class RawStoreTests(unittest.TestCase):
         self.assertEqual(float(frame.loc["2026-08-26 13:30:00", "Close"]), 101.0)
 
 
+def _cache_never_expires():
+    """Read the on-disk price cache regardless of its age.
+
+    `DEFAULT_CACHE_TTL` is bound as a default argument at definition time, so
+    patching the module constant has no effect — the TTL check itself is what
+    has to be neutralised.
+    """
+    import fetch_data
+
+    real_read = fetch_data._read_cache
+    return patch.object(
+        fetch_data,
+        "_read_cache",
+        lambda path, ttl: real_read(path, timedelta(days=3650)),
+    )
+
+
 class RawStoreRebuildTests(unittest.TestCase):
     """W6 acceptance: the market snapshot rebuilds purely from raw records."""
 
@@ -1102,7 +1120,14 @@ class RawStoreRebuildTests(unittest.TestCase):
         if not cache_path.exists():
             self.skipTest("MSFT 1y cache not present on this machine")
         baseline_frame = pd.read_parquet(cache_path)
-        baseline = fetch_market_snapshot("MSFT", "2026-08-27")
+        # Both snapshots must read the SAME frame. The default 24h TTL would
+        # let the second call re-fetch once the cache ages out, and
+        # data_quality.score is a function of how many future bars the cache
+        # holds (`quality_score -= future_bars_excluded * 0.5`) — so a TTL
+        # expiry mid-test changes the score and fails a rebuild assertion
+        # that has nothing to do with rebuilding.
+        with _cache_never_expires():
+            baseline = fetch_market_snapshot("MSFT", "2026-08-27")
 
         with tempfile.TemporaryDirectory() as tmp:
             with patch("core.raw_store.RAW_STORE_DIR", Path(tmp)):
@@ -1124,7 +1149,8 @@ class RawStoreRebuildTests(unittest.TestCase):
 
         cache_path.unlink()
         rebuilt.to_parquet(cache_path)
-        rebuilt_snapshot = fetch_market_snapshot("MSFT", "2026-08-27")
+        with _cache_never_expires():
+            rebuilt_snapshot = fetch_market_snapshot("MSFT", "2026-08-27")
 
         for key in (
             "close", "rsi", "volatility", "change_1d", "change_5d", "change_20d",
@@ -1201,3 +1227,48 @@ class AuditStoreEnrichmentTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DashboardWeightsContractTests(unittest.TestCase):
+    """The dashboard renders the weight set, so the API must carry it.
+
+    `orchestrate_score` previously dropped `ensemble_breakdown`: it was
+    computed, used internally for the audit, and then discarded before the
+    decision was returned. The dashboard had no way to show WHICH agent
+    carried a score — only the number.
+    """
+
+    def test_the_decision_carries_the_ensemble_breakdown(self) -> None:
+        decision = orchestrate_score("MSFT", "2026-09-17")
+        breakdown = decision.to_dict()["ensemble_breakdown"]
+        self.assertTrue(breakdown, "ensemble_breakdown must reach the API")
+        self.assertIn("weights_current", breakdown)
+        self.assertIn("weights_long", breakdown)
+        self.assertIn("agents", breakdown)
+
+    def test_weights_cover_every_ensemble_agent(self) -> None:
+        decision = orchestrate_score("MSFT", "2026-09-17")
+        weights = decision.to_dict()["ensemble_breakdown"]["weights_current"]
+        self.assertEqual(set(weights), set(core_config.ENSEMBLE_WEIGHTS_CURRENT))
+
+    def test_the_macro_agent_exposes_the_pinned_series(self) -> None:
+        """VIX/10Y/30Y are pinned to the top of the dashboard weights panel.
+
+        They are macro SERIES, not ensemble agents, so the panel reads them
+        from the macro agent's payload. That key must exist even when no
+        provider is configured, otherwise the rows cannot render a status.
+        """
+        decision = orchestrate_score("MSFT", "2026-09-17")
+        macro = next(
+            agent for agent in decision.to_dict()["agent_outputs"]
+            if agent["agent"] == "macroeconomic"
+        )
+        self.assertIn("series_values", macro["payload"])
+        self.assertIn("status", macro)
+
+    def test_the_pinned_series_are_registered_macro_series(self) -> None:
+        """The dashboard's pinned keys must match the registry, or render blank."""
+        from core.macro_registry import MACRO_SERIES_REGISTRY
+
+        for key in ("vix", "10y_yield", "30y_yield"):
+            self.assertIn(key, MACRO_SERIES_REGISTRY)

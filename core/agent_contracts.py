@@ -83,6 +83,9 @@ class OrchestrationDecision:
     snapshot_hash: str = ""
     decision_type: str = "score"
     source_record_ids: list[str] = field(default_factory=list)
+    # The governed weight set behind the score. Surfaced so an operator can
+    # see WHICH agent carried the decision, not just the number it produced.
+    ensemble_breakdown: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

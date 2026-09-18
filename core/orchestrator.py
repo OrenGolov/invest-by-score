@@ -540,5 +540,6 @@ def orchestrate_score(ticker: str, as_of: str, timestamp: str | None = None) -> 
         snapshot_hash=snapshot_hash,
         decision_type="NO_TRADE" if mode == "NO_TRADE" else "score",
         source_record_ids=source_record_ids,
+        ensemble_breakdown=score_result.ensemble_breakdown,
     )
     return decision
