@@ -79,7 +79,19 @@ def _usable(frame: pd.DataFrame | None) -> pd.DataFrame:
     missing = [column for column in _REQUIRED_COLUMNS if column not in frame.columns]
     if missing:
         raise ChartFeatureError(f"price frame is missing {', '.join(missing)}")
-    return frame.dropna(subset=["Close"])
+    usable = frame.dropna(subset=["Close"])
+    # Every window here reads backwards from the last row, so a descending or
+    # shuffled frame is silently mislabelled rather than rejected: a reversed
+    # downtrend reads as a breakout. Refusing is better than sorting behind the
+    # caller's back, because an out-of-order frame means the caller has a bug.
+    index = pd.to_datetime(usable.index)
+    if not index.is_monotonic_increasing:
+        raise ChartFeatureError(
+            "price frame is not in ascending time order — every window reads "
+            "backwards from the last row, so an out-of-order frame produces "
+            "confident, wrong labels"
+        )
+    return usable
 
 
 def _has(frame: pd.DataFrame, feature: str) -> bool:

@@ -333,3 +333,39 @@ class ContractValidationTests(unittest.TestCase):
         structure["phase"] = STRUCTURE_PHASE_CONSOLIDATION
         structure["consolidating"] = False
         self.assertTrue(any("otherwise" in problem for problem in structure_problems(structure)))
+
+
+class BarOrderTests(unittest.TestCase):
+    """Every window reads backwards from the last row.
+
+    So a descending frame is not merely odd — it is silently mislabelled. A
+    reversed downtrend read as `breakout` before this guard existed, with no
+    error and no warning anywhere in the output.
+    """
+
+    def test_a_descending_frame_is_refused(self):
+        frame = _frame([100.0 + i for i in range(100)])
+        with self.assertRaises(ChartStructureError):
+            describe_structure(frame.sort_index(ascending=False))
+
+    def test_a_shuffled_frame_is_refused(self):
+        frame = _frame([100.0 + i for i in range(100)])
+        shuffled = frame.iloc[[5, 1, 3, 0, 2] + list(range(5, len(frame)))]
+        with self.assertRaises(ChartStructureError):
+            describe_structure(shuffled)
+
+    def test_an_ascending_frame_is_accepted(self):
+        frame = _frame([100.0 + i for i in range(100)])
+        self.assertIsNotNone(describe_structure(frame)["phase"])
+
+    def test_duplicate_timestamps_are_tolerated(self):
+        """Ties are non-decreasing, so they are not an ordering failure."""
+        stamps = list(pd.date_range("2026-01-01", periods=100, freq="D"))
+        stamps[50] = stamps[49]
+        closes = [100.0 + i for i in range(100)]
+        frame = pd.DataFrame(
+            {"Open": closes, "High": closes, "Low": closes,
+             "Close": closes, "Volume": [1] * 100},
+            index=pd.DatetimeIndex(stamps),
+        )
+        self.assertIsNotNone(describe_structure(frame)["phase"])

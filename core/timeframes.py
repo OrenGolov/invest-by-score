@@ -185,6 +185,14 @@ def build_timeframe_state(
     missing = [column for column in _REQUIRED_COLUMNS if column not in frame.columns]
     if missing:
         return _empty(STATUS_INVALID, f"{timeframe}: payload missing {', '.join(missing)}")
+    # An out-of-order frame is a malformed payload, not a degraded one: every
+    # window reads backwards from the last row, so reversed bars would produce
+    # a confident, wrong trend rather than an absent one.
+    if not pd.to_datetime(frame.index).is_monotonic_increasing:
+        return _empty(
+            STATUS_INVALID,
+            f"{timeframe}: bars are not in ascending time order",
+        )
 
     eligible, unclosed, future = eligible_bars(frame, as_of, str(spec["close_after"]))
     last_source_bar: str | None = None

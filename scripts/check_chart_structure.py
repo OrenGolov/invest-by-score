@@ -160,6 +160,18 @@ def main() -> int:
                 f"is owned by C2's chart_feature_agent and must be consumed (W5)"
             )
 
+    # 6b. an out-of-order frame must be refused, not silently mislabelled.
+    # A reversed downtrend read as "breakout" before this guard existed.
+    ordered = _frame([100.0 + i for i in range(100)])
+    try:
+        describe_structure(ordered.sort_index(ascending=False))
+        failures.append(
+            "a descending frame was accepted — every window reads backwards from "
+            "the last row, so reversed bars produce confident, wrong labels"
+        )
+    except Exception:
+        pass
+
     # 7. determinism
     if describe_structure(frame) != describe_structure(frame):
         failures.append("the structure description is not deterministic")
