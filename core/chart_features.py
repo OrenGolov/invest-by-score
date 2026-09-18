@@ -281,6 +281,15 @@ def relative_strength(
         return None
     shared = shared.sort_values()[-(window + 1):]
 
+    # The window must END at the stock's own last bar. Intersecting alone lets a
+    # stale benchmark drag the comparison backwards silently: a benchmark ending
+    # 20 sessions early moved the reported value 0.4938 -> 0.6164 on the same
+    # stock, because the stock's most recent sessions were quietly dropped.
+    # Refusing is correct -- a relative strength measured over a window the
+    # caller did not ask for is worse than no number.
+    if shared[-1] != stock.index[-1]:
+        return None
+
     stock_start, stock_end = float(stock.loc[shared[0]]), float(stock.loc[shared[-1]])
     bench_start, bench_end = float(benchmark.loc[shared[0]]), float(benchmark.loc[shared[-1]])
     if stock_start <= 0 or bench_start <= 0:

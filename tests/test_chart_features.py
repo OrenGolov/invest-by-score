@@ -260,6 +260,29 @@ class RelativeStrengthTests(unittest.TestCase):
         bench = _frame([100.0 + i for i in range(80)], start="2025-01-01")
         self.assertIsNone(relative_strength(stock, bench))
 
+    def test_a_stale_benchmark_is_refused_not_silently_reweighted(self):
+        """Intersecting alone lets a stale benchmark drag the window backwards.
+
+        The stock's most recent sessions get dropped with no disclosure, and the
+        caller receives a number measured over a period they did not ask for. On
+        a 120-bar stock a 20-session-stale benchmark moved the reported value
+        0.4938 -> 0.6164.
+        """
+        stock = _frame([100.0 + 2.0 * i for i in range(120)], start="2026-01-01")
+        stale = _frame([100.0 + 0.1 * i for i in range(100)], start="2026-01-01")
+        self.assertIsNone(relative_strength(stock, stale))
+
+    def test_a_current_benchmark_still_resolves(self):
+        stock = _frame([100.0 + 2.0 * i for i in range(120)], start="2026-01-01")
+        fresh = _frame([100.0 + 0.1 * i for i in range(120)], start="2026-01-01")
+        self.assertIsNotNone(relative_strength(stock, fresh))
+
+    def test_a_benchmark_extending_past_the_stock_is_fine(self):
+        """Only staleness matters: extra benchmark history is simply unused."""
+        stock = _frame([100.0 + 2.0 * i for i in range(120)], start="2026-01-01")
+        longer = _frame([100.0 + 0.1 * i for i in range(160)], start="2026-01-01")
+        self.assertIsNotNone(relative_strength(stock, longer))
+
     def test_a_benchmark_without_a_close_column_is_refused(self):
         stock = _frame([100.0 + i for i in range(80)])
         broken = pd.DataFrame({"Open": [1.0]}, index=pd.to_datetime(["2026-01-01"]))

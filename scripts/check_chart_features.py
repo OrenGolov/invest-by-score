@@ -107,6 +107,19 @@ def main() -> int:
             f"a stock matching its benchmark must read ~0 relative strength (got {matched})"
         )
 
+    # 4b. a stale benchmark must refuse, not silently shift the window back
+    stale_stock = _frame([100.0 + 2.0 * i for i in range(120)])
+    stale_bench = _frame([100.0 + 0.1 * i for i in range(100)])
+    if relative_strength(stale_stock, stale_bench) is not None:
+        failures.append(
+            "a benchmark ending 20 sessions early still produced a relative "
+            "strength — the window silently moved backwards and the stock's "
+            "most recent sessions were dropped without disclosure"
+        )
+    fresh_bench = _frame([100.0 + 0.1 * i for i in range(120)])
+    if relative_strength(stale_stock, fresh_bench) is None:
+        failures.append("a current benchmark was refused")
+
     # 5. failed vs holding breakout
     holding = breakout_state(_frame([100.0] * 60 + [120.0] * 5))
     failed = breakout_state(
