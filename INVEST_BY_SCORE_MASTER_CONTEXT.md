@@ -655,6 +655,27 @@ Each series should have:
 
 Macro data must be vintage-aware.
 
+### Registered series (N3, macro-adapter-v3)
+
+```text
+fed_funds        FEDFUNDS   daily      rates level
+cpi_yoy          CPIAUCSL   monthly    inflation
+initial_claims   ICSA       weekly     labor
+gdp_growth       A191RL...  quarterly  growth
+10y_yield        DGS10      daily      long rate
+30y_yield        DGS30      daily      ultra-long rate / term premium
+vix              VIXCLS     daily      implied volatility (INVERTED)
+```
+
+**VIX is the one inverted series.** Every other macro signal reads
+"higher = more risk-on"; a high VIX is the market pricing fear, so its
+contribution sign is flipped. A sign error there would turn a panic into a
+buy signal.
+
+The regime score is the **mean of available signals**, so widening the
+series set changes every historical score. Adding a series is therefore a
+versioned change (`MACRO_ADAPTER_VERSION`), never a silent one.
+
 ---
 
 # 18. REGIME REQUIREMENTS

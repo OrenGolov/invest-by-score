@@ -54,6 +54,8 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from core.config import (
+    CHART_FEATURE_MIN_HISTORY,
+    CHART_FEATURE_VERSION,
     FEATURE_REGISTRY_VERSION,
     FUNDAMENTAL_FEATURE_VERSION,
     MACRO_CONTRACT_VERSION,
@@ -125,6 +127,7 @@ PRODUCERS: tuple[Producer, ...] = (
     Producer("sentiment_agent", "core.sentiment_contract", "fetch_sentiment_snapshot"),
     Producer("macro_agent", "core.macro_adapter", "build_macro_snapshot"),
     Producer("regime_agent", "core.regime_agent", "build_regime_snapshot"),
+    Producer("chart_feature_agent", "core.chart_features", "compute_chart_features"),
 )
 
 KNOWN_PRODUCERS: tuple[str, ...] = tuple(producer.name for producer in PRODUCERS)
@@ -953,7 +956,169 @@ def build_default_registry() -> FeatureRegistry:
         feature_family="sentiment",
     ))
 
+    # --- C2 price/volume feature expansion ------------------------------------
+    # Only what M1 did NOT already have. change_*, rsi, volatility, atr_14,
+    # volume_ratio_20d and trend_slope_60d stay owned by market_data_agent; a
+    # second implementation here would be split-brain scoring (W5).
+    registry.register(_chart_feature(
+        name="acceleration_10d",
+        formula=(
+            "Change in momentum: the trailing 10-session return minus the "
+            "preceding 10-session return. Distinguishes a rally that is "
+            "speeding up from one that is stalling, which a single-window "
+            "return cannot."
+        ),
+        unit="ratio",
+        lookback="21d",
+        minimum_history=CHART_FEATURE_MIN_HISTORY["acceleration_10d"],
+        feature_family="momentum",
+    ))
+    registry.register(_chart_feature(
+        name="gap_pct",
+        formula=(
+            "Last session's open against the prior close, as a fraction. "
+            "Movement below CHART_GAP_MIN_FRACTION reports 0.0 (bars exist, "
+            "no gap) rather than None (unknown)."
+        ),
+        unit="ratio",
+        lookback="2d",
+        minimum_history=CHART_FEATURE_MIN_HISTORY["gap_pct"],
+        feature_family="structure",
+    ))
+    registry.register(_chart_feature(
+        name="drawdown_60d",
+        formula=(
+            "Last close against the highest close of the trailing 60 "
+            "sessions, as a fraction. Zero at the high, negative below it, "
+            "never positive."
+        ),
+        unit="ratio",
+        lookback="60d",
+        minimum_history=CHART_FEATURE_MIN_HISTORY["drawdown_60d"],
+        feature_family="volatility",
+    ))
+    registry.register(_chart_feature(
+        name="recovery_speed_60d",
+        formula=(
+            "Share of the trailing 60-session peak-to-trough range recovered, "
+            "in [0, 1]. Reported only when a real drawdown occurred — "
+            "recovery from nothing is not a measurement."
+        ),
+        unit="ratio",
+        lookback="60d",
+        minimum_history=CHART_FEATURE_MIN_HISTORY["recovery_speed_60d"],
+        feature_family="volatility",
+    ))
+    registry.register(_chart_feature(
+        name="support_distance_60d",
+        formula=(
+            "Distance from the trailing 60-session low, as a fraction of the "
+            "last close."
+        ),
+        unit="ratio",
+        lookback="60d",
+        minimum_history=CHART_FEATURE_MIN_HISTORY["support_distance_60d"],
+        feature_family="structure",
+    ))
+    registry.register(_chart_feature(
+        name="resistance_distance_60d",
+        formula=(
+            "Distance to the trailing 60-session high, as a fraction of the "
+            "last close."
+        ),
+        unit="ratio",
+        lookback="60d",
+        minimum_history=CHART_FEATURE_MIN_HISTORY["resistance_distance_60d"],
+        feature_family="structure",
+    ))
+    registry.register(_chart_feature(
+        name="breakout_state_60d",
+        formula=(
+            "One of CHART_BREAKOUT_STATES. The range is measured on bars "
+            "BEFORE the confirmation window, so a breakout never redefines "
+            "the level it broke; a break that closed back inside the range "
+            "is reported as FAILED, which a plain exceeded-the-high flag "
+            "cannot distinguish."
+        ),
+        unit="text",
+        lookback="65d",
+        minimum_history=CHART_FEATURE_MIN_HISTORY["breakout_state_60d"],
+        feature_family="structure",
+    ))
+    registry.register(_chart_feature(
+        name="volatility_regime_ratio",
+        formula=(
+            "Realized volatility over the trailing 10 sessions divided by "
+            "realized volatility over the trailing 60. Above 1 the market is "
+            "moving faster than its own recent baseline; the ratio is exposed "
+            "alongside its label so a caller can see the magnitude."
+        ),
+        unit="ratio",
+        lookback="61d",
+        minimum_history=CHART_FEATURE_MIN_HISTORY["volatility_regime_ratio"],
+        feature_family="volatility",
+    ))
+    registry.register(_chart_feature(
+        name="relative_strength_60d",
+        formula=(
+            "Trailing 60-session stock return minus benchmark return, aligned "
+            "by TIMESTAMP so a benchmark with a different history length is "
+            "not measured over a different calendar window. The benchmark is "
+            "INJECTED: C2 never selects or fabricates one (that is C3), so an "
+            "absent benchmark yields None."
+        ),
+        unit="ratio",
+        lookback="61d",
+        minimum_history=CHART_FEATURE_MIN_HISTORY["relative_strength_60d"],
+        feature_family="relative_strength",
+    ))
+
     return registry
+
+
+# The PIT rule every C2 chart feature inherits. The producer does no fetching
+# and no as_of filtering: it reads only BACKWARDS from the last row of a frame
+# the caller already filtered (for a multi-timeframe caller, through
+# core.timeframes.eligible_bars, which drops still-forming bars). One filter,
+# one notion of "now".
+_CHART_PIT_RULE = (
+    "Computed only from bars at or before as_of, filtered by the caller "
+    "before the frame is handed over; the producer reads backwards from the "
+    "last eligible bar and never beyond it. Insufficient history yields None, "
+    "never a neutral zero."
+)
+
+
+def _chart_feature(
+    name: str,
+    formula: str,
+    unit: str,
+    lookback: str,
+    minimum_history: int,
+    feature_family: str,
+) -> FeatureSpec:
+    """A C2 price/volume feature produced by core.chart_features."""
+    return FeatureSpec(
+        name=name,
+        owner="chart_feature_agent",
+        domain="market",
+        formula=formula,
+        version=CHART_FEATURE_VERSION,
+        unit=unit,
+        frequency="daily",
+        lookback=lookback,
+        minimum_history=minimum_history,
+        # `exclude`, not `default`: a feature without enough history must be
+        # withheld from the row, never substituted with a neutral value.
+        null_policy="exclude",
+        pit_rule=_CHART_PIT_RULE,
+        source_dependencies=["yahoo_finance_chart"],
+        feature_family=feature_family,
+        model_compatibility=[
+            "technical_analysis", "baseline_mean", "momentum", "mean_reversion",
+            "linear", "logistic", "tree", "boosting",
+        ],
+    )
 
 
 def persist_feature_registry(

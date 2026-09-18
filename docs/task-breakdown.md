@@ -337,14 +337,16 @@ acceptance gates verified.
 Implemented 2026-09-01. Full vintage-aware series registry, PIT filtering,
 risk regime classification, and sector sensitivity mapping complete.
 Vintage-aware v2 (publication-time vintages) completed 2026-09-15.
+VIX + 30Y yield added to the signal set 2026-09-18 (macro-adapter-v3).
 
 - Series registry: `core/macro_registry.py` (data constant `MacroSeries` entries
-  for fed_funds, cpi_yoy, initial_claims, gdp_growth, 10y_yield). Each series
+  for fed_funds, cpi_yoy, initial_claims, gdp_growth, 10y_yield, 30y_yield,
+  vix). Each series
   carries complete metadata: provider (FRED), series_id, unit, frequency,
   transformation, publication_lag_days, reference_period_field,
   published_time_field, feature_version, lookback_periods, description,
   pit_policy (`published_time_gate_first_release_retained`) and vintage_source
-  (`fred_alfred_realtime` for all five series).
+  (`fred_alfred_realtime` for all seven series).
 - Adapter: `core/macro_adapter.py` (~500 lines) implementing full pipeline:
   FETCH → PROVIDER GATE → PIT FILTER → REVISION HANDLING → INDICATOR ANALYSIS
   → SECTOR-WEIGHTED REGIME → CONFIDENCE CALCULATION.
@@ -360,9 +362,19 @@ Vintage-aware v2 (publication-time vintages) completed 2026-09-15.
   level: >4% restrictive, <2% accommodative), cpi_yoy (inflation: >3.5% high,
   <1.5% subdued), initial_claims (labor: >450k elevated, <200k tight),
   gdp_growth (growth: <1% weak, >3% strong), 10y_yield (yields: >3.5%
-  elevated, <1.5% depressed). Mean signal → risk_score ∈ [0, 1] (0 = risk-off,
-  0.5 = neutral, 1.0 = risk-on). Regime: risk_off if score < 0.3, risk_on if
-  score > 0.7, neutral otherwise.
+  elevated, <1.5% depressed), 30y_yield (long end: >4% elevated, <2%
+  depressed — same orientation as the 10Y, banded one notch higher for the
+  term premium), and vix (>30 stress, >20 elevated, <14 calm). Mean signal →
+  risk_score ∈ [0, 1] (0 = risk-off, 0.5 = neutral, 1.0 = risk-on). Regime:
+  risk_off if score < 0.3, risk_on if score > 0.7, neutral otherwise.
+- VIX IS INVERTED. Every other series reads "higher = more risk-on"; a high
+  VIX is the market pricing fear, so its signal sign is flipped. A sign error
+  would turn a panic into a buy signal, so the inversion is pinned by
+  `VixAndLongYieldSignalTests` and stated in the series description itself.
+- Signal-set widening is versioned, not silent: risk_score is the MEAN of
+  available signals, so going from 5 to 7 series changes every historical
+  score (each signal's share moves from 1/5 to 1/7). That is why
+  MACRO_ADAPTER_VERSION moved v2 → v3.
 - Status contract: UNAVAILABLE (no provider key), OK (all series available),
   INCOMPLETE (missing series; confidence degraded by MACRO_MISSING_SERIES_PENALTY
   per series), INVALID (future-dated or unparseable publication times).
@@ -1711,6 +1723,289 @@ one reported once that stood.
   messages.
 - Acceptance: 39 tests in `tests/test_event_chains.py`. Full suite:
   1138/1138 pass, sixteen gates green.
+
+---
+
+## Sprint C — Chart & Temporal Intelligence
+
+### C1. Multi-timeframe representation ✓ DONE
+
+Implemented 2026-09-18 in `core/timeframes.py` (`timeframe-contract-v1`).
+
+Intraday, daily, weekly, monthly and yearly state, all answering for the SAME
+`as_of`. The hard part is not fetching five series — it is that each runs on its
+own bar clock, and a coarse bar is dishonest about when its information existed.
+
+- **The bar-close rule (the defect C1 exists to prevent).** A provider labels a
+  bar at period START. Yahoo returns the week of Sep 14 as `2026-09-14`, so at
+  `as_of = 2026-09-15` a naive `index <= as_of` filter KEEPS it — and that bar's
+  Close is Friday's close, which had not happened yet. Future data wearing a past
+  timestamp, silently contaminating every feature C2 would build on top. A bar is
+  therefore eligible only once `bar_open + close_after <= as_of`. Verified
+  against live Yahoo data: weekly and monthly each excluded one unclosed bar plus
+  one partial trailing stub.
+- **Exclusions are counted, never silently dropped.** `excluded_unclosed_bars`
+  and `excluded_future_bars` are separate, because "not knowable yet" and "still
+  forming" are different failures. A timeframe that quietly shrinks is
+  indistinguishable from one with no data.
+- **Yearly is RESAMPLED from monthly bars, not fetched.** The provider has no 1y
+  interval; inventing one would fork price truth (W5, one canonical
+  implementation). Resampling happens after eligibility, so the aggregate cannot
+  contain information that did not exist at `as_of`.
+- **Fail-closed per timeframe.** Below `TIMEFRAME_MIN_BARS` is INCOMPLETE with
+  `trend` explicitly None — a slope fitted to two points is arithmetic, not
+  evidence. Failed fetch is UNAVAILABLE; malformed payload is INVALID. The
+  snapshot's own status is the WORST of its parts, because a multi-timeframe view
+  is only as trustworthy as its weakest clock.
+- **Alignment is descriptive, not a signal.** `build_alignment` reports whether
+  the clocks agree; it never claims the agreed story is correct. Only OK
+  timeframes vote — an INCOMPLETE clock has no trend to cast, so it cannot
+  manufacture false consensus.
+- **Not wired into scoring.** C1 is a representation: zero ensemble weight, no
+  veto, no decision path. C2 builds registered features on top of it.
+- Contract: `core.timeframes.build_timeframe_snapshot(ticker, as_of, fetcher=None)`
+  returns a `MultiTimeframeSnapshot` dict; the injectable `fetcher` lets the
+  contract be tested without a network round trip.
+- Acceptance: 36 tests in `tests/test_timeframes.py`; gate
+  `scripts/check_multi_timeframe.py`. The gate was verified to FAIL when the
+  naive filter is reinjected, so it can actually catch the regression it guards.
+  PIT monotonicity (an earlier `as_of` never reveals more bars) and determinism
+  are both pinned. Suite 1204 pass, seventeen gates green.
+
+### C2. Price/volume feature expansion ✓ DONE
+
+Implemented 2026-09-18 in `core/chart_features.py` (`chart-feature-v1`),
+registered against the new `chart_feature_agent` producer. Registry 31 → 40.
+
+**Only what was genuinely absent.** Returns, momentum, volatility, ATR, volume
+surprise and slope were ALREADY registered against `market_data_agent`
+(`change_*`, `rsi`, `volatility`, `atr_14`, `volume_ratio_20d`,
+`trend_slope_60d`). Re-implementing them here would have been the split-brain
+scoring the master context forbids (W5), so C2 adds the nine that were missing:
+`acceleration_10d`, `gap_pct`, `drawdown_60d`, `recovery_speed_60d`,
+`support_distance_60d`, `resistance_distance_60d`, `breakout_state_60d`,
+`volatility_regime_ratio`, `relative_strength_60d`. A gate test asserts the
+pre-existing nine were not re-owned.
+
+- **Insufficient history yields None, never zero.** A drawdown over three bars
+  is not a drawdown, and a neutral-looking 0.0 is indistinguishable from a real
+  one once it reaches a training row. Each feature declares its minimum in
+  `CHART_FEATURE_MIN_HISTORY`, registers `null_policy="exclude"`, and names the
+  shortfall in `insufficient_history` — so a consumer can tell "no data" from
+  "computed, and the answer is zero".
+- **The benchmark is INJECTED, never invented.** `relative_strength_60d`
+  returns None without a benchmark frame, because "+4% while the index did +4%"
+  and "+4% while the index did -2%" are different facts and a fabricated
+  benchmark cannot distinguish them. C2 does not select benchmarks — that is
+  C3's contract. Alignment is by TIMESTAMP, as E4 does, so a benchmark with a
+  different history length is not silently measured over a different calendar
+  window.
+- **Failed breakouts stay distinguishable from holding ones.** The range is
+  measured on bars BEFORE the confirmation window, so a breakout never
+  redefines the level it broke. Where a run pierces both sides, a break that is
+  still HOLDING wins over one that has reversed, so the label describes where
+  price now sits; that precedence is pinned by test.
+- **PIT by delegation.** The producer does no fetching and no as_of filtering —
+  it reads only BACKWARDS from the last row of a frame the caller already
+  filtered (for a multi-timeframe caller, `core.timeframes.eligible_bars`). One
+  filter, one notion of "now"; a feature cannot acquire its own divergent one.
+- Contract: `core.chart_features.compute_chart_features(frame, benchmark_frame=None)`
+  returns `{features, insufficient_history, bar_count, benchmark_supplied, versions}`.
+- Acceptance: 47 tests in `tests/test_chart_features.py`; gate
+  `scripts/check_chart_features.py`, verified to FAIL when zero-filling is
+  reinjected. Suite 1251 pass, eighteen gates green.
+
+### C3. Market context features ✓ DONE
+
+Implemented 2026-09-18 in `core/market_context.py` (`context-contract-v1`).
+
+A stock cannot be read in isolation: "+4% while the S&P did +4%" and "+4% while
+the S&P did -2%" are the same stock return and completely different evidence.
+C2 registered `relative_strength_60d` with an INJECTED benchmark and no way to
+obtain one — C3 is the producer that supplies it.
+
+- **VIX and the 10Y are REFERENCED, never re-fetched.** Both are already
+  registered macro series (FRED, vintage-aware, publication-time gated) from N3.
+  Pulling them again as Yahoo `^VIX`/`^TNX` bars would create a second source of
+  truth for a quantity the macro registry already owns — the split-brain the
+  master context forbids (W5). The context block reads them from the macro
+  snapshot, and a non-OK snapshot yields NO value rather than a neutral
+  substitute. The gate asserts no symbol containing VIX/TNX is ever fetched.
+- **ETF proxies, not raw index levels.** SPY / QQQ / IWM / UUP: an index level
+  has no volume and no tradable history, while an ETF shares the same provider
+  contract, split handling and cache path as every other ticker, so one price
+  truth covers the whole surface.
+- **Sector ETF = industry benchmark.** Eleven GICS sectors map to XLK/XLC/XLY/
+  XLP/XLE/XLF/XLV/XLI/XLB/XLRE/XLU. A finer industry classification needs a real
+  classification service and is explicitly NOT invented.
+- **An unmapped ticker gets no sector, not a guessed one.** `SYMBOL_TO_SECTOR`
+  covered only 15 of 76 holdings, so most of the portfolio would silently have
+  lost sector-relative context; expanded to 70. The seven still unmapped are
+  correct omissions — VOO/CIBR/SOXX/NASA are funds (an ETF is not a benchmark
+  for itself) and SPCX/CBRS/KEEL are unclassified. All report `sector: None`
+  with a reason, because a wrong sector benchmark produces confident, wrong
+  sector-relative strength — worse than none.
+- **PIT by delegation.** Like C2, no as_of filtering of its own: `frames` are raw
+  provider bars and the caller filters through `core.timeframes.eligible_bars`,
+  so one filter governs the system. `returns` are reporting-only and documented
+  as such.
+- Contract: `core.market_context.build_market_context(ticker, as_of, fetcher=None,
+  macro_snapshot=None, benchmark=...)`, with `benchmark_frame()` / `sector_frame()`
+  as the accessors C2 consumes.
+- Verified end-to-end on live data: NVDA relative strength resolves to **+5.7%
+  vs SPY** and **+7.5% vs XLK**, where before C3 it was None.
+- Acceptance: 32 tests in `tests/test_market_context.py`; gate
+  `scripts/check_market_context.py`, verified to FAIL when a `^VIX` price fetch
+  is reinjected. Suite 1283 pass, nineteen gates green.
+
+### C4. Deterministic chart structure ✓ DONE
+
+Implemented 2026-09-18 in `core/chart_structure.py` (`structure-contract-v1`).
+
+`describe_structure(frame)` composes swing pivots → swing structure →
+consolidation/reversal/trend → a single PHASE. Five of the nine items on the C4
+list were already C2 features (trend, breakout, failed breakout, gap, volatility
+expansion/contraction); C4 adds the swing structure (HH/HL, LH/LL, broadening,
+narrowing), consolidation and reversal, then composes everything into one
+reproducible description.
+
+- **Not pattern recognition.** No "head and shoulders", no screenshot
+  interpretation, no visual matching — the master context forbids exactly that.
+  Every label derives from measurable primitives with thresholds declared in
+  `core.config`, so the same bars always produce the same structure and a reader
+  can check the arithmetic by hand. A label nobody can recompute is not evidence.
+- **The PIT hazard: a fractal pivot needs bars AFTER it.** A swing high is the
+  maximum of a window CENTRED on the bar, so it cannot be confirmed until
+  `CHART_SWING_FRACTAL_K` further bars exist. Scanning to the final bar would let
+  future bars decide a past label — the C1 still-forming-bar leak in swing form.
+  The scan stops k bars short, and the unconfirmed tail is REPORTED
+  (`unconfirmed_tail_bars`) so a consumer can see the most recent action is not
+  yet structural. A confirmed pivot is settled: appending future bars cannot
+  revise it, and that is pinned by test and gate.
+- **Precedence is declared, not buried.** failed breakout > breakout > reversal
+  > consolidation > trending, with the rationale in `resolve_phase`'s docstring:
+  a failed breakout is the more specific statement about the same event; a
+  breakout is a range event rather than a swing event; trending is what remains.
+  A test asserts the resolution is total over `STRUCTURE_PHASES`.
+- **`undefined` is legitimate but must explain itself.** A broadening range is
+  genuinely neither trending nor consolidating. An unexplained `undefined` would
+  be indistinguishable from a failure to compute, so every path sets a reason —
+  a defect found during live verification, where NVDA returned `undefined` with a
+  valid `broadening` structure and no explanation.
+- **Composition, not duplication.** Breakout state, gaps and the volatility
+  regime are consumed from C2's `chart_feature_agent`, never recomputed (W5); the
+  gate greps the module for a second `def` of each.
+- Verified across ten live tickers: four distinct phases, with every `undefined`
+  carrying a real swing structure rather than a computation failure.
+- Acceptance: 43 tests in `tests/test_chart_structure.py`; gate
+  `scripts/check_chart_structure.py`, verified to FAIL when the pivot scan is
+  extended to the final bar. Suite 1326 pass, twenty gates green.
+
+### C5. Temporal sequence dataset ✓ DONE
+
+Implemented 2026-09-18 in `core/sequences.py` (`sequence-contract-v1`,
+`sequence-schema-v1`).
+
+`build_sequence(ticker, as_of, frame, ...)` assembles T-60 … T0 — 61 steps, each
+carrying the state knowable AT THAT STEP — plus as-of-T0 context and the V1
+outcome labels. This is the artifact C6 sequence models consume.
+
+- **C5 is NOT a second door into a training set.** M2 (`core.training_dataset`)
+  declares itself the only generator of supervised rows, and C5 honours that: it
+  emits no `TrainingRow`, and computes no forward return of its own. Labels are
+  PASSED IN from `core.labels.build_outcome_labels` — the same V1 builder M2
+  uses — so a sequence and a training row can never disagree about an outcome.
+  Both the test suite and the gate assert this by inspecting the module's CODE
+  with docstrings stripped (a naive grep matched the module's own explanation of
+  the rule).
+- **The step-truncation rule.** Step i is built from `frame.iloc[:i+1]` — its own
+  bar and every bar before it, nothing after. If step 5 could see bar 40, a model
+  would learn from information that did not exist and the features would look
+  perfectly ordinary. This is pinned DIRECTLY rather than by proxy: a step's
+  state must be identical to building it from a frame physically truncated there.
+  The gate injects `visible = frame` and confirms the check bites (it fails seven
+  ways, including the direct comparison).
+- **Per-step vs as-of-T0, stated honestly.** Price, volume, the C2 feature
+  surface and the C4 structure are recomputed at every step and genuinely vary —
+  a live NVDA window produced FIVE distinct structure phases across 61 steps.
+  Market, sector, macro, sentiment, event and fundamental state are attached ONCE
+  at T0 and labelled `context_scope: "as_of_t0"`, because back-projecting today's
+  macro reading across sixty past steps is the revised-data-in-history failure
+  the master context forbids. Tests assert no T0 channel ever appears inside a
+  step.
+- **Warm-up, so early steps are not thinner than late ones.** The frame must
+  cover the lookback PLUS `SEQUENCE_STEP_WARMUP_BARS`, since C2's widest window
+  is 61 bars and C4 needs 70. Without it the first step would be computed from
+  far less history than the last, and a model would read that as signal.
+- **A ragged sequence is not a sequence.** Below `SEQUENCE_MIN_STEP_COVERAGE`
+  the artifact is INCOMPLETE and carries NO steps — a model trained on a window
+  with holes learns the holes.
+- **An absent context channel reads UNAVAILABLE, not missing.** An absent key and
+  a failed provider are indistinguishable to a consumer otherwise.
+- Verified end-to-end: C1 `eligible_bars` → C3 context → C5 sequence with real
+  `outcome-label-v1` labels; 61 steps, deterministic hash, zero contract problems.
+- Acceptance: 35 tests in `tests/test_sequences.py`; gate
+  `scripts/check_sequences.py`. Suite 1361 pass, twenty-one gates green.
+
+### C6. Sequence model research ✓ DONE (gate built; no architecture implemented)
+
+Implemented 2026-09-18 in `core/sequence_research.py` (`sequence-research-v1`),
+plus `scripts/establish_baseline.py`.
+
+**C6's own precondition was not met, and fixing that was the sprint.** The
+repository had an M2 dataset builder, an M4 baseline suite (8 baselines, 7
+families, a working promotion rule) and an M3 trial registry — and ZERO recorded
+trials, ZERO persisted datasets. The three registered "champions" were rule-based
+scorers carrying `metrics: {}`, documented as approved for governance rather than
+by comparison. There was no number for a sequence model to beat, so any LSTM
+built in that state would have produced exactly the unfalsifiable result X10
+exists to prevent.
+
+`scripts/establish_baseline.py` produced the missing number:
+
+- **406 rows** admitted from a real M2 dataset over 14 holdings (14 excluded,
+  never imputed), dataset hash `d18d5e5e3cb62dd3365b`, horizon 20d.
+- All 8 baselines trained like-for-like on the same folds and seed.
+- **Incumbent: `momentum`, directional_accuracy 0.575.**
+- An M3 trial pre-registered and then completed. The registry REFUSED the first
+  attempt because it arrived carrying metrics — "a registered trial must not
+  carry metrics; pre-registration means the hypothesis is recorded before the
+  result exists". The ledger now shows both states (`registered` with no metrics,
+  then `completed` with 0.575), which is the anti-cherry-picking audit trail M3
+  was built for.
+
+The bar a sequence model must now clear is concrete: **≥ 0.595** directional
+accuracy (0.575 + the 0.02 promotion margin), winning **≥ 60% of folds**.
+
+`core/sequence_research.py` enforces it:
+
+- **One bar, not two.** `evaluate_candidate` delegates to
+  `core.baseline_suite.compare_runs` — the same margin and fold-consistency rules
+  every other candidate faces. A friendlier threshold for the fashionable
+  architecture is how complexity escapes its evidence, so there is no second
+  rule. The gate injects a free pass and confirms it fails four ways.
+- **Readiness is measured, not assumed.** `research_readiness()` reads the real
+  ledger. A registered-but-unfinished trial is not evidence; nor is a completed
+  trial that never reported its pre-registered metric.
+- **Declaring is not implementing.** All five architectures C6 names (temporal
+  convolution, LSTM, GRU, time-series transformer, temporal fusion) are declared
+  with a rationale and status `proposed`. The transformer entry records that it
+  needs a causal mask or it reads the future outright — the largest leakage risk
+  in the list.
+- **No deep-learning framework is imported.** Adding torch is a dependency
+  decision, not an implementation detail, and the gate asserts none was smuggled
+  in. This is the remaining blocker, and it is reported rather than hidden.
+- Acceptance: 25 tests in `tests/test_sequence_research.py`; gate
+  `scripts/check_sequence_research.py`. Suite 1386 pass, twenty-two gates green.
+
+**Honest status:** the gate is built and the baseline is real. No sequence model
+has been trained, because that needs a framework decision that has not been made.
+`research_readiness()` reports `ready_to_evaluate: false` with that single
+blocker named.
+
+### C7 — pending
+
+C7 chart reaction memory.
 
 ---
 

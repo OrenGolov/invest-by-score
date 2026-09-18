@@ -365,4 +365,7 @@ class TestSequentialClassification(unittest.TestCase):
             _event(1, 1), _event(2, 10, source="bloomberg"),
             _event(3, 19, source="ft"),
         ])
-        self.assertGreater(len(chains), 1)
+        # Day 19 is inside 14 days of day 10, but outside 14 days of the day-1
+        # initial claim, so it must open a new chain rather than extend the old.
+        self.assertEqual(len(chains), 2)
+        self.assertEqual([len(chain.links) for chain in chains], [2, 1])

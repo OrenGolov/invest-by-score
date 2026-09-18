@@ -55,6 +55,7 @@ from core.contract_verification import (
     contextual_feature_surface,
 )
 from core.config import (
+    CHART_FEATURE_VERSION,
     FUNDAMENTAL_FEATURE_VERSION,
     MACRO_CONTRACT_VERSION,
     NEWS_CONTRACT_VERSION,
@@ -236,10 +237,21 @@ _CONTEXTUAL_EXPECTED = {
 }
 
 
+# C2 chart features: market domain, but produced by core.chart_features rather
+# than the market_data_agent snapshot. The domain is still "market" — a second
+# producer now owns part of it, which is why ownership can no longer be inferred
+# from the domain alone.
+_CHART_EXPECTED = {
+    "acceleration_10d", "gap_pct", "drawdown_60d", "recovery_speed_60d",
+    "support_distance_60d", "resistance_distance_60d", "breakout_state_60d",
+    "volatility_regime_ratio", "relative_strength_60d",
+}
+
+
 class TestBuildDefaultRegistry(unittest.TestCase):
-    def test_builds_31_features(self):
-        """22 market + 5 fundamental + 4 contextual (M1b)."""
-        self.assertEqual(len(build_default_registry().all_features()), 31)
+    def test_builds_the_expected_feature_count(self):
+        """22 market + 5 fundamental + 4 contextual (M1b) + 9 chart (C2)."""
+        self.assertEqual(len(build_default_registry().all_features()), 40)
 
     def test_expected_names_present(self):
         expected = {
@@ -251,7 +263,7 @@ class TestBuildDefaultRegistry(unittest.TestCase):
             "ma_50", "ma_100", "ma_150", "ma_200",
             "revenue_growth", "margin_quality", "free_cash_flow_quality",
             "balance_sheet_quality", "valuation_quality",
-            *_CONTEXTUAL_EXPECTED}
+            *_CONTEXTUAL_EXPECTED, *_CHART_EXPECTED}
         self.assertEqual(set(build_default_registry().all_features()), expected)
 
     def test_every_scoring_agent_has_a_registered_feature(self):
@@ -282,6 +294,8 @@ class TestBuildDefaultRegistry(unittest.TestCase):
         for name, spec in build_default_registry().all_features().items():
             if name in _CONTEXTUAL_EXPECTED:
                 expected = _CONTEXTUAL_EXPECTED[name][2]
+            elif name in _CHART_EXPECTED:
+                expected = CHART_FEATURE_VERSION
             elif spec.domain == "fundamental":
                 expected = FUNDAMENTAL_FEATURE_VERSION
             else:
@@ -294,6 +308,11 @@ class TestBuildDefaultRegistry(unittest.TestCase):
                 owner, domain, _ = _CONTEXTUAL_EXPECTED[name]
                 self.assertEqual(spec.owner, owner, name)
                 self.assertEqual(spec.domain, domain, name)
+            elif name in _CHART_EXPECTED:
+                # C2: market domain, chart producer. Ownership no longer
+                # follows from the domain, so it is asserted explicitly.
+                self.assertEqual(spec.owner, "chart_feature_agent", name)
+                self.assertEqual(spec.domain, "market", name)
             elif spec.domain == "fundamental":
                 self.assertEqual(spec.owner, "fundamental_agent", name)
             else:

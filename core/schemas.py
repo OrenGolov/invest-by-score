@@ -306,6 +306,68 @@ class RegimeSnapshot:
 
 
 @dataclass
+class TimeframeState:
+    """One timeframe's point-in-time state (Sprint C1).
+
+    Every field is derived from bars that had already CLOSED at `as_of`. A
+    weekly bar labelled `2026-09-14` is not eligible at `as_of=2026-09-15`:
+    it is still forming, and its Close is Friday's — future data wearing a
+    past timestamp.
+
+    Status semantics:
+    - OK: at least TIMEFRAME_MIN_BARS eligible closed bars; trend labelled.
+    - INCOMPLETE: fewer eligible bars than the minimum. `trend` stays None —
+      a slope fitted to two points is arithmetic, not evidence.
+    - UNAVAILABLE: the provider fetch failed or returned nothing.
+    - INVALID: the payload violated the OHLC schema.
+    """
+
+    timeframe: str
+    interval: str
+    status: str
+    bar_count: int
+    first_bar_time: str | None
+    last_bar_time: str | None
+    last_close: float | None
+    change_pct: float | None
+    trend: str | None
+    excluded_unclosed_bars: int = 0
+    excluded_future_bars: int = 0
+    reason: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class MultiTimeframeSnapshot:
+    """Intraday/daily/weekly/monthly/yearly state on ONE as_of (Sprint C1).
+
+    C1's requirement is alignment: every timeframe answers for the same
+    instant, each on its own bar clock. The snapshot is therefore only as
+    trustworthy as its weakest timeframe, so per-timeframe status is
+    preserved rather than collapsed into one verdict — `status` here is the
+    WORST of the parts, and `timeframes` carries the detail.
+
+    This is a representation, not a score. It carries no ensemble weight and
+    feeds no decision on its own; C2+ build features on top of it.
+    """
+
+    ticker: str
+    as_of: str
+    status: str
+    source_id: str
+    calculation_version: str
+    pipeline_version: str
+    timeframes: dict[str, Any] = field(default_factory=dict)
+    alignment: dict[str, Any] = field(default_factory=dict)
+    reason: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class OutcomeLabelSet:
     """Versioned, leakage-safe outcome labels for one decision (Sprint V1).
 
