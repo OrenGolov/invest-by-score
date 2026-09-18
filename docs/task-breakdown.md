@@ -2056,6 +2056,64 @@ rather than hiding it.
 
 ---
 
+## Sprint F — Multi-Horizon Forecasting Engine
+
+### F1. Forecast targets ✓ DONE
+
+Implemented 2026-09-18 in `core/forecast_targets.py` (`forecast-target-v1`).
+
+The six things the engine may be asked to predict, each with a contract: what
+kind of quantity it is, its bounds, whether it must pass through a fitted
+calibration, and the realized label field it is scored against.
+
+| target | question | label field |
+|---|---|---|
+| `probability_up` | P(return > 0) | `label_up` |
+| `expected_return` | E(return) | `forward_return` |
+| `return_distribution` | P(return within a stated interval) | `forward_return` |
+| `adverse_excursion` | expected worst drawdown in the window | `adverse_excursion` |
+| `expected_volatility` | expected realized volatility | `realized_vol` |
+| `probability_outperform` | P(stock > benchmark) | `forward_return` |
+
+- **Three targets already existed**; F1 added `return_distribution`,
+  `adverse_excursion` and `probability_outperform` to the SAME
+  `FORECAST_TARGETS` tuple the M5 registry validates against, rather than
+  opening a second vocabulary. The three registered models still validate.
+- **Every target resolves to a realized V1 label.** A forecast that cannot be
+  compared to what happened is an opinion, so `target_contract` refuses a target
+  that names no label field. Verified against the live builder: all six are
+  scorable at 20d on real NVDA labels.
+- **A probability exists only through a fitted calibration.** Targets whose kind
+  is probability or distribution carry `requires_calibration: True`, and
+  `resolve_probability` routes them through M6's `calibrated_probability`, which
+  raises without a map. Calibrating a RETURN target is refused too — it would
+  present a return as a likelihood. An import-time guard makes probability-ness
+  and calibration-requirement impossible to disagree.
+- **Bounds are declared and checked.** An adverse excursion is the worst drawdown
+  INSIDE the window, so it is never positive; a volatility is a dispersion, so it
+  is never negative; a probability lives in [0, 1]. A value violating its own
+  contract is refused rather than rendered.
+- **The relative target refuses without a benchmark**, rather than silently
+  reducing to `probability_up`. A distribution refuses without an interval,
+  because "P(return within what?)" is not a question, and an empty interval is
+  refused because P(∅) is zero by construction.
+- **An unmatured horizon yields no realized value** — a forecast judged against
+  an unfinished window is judged against noise.
+- F1 defines and validates targets; it fits no models and makes no predictions.
+  Those are F2 onward, and they consume this contract.
+- Acceptance: 37 tests in `tests/test_forecast_targets.py`; gate
+  `scripts/check_forecast_targets.py`, verified to FAIL when an uncalibrated
+  score is allowed to pass through as a probability. Suite 1481 pass,
+  twenty-four gates green.
+
+### F2–F8 — pending
+
+F2 horizons, F3 joint forecast, F4 conditional forecasting, F5 event-conditioned
+forecast, F6 forecast decomposition, F7 forecast confidence, F8 the versioned
+`ForecastSnapshot` API contract.
+
+---
+
 ## Sprint R — Portfolio Risk Context (completing the fail-closed system)
 
 The W2 policy table gates single-decision quality; this sprint adds the

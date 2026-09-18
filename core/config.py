@@ -714,8 +714,19 @@ MODEL_ARTIFACT_VERSION = "model-artifact-v1"
 FORECAST_TARGET_RETURN = "expected_return"
 FORECAST_TARGET_DIRECTION = "probability_up"
 FORECAST_TARGET_VOLATILITY = "expected_volatility"
+# F1 completes the set: a return distribution, the downside a position would
+# have sat through, and performance against a benchmark. Declared here rather
+# than in a new table so the M5 registry validator keeps ONE vocabulary.
+FORECAST_TARGET_DISTRIBUTION = "return_distribution"
+FORECAST_TARGET_DOWNSIDE = "adverse_excursion"
+FORECAST_TARGET_RELATIVE = "probability_outperform"
 FORECAST_TARGETS = (
-    FORECAST_TARGET_RETURN, FORECAST_TARGET_DIRECTION, FORECAST_TARGET_VOLATILITY,
+    FORECAST_TARGET_RETURN,
+    FORECAST_TARGET_DIRECTION,
+    FORECAST_TARGET_VOLATILITY,
+    FORECAST_TARGET_DISTRIBUTION,
+    FORECAST_TARGET_DOWNSIDE,
+    FORECAST_TARGET_RELATIVE,
 )
 
 # A trained model must name its calibration state. "uncalibrated" is an
@@ -2011,3 +2022,140 @@ def _validate_reaction_memory_config() -> None:
 
 
 _validate_reaction_memory_config()
+
+
+# --- Forecast targets (F1) -------------------------------------------------------
+# What the forecasting engine may be asked to predict, and what each answer
+# MEANS. A target is not just a name: it declares the kind of quantity it is,
+# whether it is a probability (and therefore must pass through a fitted M6
+# calibration before anyone sees it), its bounds, and the realized label field
+# it is scored against.
+#
+# The label link is the part that keeps F1 honest. Every target below resolves
+# to a field the V1 label builder already produces, so a forecast can always be
+# compared to what actually happened. A target with no realized counterpart
+# cannot be validated, and an unvalidatable forecast is an opinion.
+
+FORECAST_TARGET_CONTRACT_VERSION = "forecast-target-v1"
+
+# Kinds. A probability is not a return and must not be rendered like one.
+FORECAST_KIND_PROBABILITY = "probability"
+FORECAST_KIND_RETURN = "return"
+FORECAST_KIND_VOLATILITY = "volatility"
+FORECAST_KIND_DISTRIBUTION = "distribution"
+FORECAST_KINDS: tuple[str, ...] = (
+    FORECAST_KIND_PROBABILITY,
+    FORECAST_KIND_RETURN,
+    FORECAST_KIND_VOLATILITY,
+    FORECAST_KIND_DISTRIBUTION,
+)
+
+# Per-target contract. `requires_calibration` is the load-bearing field: a
+# target marked True may only be emitted through `calibration.calibrated_
+# probability`, which refuses without a fitted map. That is what makes "never
+# expose arbitrary probability numbers as if they were calibrated" enforceable
+# rather than aspirational.
+#
+# `requires_benchmark` marks the one target that cannot be computed from the
+# stock alone -- C3 supplies the benchmark, and without one the target is
+# UNAVAILABLE rather than silently scored against nothing.
+FORECAST_TARGET_CONTRACTS: dict[str, dict[str, object]] = {
+    FORECAST_TARGET_DIRECTION: {
+        "kind": FORECAST_KIND_PROBABILITY,
+        "unit": "probability",
+        "bounds": (0.0, 1.0),
+        "requires_calibration": True,
+        "requires_benchmark": False,
+        "label_field": "label_up",
+        "question": "P(return > 0) over the horizon",
+    },
+    FORECAST_TARGET_RETURN: {
+        "kind": FORECAST_KIND_RETURN,
+        "unit": "ratio",
+        "bounds": (-1.0, None),
+        "requires_calibration": False,
+        "requires_benchmark": False,
+        "label_field": "forward_return",
+        "question": "E(return) over the horizon",
+    },
+    FORECAST_TARGET_DISTRIBUTION: {
+        "kind": FORECAST_KIND_DISTRIBUTION,
+        "unit": "probability",
+        "bounds": (0.0, 1.0),
+        "requires_calibration": True,
+        "requires_benchmark": False,
+        "label_field": "forward_return",
+        "question": "P(return within a stated interval) over the horizon",
+    },
+    FORECAST_TARGET_DOWNSIDE: {
+        "kind": FORECAST_KIND_RETURN,
+        "unit": "ratio",
+        # An adverse excursion is the worst drawdown INSIDE the window, so it
+        # is never positive: a forecast claiming otherwise is malformed.
+        "bounds": (-1.0, 0.0),
+        "requires_calibration": False,
+        "requires_benchmark": False,
+        "label_field": "adverse_excursion",
+        "question": "expected worst drawdown within the horizon",
+    },
+    FORECAST_TARGET_VOLATILITY: {
+        "kind": FORECAST_KIND_VOLATILITY,
+        "unit": "ratio",
+        # Volatility is a dispersion, so it cannot be negative.
+        "bounds": (0.0, None),
+        "requires_calibration": False,
+        "requires_benchmark": False,
+        "label_field": "realized_vol",
+        "question": "expected realized volatility over the horizon",
+    },
+    FORECAST_TARGET_RELATIVE: {
+        "kind": FORECAST_KIND_PROBABILITY,
+        "unit": "probability",
+        "bounds": (0.0, 1.0),
+        "requires_calibration": True,
+        "requires_benchmark": True,
+        # Scored against the stock's realized return minus the benchmark's over
+        # the same window; the label builder supplies the stock side.
+        "label_field": "forward_return",
+        "question": "P(stock return > benchmark return) over the horizon",
+    },
+}
+
+
+def _validate_forecast_target_contracts() -> None:
+    """Import-time guard: every declared target must carry a full contract."""
+    if set(FORECAST_TARGET_CONTRACTS) != set(FORECAST_TARGETS):
+        raise ValueError(
+            "FORECAST_TARGET_CONTRACTS must cover exactly FORECAST_TARGETS: "
+            f"missing={sorted(set(FORECAST_TARGETS) - set(FORECAST_TARGET_CONTRACTS))} "
+            f"extra={sorted(set(FORECAST_TARGET_CONTRACTS) - set(FORECAST_TARGETS))}"
+        )
+    for name, contract in FORECAST_TARGET_CONTRACTS.items():
+        if contract["kind"] not in FORECAST_KINDS:
+            raise ValueError(f"target {name!r} declares an unknown kind")
+        if not contract.get("label_field"):
+            raise ValueError(
+                f"target {name!r} names no realized label field — a forecast that "
+                f"cannot be compared to an outcome is an opinion"
+            )
+        if not contract.get("question"):
+            raise ValueError(f"target {name!r} does not state the question it answers")
+        low, high = contract["bounds"]
+        if low is not None and high is not None and low >= high:
+            raise ValueError(f"target {name!r} declares empty bounds")
+        # A probability that skips calibration is exactly the failure M6 exists
+        # to prevent, so the two fields may never disagree.
+        is_probability = contract["kind"] in (
+            FORECAST_KIND_PROBABILITY, FORECAST_KIND_DISTRIBUTION,
+        )
+        if is_probability and not contract["requires_calibration"]:
+            raise ValueError(
+                f"target {name!r} is a probability but does not require calibration"
+            )
+        if not is_probability and contract["requires_calibration"]:
+            raise ValueError(
+                f"target {name!r} is not a probability but requires calibration"
+            )
+
+
+_validate_forecast_target_contracts()
