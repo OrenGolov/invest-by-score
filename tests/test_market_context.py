@@ -273,3 +273,67 @@ class ContractValidationTests(unittest.TestCase):
     def test_no_sector_etf_is_claimed_by_two_sectors(self):
         etfs = list(CONTEXT_SECTOR_ETFS.values())
         self.assertEqual(len(etfs), len(set(etfs)))
+
+
+class ReturnsPitTests(unittest.TestCase):
+    """The leak this fix closes.
+
+    `returns` was computed on the RAW provider frame, so at a historical as_of
+    it measured from the frame's tail -- the future. C5 carried the value into
+    a sequence labelled `as_of_t0`, which would have fed post-as_of market
+    returns to any C6 model trained on those artifacts.
+    """
+
+    @staticmethod
+    def _long_frame(n=300, start="2025-06-01"):
+        closes = [100.0 + 1.0 * i for i in range(n)]
+        index = pd.date_range(start, periods=n, freq="D")
+        return pd.DataFrame(
+            {"Open": closes, "High": closes, "Low": closes,
+             "Close": closes, "Volume": [1] * n},
+            index=index,
+        )
+
+    def _context(self, as_of, frame=None):
+        frame = frame if frame is not None else self._long_frame()
+        return build_market_context(
+            "NVDA", as_of,
+            fetcher=lambda symbol, period, interval: frame,
+            macro_snapshot=_ok_macro(),
+        )
+
+    def test_returns_do_not_read_past_as_of(self):
+        frame = self._long_frame()
+        early = self._context("2025-09-01", frame)["returns"]["sp500"]
+        late = self._context("2026-03-01", frame)["returns"]["sp500"]
+        self.assertNotEqual(
+            early, late,
+            "returns identical across as_of values means they were read off the "
+            "frame tail rather than measured at as_of",
+        )
+
+    def test_a_later_as_of_sees_a_later_window(self):
+        """On a monotonically rising series the trailing 60d return shrinks as
+        the base grows, so the two must differ in a predictable direction."""
+        frame = self._long_frame()
+        early = self._context("2025-09-01", frame)["returns"]["sp500"]
+        late = self._context("2026-03-01", frame)["returns"]["sp500"]
+        self.assertGreater(early, late)
+
+    def test_insufficient_history_before_as_of_yields_none(self):
+        """A partial window is not a return; it compares different periods."""
+        frame = self._long_frame(n=300, start="2026-01-01")
+        self.assertIsNone(self._context("2026-02-01", frame)["returns"]["sp500"])
+
+    def test_the_measurement_timestamp_is_disclosed(self):
+        context = self._context("2025-12-01")
+        self.assertEqual(context["returns_as_of"], "2025-12-01 00:00:00")
+
+    def test_window_return_honours_an_explicit_as_of(self):
+        frame = self._long_frame()
+        unfiltered = window_return(frame)
+        filtered = window_return(frame, as_of="2025-09-01")
+        self.assertNotEqual(unfiltered, filtered)
+
+    def test_an_as_of_before_all_bars_yields_none(self):
+        self.assertIsNone(window_return(self._long_frame(), as_of="2020-01-01"))

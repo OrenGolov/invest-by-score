@@ -143,6 +143,32 @@ def main() -> int:
     if sector_frame(ctx) is None:
         failures.append("a mapped holding produced no sector frame")
 
+    # 6b. returns are measured AT as_of, not off the frame tail. This leaked:
+    # C5 carried post-as_of market returns into a sequence labelled as_of_t0.
+    long_closes = [100.0 + 1.0 * i for i in range(300)]
+    long_index = pd.date_range("2025-06-01", periods=300, freq="D")
+    long_frame = pd.DataFrame(
+        {"Open": long_closes, "High": long_closes, "Low": long_closes,
+         "Close": long_closes, "Volume": [1] * 300},
+        index=long_index,
+    )
+
+    def long_fetch(symbol, period, interval):
+        return long_frame
+
+    early = build_market_context("NVDA", "2025-09-01", fetcher=long_fetch,
+                                 macro_snapshot=_ok_macro())["returns"]["sp500"]
+    late = build_market_context("NVDA", "2026-03-01", fetcher=long_fetch,
+                                macro_snapshot=_ok_macro())["returns"]["sp500"]
+    if early == late:
+        failures.append(
+            "context returns are identical across two as_of values — they are "
+            "being read off the frame tail rather than measured at as_of, which "
+            "puts post-as_of market data into C5 sequences"
+        )
+    if early is None or late is None:
+        failures.append("context returns did not compute on ample history")
+
     # 7. provider failure degrades rather than raising
     def failing(symbol, period, interval):
         raise RuntimeError("provider down")

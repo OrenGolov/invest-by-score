@@ -83,14 +83,34 @@ def sector_etf_for(ticker: str) -> str | None:
     return CONTEXT_SECTOR_ETFS.get(sector) if sector else None
 
 
-def window_return(frame: pd.DataFrame | None, window: int = CONTEXT_RETURN_WINDOW) -> float | None:
+def window_return(
+    frame: pd.DataFrame | None,
+    window: int = CONTEXT_RETURN_WINDOW,
+    as_of=None,
+) -> float | None:
     """Trailing return over the window, or None when history is short.
 
     Short history yields None rather than a partial-window return, which would
     silently compare different periods across context series.
+
+    `as_of` truncates the frame before measuring. Without it the return is read
+    off the frame's TAIL, which for a historical request is the future: at
+    as_of=2025-09-01 a frame running to 2026-02-15 reported +20.1% of market
+    return that had not happened yet, and C5 carried that into a sequence
+    labelled as_of_t0. The parameter is not optional in practice -- the caller
+    always has the timestamp -- but it defaults to None so a caller holding an
+    already-filtered frame is not forced to pass it twice.
     """
     if frame is None or "Close" not in getattr(frame, "columns", []):
         return None
+    if as_of is not None:
+        target = pd.Timestamp(as_of)
+        if target.tzinfo is not None:
+            target = target.tz_localize(None)
+        index = pd.to_datetime(frame.index)
+        frame = frame.loc[index <= target]
+        if frame.empty:
+            return None
     closes = frame.dropna(subset=["Close"])["Close"]
     if len(closes) < window + 1:
         return None
@@ -218,7 +238,14 @@ def build_market_context(
         "industry_benchmark": sector_etf,
         "proxies": {name: wanted[name] for name in sorted(wanted)},
         "frames": frames,
-        "returns": {name: window_return(frames.get(name)) for name in sorted(wanted)},
+        # Measured AT as_of, not off the frame tail. `frames` stay raw so the
+        # caller can apply C1's eligible_bars, but a return is a number that
+        # leaves this module, so it is filtered here or it is a leak.
+        "returns": {
+            name: window_return(frames.get(name), as_of=target)
+            for name in sorted(wanted)
+        },
+        "returns_as_of": target.strftime("%Y-%m-%d %H:%M:%S"),
         "macro_readings": readings,
         "macro_reference_status": macro_status,
         "unavailable": sorted(failed),
