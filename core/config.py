@@ -1925,3 +1925,89 @@ def _validate_sequence_research_config() -> None:
 
 
 _validate_sequence_research_config()
+
+
+# --- Chart reaction memory (C7) --------------------------------------------------
+# For a significant event, retain what the chart looked like BEFORE it and how it
+# reacted after, so a later setup can be matched against history.
+#
+# C7 composes rather than duplicates. E4 (core.event_study) already measures the
+# intraday/1d/5d/20d/60d reaction against a pre-event baseline, and E6
+# (core.event_memory) already stores an event with a flat chart snapshot and
+# retrieves analogs. What C7 adds is the part neither has: the 1h reaction, and a
+# STRUCTURAL before-picture from C4 rather than a bag of numbers.
+#
+# The 1h honesty rule. Providers serve roughly one month of hourly bars, while a
+# 60d reaction needs sixty sessions AFTER the event — so for any event old enough
+# to have a 60d reaction, hourly data does not exist. 1h is therefore OPTIONAL and
+# explicitly UNAVAILABLE when absent. Interpolating it from daily bars would
+# invent a reaction that was never observed, which is worse than not having one.
+
+REACTION_MEMORY_VERSION = "reaction-memory-v1"
+REACTION_MEMORY_SCHEMA_VERSION = "reaction-memory-schema-v1"
+
+# Reaction horizons, coarsest last. "1h" is the C7 addition; the rest are E4's,
+# named identically so a reader can line them up.
+REACTION_HORIZON_1H = "1h"
+REACTION_HORIZONS: tuple[str, ...] = ("1h", "intraday", "1d", "5d", "20d", "60d")
+
+# Horizons that need intraday bars, and are therefore allowed to be UNAVAILABLE
+# on an older event without the memory being considered incomplete.
+REACTION_INTRADAY_HORIZONS: tuple[str, ...] = (REACTION_HORIZON_1H,)
+
+# How far after the event an hourly entry bar may sit. Without this bound, an
+# event that PREDATES the hourly window matches its first bar -- `index >=
+# target` is true for every bar -- and silently measures an unrelated hour
+# months later as if it were the reaction.
+REACTION_HOURLY_MAX_ENTRY_GAP_HOURS = 24
+
+# Sessions of chart history captured before the event. Enough for C4 to describe
+# a structure rather than guess at one.
+REACTION_PRE_EVENT_SESSIONS = 70
+
+REACTION_STATUS_OK = "OK"
+REACTION_STATUS_INCOMPLETE = "INCOMPLETE"
+REACTION_STATUS_UNAVAILABLE = "UNAVAILABLE"
+
+# A memory missing any DAILY horizon is INCOMPLETE: those are the horizons every
+# historical event can supply, so their absence means something went wrong.
+REACTION_REQUIRED_HORIZONS: tuple[str, ...] = ("1d", "5d", "20d")
+
+# Retrieval. A match is only useful if the before-picture is comparable, so
+# similarity keys on the structural phase first and the numeric state second.
+REACTION_MIN_SIMILARITY = 0.7
+REACTION_PHASE_MATCH_WEIGHT = 0.4
+REACTION_NUMERIC_MATCH_WEIGHT = 0.6
+
+# Fewer analogs than this and a median response is an anecdote, not a base rate.
+REACTION_MIN_ANALOGS = 3
+
+
+def _validate_reaction_memory_config() -> None:
+    """Import-time guard: the reaction vocabulary must stay coherent."""
+    for horizon in REACTION_REQUIRED_HORIZONS:
+        if horizon not in REACTION_HORIZONS:
+            raise ValueError(f"required horizon {horizon!r} is not a declared reaction horizon")
+    for horizon in REACTION_INTRADAY_HORIZONS:
+        if horizon not in REACTION_HORIZONS:
+            raise ValueError(f"intraday horizon {horizon!r} is not a declared reaction horizon")
+    if set(REACTION_REQUIRED_HORIZONS) & set(REACTION_INTRADAY_HORIZONS):
+        raise ValueError(
+            "an intraday horizon cannot also be required — its data does not "
+            "exist for older events"
+        )
+    if REACTION_PRE_EVENT_SESSIONS < CHART_STRUCTURE_MIN_BARS:
+        raise ValueError(
+            "the pre-event window must cover the structure minimum, or the "
+            "before-picture cannot be described"
+        )
+    if not 0.0 < REACTION_MIN_SIMILARITY <= 1.0:
+        raise ValueError("the similarity bar must be a fraction inside (0, 1]")
+    weight_total = REACTION_PHASE_MATCH_WEIGHT + REACTION_NUMERIC_MATCH_WEIGHT
+    if abs(weight_total - 1.0) > 1e-9:
+        raise ValueError(f"similarity weights must sum to 1.0, got {weight_total}")
+    if REACTION_MIN_ANALOGS < 2:
+        raise ValueError("a base rate needs more than one observation")
+
+
+_validate_reaction_memory_config()

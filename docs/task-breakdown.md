@@ -2003,9 +2003,56 @@ has been trained, because that needs a framework decision that has not been made
 `research_readiness()` reports `ready_to_evaluate: false` with that single
 blocker named.
 
-### C7 — pending
+### C7. Chart reaction memory ✓ DONE
 
-C7 chart reaction memory.
+Implemented 2026-09-18 in `core/reaction_memory.py` (`reaction-memory-v1`).
+**Sprint C is complete.**
+
+Retains, for one significant event: the C4 STRUCTURAL picture of the chart going
+in, and the 1h / intraday / 1d / 5d / 20d / 60d reaction after — so a later setup
+can be matched against history rather than guessed at.
+
+- **Composition, not duplication.** E4 already measures intraday/1d/5d/20d/60d
+  against a pre-event baseline, and E6 already stores events and retrieves
+  analogs on a flat numeric snapshot. C7 CONSUMES E4's measurements rather than
+  recomputing them (W5 — the gate greps for a second `def` of the event study).
+  What C7 adds is the 1h reaction and a structural before-picture instead of a
+  bag of numbers.
+- **The 1h honesty rule.** Providers serve about a month of hourly bars while a
+  60d reaction needs sixty sessions AFTER the event — so for any event old enough
+  to have a 60d reaction, hourly data does not exist. `1h` is optional and reads
+  UNAVAILABLE; it is never interpolated from daily bars. A memory missing only
+  intraday horizons stays OK; missing a DAILY horizon is INCOMPLETE.
+- **A real bug found during live verification.** An event PREDATING the hourly
+  window matched every bar (`index >= target` is true throughout), so argmax
+  picked bar 0 and reported an unrelated hour six months later as the event's
+  reaction — fabricated data of exactly the kind this module exists to prevent.
+  Fixed with `REACTION_HOURLY_MAX_ENTRY_GAP_HOURS`; the gate was verified to fail
+  when that bound is removed.
+- **The before-picture excludes the event bar.** Including it would let the
+  reaction describe its own setup, which is how a memory learns to predict the
+  past.
+- **Retrieval matches STRUCTURE first.** Two charts with identical numbers but
+  different phases — one breaking out, one failing a breakout — are not analogs,
+  and averaging their outcomes yields a base rate for a situation that never
+  occurred. Similarity is `0.4 * phase agreement + 0.6 * numeric closeness`.
+- **A thin analog set is reported, not smoothed.** Below `REACTION_MIN_ANALOGS`
+  the summary carries the matches and refuses a median, because two observations
+  are an anecdote rather than a base rate.
+- Verified on live data: a March NVDA event produced an OK memory with a
+  `failed_breakout` before-picture from 70 bars, E4's five horizons carried
+  through, and 1h correctly UNAVAILABLE.
+- Acceptance: 40 tests in `tests/test_reaction_memory.py`; gate
+  `scripts/check_reaction_memory.py`. Suite 1426 pass, twenty-three gates green.
+
+---
+
+**Sprint C is complete.** C1 multi-timeframe, C2 price/volume features, C3 market
+context, C4 chart structure, C5 temporal sequences, C6 sequence-research gate
+(with the measured baseline it required), C7 reaction memory. The one honest gap
+is C6: no sequence architecture is implemented, because that needs a
+deep-learning framework decision, and `research_readiness()` reports that blocker
+rather than hiding it.
 
 ---
 
