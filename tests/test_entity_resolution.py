@@ -349,3 +349,55 @@ class TestPortfolioCoverage(unittest.TestCase):
         )
         self.assertEqual(resolution.method, ENTITY_MATCH_AMBIGUOUS)
         self.assertIn("KO", resolution.candidates)
+
+
+class TestTickerCaseSensitivity(unittest.TestCase):
+    """A ticker is evidence only when written as a symbol.
+
+    Length alone does not separate a symbol from an ordinary word: CAT is
+    three characters, so it passed the short-ticker guard and matched the
+    word "cat" with full ticker confidence. Adding RCAT ("Red Cat Holdings")
+    made that collision reachable from real headlines.
+    """
+
+    def test_lowercase_word_is_not_a_ticker_match(self) -> None:
+        resolution = resolve_entity("The cat sat on the mat", "CAT")
+        self.assertEqual(resolution.method, ENTITY_MATCH_NONE)
+        self.assertFalse(resolution.matched)
+
+    def test_uppercase_symbol_still_matches(self) -> None:
+        resolution = resolve_entity("CAT raises full-year guidance", "CAT")
+        self.assertEqual(resolution.method, ENTITY_MATCH_TICKER)
+        self.assertTrue(resolution.matched)
+
+    def test_titlecase_word_inside_a_company_name_is_not_a_ticker(self) -> None:
+        """The RCAT regression: "Red Cat" must not drag in CAT."""
+        resolution = resolve_entity("Red Cat Holdings wins an Army drone contract", "RCAT")
+        self.assertEqual(resolution.method, ENTITY_MATCH_LEGAL_NAME)
+        self.assertNotIn("CAT", resolution.candidates)
+
+    def test_legal_names_remain_case_insensitive(self) -> None:
+        """Only ticker matching is case-sensitive; prose is not."""
+        resolution = resolve_entity("caterpillar inc. reported results", "CAT")
+        self.assertEqual(resolution.method, ENTITY_MATCH_LEGAL_NAME)
+
+
+class TestNewPortfolioMembers(unittest.TestCase):
+    """RCAT and ASTS were added to the portfolio; resolution must cover them."""
+
+    def test_asts_resolves_by_alias(self) -> None:
+        resolution = resolve_entity("AST SpaceMobile reported quarterly results", "ASTS")
+        self.assertTrue(resolution.matched)
+        self.assertTrue(resolution.is_training_eligible())
+
+    def test_rcat_resolves_by_alias(self) -> None:
+        resolution = resolve_entity("Red Cat Holdings reported quarterly results", "RCAT")
+        self.assertTrue(resolution.matched)
+        self.assertTrue(resolution.is_training_eligible())
+
+    def test_unrelated_news_is_still_excluded(self) -> None:
+        """The negative control: coverage must not become over-matching."""
+        for ticker in ("RCAT", "ASTS"):
+            with self.subTest(ticker=ticker):
+                resolution = resolve_entity("Nvidia announces a new GPU", ticker)
+                self.assertEqual(resolution.method, ENTITY_MATCH_NONE)

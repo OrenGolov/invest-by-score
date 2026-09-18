@@ -40,6 +40,10 @@ Design decisions worth stating:
   Tickers at or below `ENTITY_AMBIGUOUS_TICKER_MAX_LENGTH` must match by
   name or alias instead, which is exactly the `V`/`BE` class of error that
   bit the portfolio list.
+- **A ticker is evidence only in caps.** Length alone does not separate a
+  symbol from a word: "Cat" in "Red Cat Holdings" is not Caterpillar. Ticker
+  matching is case-sensitive, so `CAT` matches and `Cat`/`cat` do not. Names,
+  aliases and executives stay case-insensitive — those are prose.
 - **Executives are weaker evidence than tickers.** A CEO is frequently
   quoted about the industry, a rival, or the economy. `executive` carries
   0.6 confidence, above the training floor but visibly below a direct match.
@@ -124,8 +128,9 @@ class EntityResolution:
         return self.matched and self.confidence >= ENTITY_MIN_TRAINING_CONFIDENCE
 
 
-def _tokens(text: str) -> set[str]:
-    return {token.upper() for token in _TOKEN_PATTERN.findall(str(text or ""))}
+def _cased_tokens(text: str) -> set[str]:
+    """Tokens with original case preserved, so a ticker matches only as a symbol."""
+    return set(_TOKEN_PATTERN.findall(str(text or "")))
 
 
 def _phrase_present(phrase: str, text: str) -> bool:
@@ -240,6 +245,8 @@ def build_default_entity_registry() -> dict[str, EntityRecord]:
         EntityRecord("ONDS", "Ondas Holdings", ("Ondas",), ("Eric Brock",)),
         EntityRecord("OUST", "Ouster Inc.", ("Ouster",), ("Angus Pacala",)),
         EntityRecord("KEEL", "Keel Infrastructure Corp.", ("Keel Infrastructure",), ()),
+        EntityRecord("ASTS", "AST SpaceMobile Inc.", ("AST SpaceMobile", "SpaceMobile"), ("Abel Avellan",)),
+        EntityRecord("RCAT", "Red Cat Holdings", ("Red Cat", "Teal Drones"), ("Jeff Thompson",)),
 
         # --- Digital infrastructure -------------------------------------------
         EntityRecord("CRWV", "CoreWeave Inc.", ("CoreWeave",), ("Michael Intrator",)),
@@ -291,11 +298,12 @@ def registry_problems(registry: dict[str, EntityRecord]) -> list[str]:
 
 def _match_one(text: str, record: EntityRecord) -> tuple[str, str] | None:
     """Strongest match of `record` in `text`, or None. Returns (method, text)."""
-    tokens = _tokens(text)
-
-    # A short ticker is an ordinary English word ("V", "BE"), so a bare
-    # symbol token is not evidence. Such tickers must match by name instead.
-    if len(record.ticker) > ENTITY_AMBIGUOUS_TICKER_MAX_LENGTH and record.ticker in tokens:
+    # A ticker is evidence only when written as a symbol, i.e. in caps. "Cat"
+    # in "Red Cat Holdings" is the word, not Caterpillar; only "CAT" is CAT.
+    if (
+        len(record.ticker) > ENTITY_AMBIGUOUS_TICKER_MAX_LENGTH
+        and record.ticker in _cased_tokens(text)
+    ):
         return ENTITY_MATCH_TICKER, record.ticker
 
     if _phrase_present(record.legal_name, text):
