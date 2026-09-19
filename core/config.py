@@ -423,16 +423,30 @@ REGIME_RISKOFF_MOMENTUM_DAMPING = 0.5
 OUTCOME_LABEL_VERSION = "outcome-label-v1"
 
 # Horizon name -> trading-session count after the as_of entry bar.
-LABEL_HORIZON_SESSIONS = {"1d": 1, "5d": 5, "20d": 20, "60d": 60}
+# F2 horizons. 120d and 252d are the long end the forecasting engine needs; a
+# 252-session window is roughly a trading year, so a label at that horizon is
+# only scorable once a full year of forward bars exists.
+LABEL_HORIZON_SESSIONS = {
+    "1d": 1, "5d": 5, "20d": 20, "60d": 60, "120d": 120, "252d": 252,
+}
 
 # label_20d_up is True when forward_return_20d is STRICTLY greater than this
 # threshold (0.0 = any positive forward return).
 OUTCOME_LABEL_UP_THRESHOLD = 0.0
 
-# Calendar-day coverage the provider fetch must reach AHEAD of as_of (~60
-# sessions of future window plus a holiday buffer) so matured horizons are
-# actually visible in the fetched frame.
-LABEL_CALENDAR_COVERAGE_DAYS = 130
+# Calendar-day coverage the provider fetch must reach AHEAD of as_of, so a
+# matured horizon is actually visible in the fetched frame.
+#
+# DERIVED, not hardcoded. It was 130 days, sized for the old 60-session maximum.
+# Adding a 252-session horizon (~365 calendar days) without moving this would
+# have left the longest labels silently unfetchable: the horizon would report
+# pending forever because the future bars were never requested. Roughly 1.45
+# calendar days per trading session, plus a holiday buffer.
+LABEL_CALENDAR_DAYS_PER_SESSION = 1.45
+LABEL_CALENDAR_BUFFER_DAYS = 45
+LABEL_CALENDAR_COVERAGE_DAYS = int(
+    max(LABEL_HORIZON_SESSIONS.values()) * LABEL_CALENDAR_DAYS_PER_SESSION
+) + LABEL_CALENDAR_BUFFER_DAYS
 
 
 def _validate_label_config() -> None:
@@ -442,6 +456,15 @@ def _validate_label_config() -> None:
     for name, sessions in LABEL_HORIZON_SESSIONS.items():
         if not isinstance(sessions, int) or sessions < 1:
             raise ValueError(f"LABEL_HORIZON_SESSIONS[{name!r}] must be a positive int, got {sessions!r}")
+    # The fetch must reach past the LONGEST horizon, or its labels can never
+    # mature no matter how much time passes.
+    longest_sessions = max(LABEL_HORIZON_SESSIONS.values())
+    if LABEL_CALENDAR_COVERAGE_DAYS < longest_sessions:
+        raise ValueError(
+            f"LABEL_CALENDAR_COVERAGE_DAYS ({LABEL_CALENDAR_COVERAGE_DAYS}) is below "
+            f"the longest horizon ({longest_sessions} sessions) — those labels could "
+            f"never mature because the future bars are never fetched"
+        )
     if OUTCOME_LABEL_UP_THRESHOLD < 0.0:
         raise ValueError("OUTCOME_LABEL_UP_THRESHOLD must be non-negative")
 
@@ -450,14 +473,23 @@ _validate_label_config()
 
 # --- Walk-forward backtest (V2) --------------------------------------------------
 # Validation infrastructure only — nothing here is a production trading path.
-# Folding: train [t0, t1] -> embargo (>= max label horizon, i.e. 60 sessions)
+# Folding: train [t0, t1] -> embargo (>= max label horizon; derived below)
 # -> validation -> advance; the final frozen configuration is evaluated once
 # on a never-touched tail holdout. The embargo protects both features (PIT
 # eligibility, already enforced) and labels (V1 boundary rule).
 
-BACKTEST_EMBARGO_SESSIONS = 60
-BACKTEST_FOLD_SESSIONS = 120
-BACKTEST_HOLDOUT_SESSIONS = 60
+# DERIVED from the horizon set, not hardcoded. The embargo must cover the
+# LONGEST label horizon or a validation fold can see bars that shaped a training
+# row's outcome. It was 60, sized for the old 60-session maximum; F2's 252d
+# horizon moves it to 252, and the fold/holdout scale with it so a fold still
+# contains enough sessions to be worth validating on.
+#
+# The cost is real and worth stating: a fold now spans embargo + train +
+# validation, so a walk-forward run needs roughly 630 sessions (~2.5 years) per
+# fold. That is the price of a one-year forecast horizon, not a bug.
+BACKTEST_EMBARGO_SESSIONS = max(LABEL_HORIZON_SESSIONS.values())
+BACKTEST_FOLD_SESSIONS = max(120, BACKTEST_EMBARGO_SESSIONS)
+BACKTEST_HOLDOUT_SESSIONS = max(60, BACKTEST_EMBARGO_SESSIONS // 2)
 
 # Versioned harness strategy: decisions at bar t act at bar t+1 open.
 # Enter long when the score is at/above BACKTEST_ENTER_SCORE and the posture
@@ -2159,3 +2191,59 @@ def _validate_forecast_target_contracts() -> None:
 
 
 _validate_forecast_target_contracts()
+
+
+# --- Forecast horizons (F2) ------------------------------------------------------
+# The horizon set the forecasting engine answers over. F2's requirement is
+# "at minimum 1D, 5D, 20D, 60D, 120D, 252D", and every one of them resolves to
+# a V1 label horizon so a forecast at that horizon can be scored against a
+# realized outcome.
+#
+# The horizons ARE the label horizons, deliberately. A forecast horizon with no
+# matching label could never be validated, so rather than keeping two tables in
+# sync, F2 reads LABEL_HORIZON_SESSIONS and pins the F2 minimum against it.
+
+FORECAST_HORIZON_CONTRACT_VERSION = "forecast-horizon-v1"
+
+# Ordered shortest-first, so a joint forecast (F3) always reads in time order.
+FORECAST_HORIZONS: tuple[str, ...] = tuple(
+    sorted(LABEL_HORIZON_SESSIONS, key=lambda name: LABEL_HORIZON_SESSIONS[name])
+)
+
+# The set F2 requires. Pinned separately from FORECAST_HORIZONS so dropping one
+# is an import-time failure rather than a silently narrower product.
+FORECAST_REQUIRED_HORIZONS: tuple[str, ...] = ("1d", "5d", "20d", "60d", "120d", "252d")
+
+# Roughly how many calendar days a horizon spans, for reporting when an outcome
+# becomes knowable. Derived, so it cannot drift from the session counts.
+FORECAST_HORIZON_CALENDAR_DAYS: dict[str, int] = {
+    name: int(sessions * LABEL_CALENDAR_DAYS_PER_SESSION)
+    for name, sessions in LABEL_HORIZON_SESSIONS.items()
+}
+
+# Horizons beyond this are LONG: they need materially more history to validate,
+# and a thin dataset shows up there first. Reported so a caller can see which
+# part of a joint forecast rests on less evidence.
+FORECAST_LONG_HORIZON_SESSIONS = 100
+
+
+def _validate_forecast_horizons() -> None:
+    """Import-time guard: the F2 minimum must actually be met."""
+    missing = [h for h in FORECAST_REQUIRED_HORIZONS if h not in FORECAST_HORIZONS]
+    if missing:
+        raise ValueError(
+            f"F2 requires horizons {missing} which are not declared — a forecast "
+            f"product narrower than its contract is a silent downgrade"
+        )
+    for name in FORECAST_HORIZONS:
+        if name not in LABEL_HORIZON_SESSIONS:
+            raise ValueError(
+                f"forecast horizon {name!r} has no label horizon — a forecast that "
+                f"cannot be scored against an outcome is an opinion"
+            )
+    sessions = [LABEL_HORIZON_SESSIONS[name] for name in FORECAST_HORIZONS]
+    if sessions != sorted(sessions):
+        raise ValueError("FORECAST_HORIZONS must be ordered shortest-first")
+
+
+_validate_forecast_horizons()

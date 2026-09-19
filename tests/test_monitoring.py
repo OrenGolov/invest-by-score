@@ -25,6 +25,20 @@ from core.monitoring import (
     stale_data_rate,
     veto_rate_by_rule,
 )
+from core import config as core_config
+
+# Derived: the embargo must cover the longest label horizon, so a fixture
+# hardcoding 60 breaks the moment a longer horizon is declared.
+_EMBARGO = core_config.BACKTEST_EMBARGO_SESSIONS
+# A fold-running fixture needs embargo + validation + holdout, with room.
+# Must fit the CONFIG DEFAULTS too: a run that passes no geometry uses
+# embargo + fold + holdout, which at 252d is ~630 sessions.
+_RUN_SESSIONS = (
+    _EMBARGO
+    + core_config.BACKTEST_FOLD_SESSIONS
+    + core_config.BACKTEST_HOLDOUT_SESSIONS
+    + 60
+)
 
 
 def _ok_decision(score=6.0, confidence=0.7, statuses=None, rules=(), label_up=True):
@@ -174,7 +188,7 @@ class EngineMonitoringTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def _run(self):
-        frame = _frame(_ramp(280, step=1.0))
+        frame = _frame(_ramp(_RUN_SESSIONS, step=1.0))
 
         def fake_build_score(ticker, as_of, persist_audit=False, **kwargs):
             return SimpleNamespace(score=5.0, action="ANALYSIS_ONLY")
@@ -182,7 +196,7 @@ class EngineMonitoringTests(unittest.TestCase):
         with patch("core.backtest.engine.build_score", fake_build_score):
             return run_walk_forward_backtest(
                 "TEST", frame,
-                fold_sessions=50, embargo_sessions=60, holdout_sessions=40,
+                fold_sessions=50, embargo_sessions=_EMBARGO, holdout_sessions=40,
                 manifest_store_path=self.manifest_store,
                 monitoring_store_path=self.monitoring_store,
             )

@@ -43,6 +43,19 @@ from core.labels import build_outcome_labels
 from core.score_engine import build_score
 from core.backtest.engine import offline_replay_seam, run_walk_forward_backtest
 
+# Derived: the embargo must cover the longest label horizon, so a fixture
+# hardcoding 60 breaks the moment a longer horizon is declared.
+_EMBARGO = core_config.BACKTEST_EMBARGO_SESSIONS
+# A fold-running fixture needs embargo + validation + holdout, with room.
+# Must fit the CONFIG DEFAULTS too: a run that passes no geometry uses
+# embargo + fold + holdout, which at 252d is ~630 sessions.
+_RUN_SESSIONS = (
+    _EMBARGO
+    + core_config.BACKTEST_FOLD_SESSIONS
+    + core_config.BACKTEST_HOLDOUT_SESSIONS
+    + 60
+)
+
 
 def _frame(closes, start="2022-01-03"):
     index = pd.date_range(start, periods=len(closes), freq="B")
@@ -79,14 +92,14 @@ def _direct_patches(frame):
 
 class FeatureContractConformanceTests(unittest.TestCase):
     def test_feature_contracts_conform_on_a_snapshot(self):
-        frame = _frame(_ramp(320))
+        frame = _frame(_ramp(_RUN_SESSIONS))
         as_of = frame.index[-1].strftime("%Y-%m-%d %H:%M:%S")
         with _direct_patches(frame):
             snapshot = fetch_market_snapshot("TEST", as_of)
         self.assertEqual(feature_contract_problems(snapshot), [])
 
     def test_feature_contract_problems_are_diff_precise(self):
-        frame = _frame(_ramp(320))
+        frame = _frame(_ramp(_RUN_SESSIONS))
         as_of = frame.index[-1].strftime("%Y-%m-%d %H:%M:%S")
         with _direct_patches(frame):
             snapshot = fetch_market_snapshot("TEST", as_of)
@@ -109,7 +122,7 @@ class ResearchProductionIdentityTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.frame = _frame(_ramp(320))
+        cls.frame = _frame(_ramp(_RUN_SESSIONS))
         cls.as_of = cls.frame.index[250].strftime("%Y-%m-%d %H:%M:%S")
         with _direct_patches(cls.frame):
             cls.live_snapshot = fetch_market_snapshot("TEST", cls.as_of)
@@ -145,7 +158,7 @@ class EngineVersionConsistencyTests(unittest.TestCase):
     """Manifest versions must equal the live config constants — no copies."""
 
     def test_engine_manifest_versions_match_live_constants(self):
-        frame = _frame(_ramp(260, step=1.0))
+        frame = _frame(_ramp(_RUN_SESSIONS, step=1.0))
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -157,7 +170,7 @@ class EngineVersionConsistencyTests(unittest.TestCase):
             with patch("core.backtest.engine.build_score", fake_build_score):
                 result = run_walk_forward_backtest(
                     "TEST", frame,
-                    fold_sessions=50, embargo_sessions=60, holdout_sessions=40,
+                    fold_sessions=50, embargo_sessions=_EMBARGO, holdout_sessions=40,
                     manifest_store_path=store,
                 )
         self.assertEqual(engine_version_problems(result["manifest"]["versions"]), [])

@@ -15,6 +15,11 @@ from core.calibration import CalibrationError, fit_calibration
 from core.training import TrainingError, train_baseline
 from core.training_dataset import TrainingDatasetError, build_training_dataset
 from tests._dataset_fixture import load_frame, shared_dataset
+from core import config as core_config
+
+# Derived: the embargo must cover the longest label horizon, so a fixture
+# hardcoding 60 breaks the moment a longer horizon is declared.
+_EMBARGO = core_config.BACKTEST_EMBARGO_SESSIONS
 
 
 class TestThinHistoryRaisesTypedError(unittest.TestCase):
@@ -33,7 +38,7 @@ class TestThinHistoryRaisesTypedError(unittest.TestCase):
         with self.assertRaises(TrainingError) as ctx:
             train_baseline(
                 self._thin_dataset(), "ridge",
-                fold_sessions=60, embargo_sessions=60, holdout_sessions=60,
+                fold_sessions=60, embargo_sessions=_EMBARGO, holdout_sessions=60,
             )
         self.assertIn("cannot be trained on", str(ctx.exception))
 
@@ -42,7 +47,7 @@ class TestThinHistoryRaisesTypedError(unittest.TestCase):
         with self.assertRaises(TrainingError) as ctx:
             train_baseline(
                 self._thin_dataset(), "ridge",
-                fold_sessions=60, embargo_sessions=60, holdout_sessions=60,
+                fold_sessions=60, embargo_sessions=_EMBARGO, holdout_sessions=60,
             )
         self.assertIn("needs at least", str(ctx.exception))
 
@@ -81,7 +86,7 @@ class TestDatasetSurvivorshipVerdict(unittest.TestCase):
 
     def test_single_ticker_dataset_reports_single_ticker(self) -> None:
         """A one-name set makes no universe claim."""
-        verdict = shared_dataset(-700, -400).survivorship
+        verdict = shared_dataset(-900, -300).survivorship
         self.assertEqual(verdict["status"], "single_ticker")
 
     def _multi(self, **kwargs):
@@ -119,7 +124,7 @@ class TestDatasetSurvivorshipVerdict(unittest.TestCase):
         self.assertIn("survivorship-safe", str(ctx.exception))
 
     def test_verdict_travels_in_the_report(self) -> None:
-        self.assertIn("survivorship", shared_dataset(-700, -400).report())
+        self.assertIn("survivorship", shared_dataset(-900, -300).report())
 
 
 if __name__ == "__main__":

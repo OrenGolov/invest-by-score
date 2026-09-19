@@ -73,21 +73,34 @@ def _labels_for(frame, as_of):
         return build_outcome_labels("TEST", as_of)
 
 
+# Derived: a fixture must be long enough to MATURE the longest horizon, plus
+# room for an entry bar. A fixed 130 sessions worked only while 60d was the
+# maximum; F2's 252d horizon made every such fixture silently unable to mature.
+_LONGEST = max(core_config.LABEL_HORIZON_SESSIONS.values())
+_FIXTURE_SESSIONS = _LONGEST + 70
+
+
 class ForwardReturnBoundaryTests(unittest.TestCase):
     """Spec acceptance: matured vs null at exact horizon boundaries."""
 
     @classmethod
     def setUpClass(cls):
-        cls.frame = _frame(_ramp(130))
+        cls.frame = _frame(_ramp(_FIXTURE_SESSIONS))
 
     def test_all_horizons_mature_when_sixty_sessions_exist(self):
         frame = self.frame
-        as_of = _as_of(frame, -61)  # exactly 60 sessions remain after as_of
+        # Enough forward sessions for the LONGEST horizon, derived: a fixed -61
+        # matured everything only while 60d was the maximum.
+        longest = max(core_config.LABEL_HORIZON_SESSIONS.values())
+        as_of = _as_of(frame, -(longest + 1))
         labels = _labels_for(frame, as_of)
         self.assertEqual(labels["status"], "OK")
-        self.assertEqual(labels["matured_horizons"], ["1d", "5d", "20d", "60d"])
+        self.assertEqual(
+            sorted(labels["matured_horizons"]),
+            sorted(core_config.LABEL_HORIZON_SESSIONS),
+        )
         self.assertEqual(labels["pending_horizons"], [])
-        entry_position = len(frame) - 61
+        entry_position = len(frame) - (longest + 1)
         entry_close = float(frame["Close"].iloc[entry_position])
         self.assertEqual(labels["entry_close"], round(entry_close, 4))
         self.assertEqual(labels["entry_bar"], _as_of(frame, entry_position))
@@ -108,9 +121,13 @@ class ForwardReturnBoundaryTests(unittest.TestCase):
         labels = _labels_for(frame, as_of)
         self.assertEqual(labels["status"], "PARTIAL")
         self.assertEqual(labels["matured_horizons"], ["1d", "5d"])
-        self.assertEqual(labels["pending_horizons"], ["20d", "60d"])
-        self.assertIsNone(labels["horizons"]["20d"])
-        self.assertIsNone(labels["horizons"]["60d"])
+        expected_pending = [
+            name for name, sessions in core_config.LABEL_HORIZON_SESSIONS.items()
+            if sessions > 10
+        ]
+        self.assertEqual(sorted(labels["pending_horizons"]), sorted(expected_pending))
+        for name in expected_pending:
+            self.assertIsNone(labels["horizons"][name], name)
         entry_position = len(frame) - 11
         expected_5d = float(frame["Close"].iloc[entry_position + 5]) / float(frame["Close"].iloc[entry_position]) - 1.0
         self.assertAlmostEqual(labels["horizons"]["5d"]["forward_return"], expected_5d, places=6)
@@ -155,9 +172,9 @@ class LeakageSafetyTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.frame = _frame(_ramp(130))
-        cls.as_of = _as_of(cls.frame, -61)       # all horizons matured
-        cls.entry_position = len(cls.frame) - 61
+        cls.frame = _frame(_ramp(_FIXTURE_SESSIONS))
+        cls.as_of = _as_of(cls.frame, -(_LONGEST + 1))  # every horizon matured
+        cls.entry_position = len(cls.frame) - (_LONGEST + 1)
 
     def test_bars_beyond_a_horizon_cannot_change_its_label(self):
         poisoned = self.frame.copy()
@@ -240,8 +257,8 @@ class LeakageSafetyTests(unittest.TestCase):
 class LabelValueTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.frame = _frame(_ramp(130))
-        cls.as_of = _as_of(cls.frame, -61)
+        cls.frame = _frame(_ramp(_FIXTURE_SESSIONS))
+        cls.as_of = _as_of(cls.frame, -(_LONGEST + 1))
 
     def test_label_20d_up_follows_the_configured_threshold(self):
         labels = _labels_for(self.frame, self.as_of)
@@ -252,13 +269,13 @@ class LabelValueTests(unittest.TestCase):
         )
         self.assertTrue(record["label_up"])  # rising ramp
 
-        declining = _frame(_ramp(130, step=-1.0, base=400.0))
+        declining = _frame(_ramp(_FIXTURE_SESSIONS, step=-1.0, base=400.0))
         down = _labels_for(declining, _as_of(declining, -61))
         self.assertFalse(down["horizons"]["20d"]["label_up"])
 
     def test_adverse_excursion_is_the_worst_low_vs_entry_close_in_the_window(self):
         frame = self.frame.copy()
-        entry_position = len(frame) - 61
+        entry_position = len(frame) - (_LONGEST + 1)
         entry_close = float(frame["Close"].iloc[entry_position])
         # Deep dip 10 sessions into the 20d window...
         dip_position = entry_position + 10
@@ -313,7 +330,11 @@ class LabelValueTests(unittest.TestCase):
     def test_version_stamped_everywhere(self):
         labels = _labels_for(self.frame, self.as_of)
         self.assertEqual(labels["label_version"], core_config.OUTCOME_LABEL_VERSION)
-        for record in labels["horizons"].values():
+        for name, record in labels["horizons"].items():
+            # An unmatured horizon is explicitly None, not a stub record.
+            if record is None:
+                self.assertIn(name, labels["pending_horizons"])
+                continue
             self.assertEqual(record["label_version"], core_config.OUTCOME_LABEL_VERSION)
         self.assertEqual(len(labels["horizons"]["1d"]["record_hash"]), 64)
         self.assertEqual(len(labels["labels_hash"]), 64)
@@ -324,7 +345,7 @@ class FailureStateTests(unittest.TestCase):
 
     def test_future_as_of_raises_like_the_market_agent(self):
         with self.assertRaises(ValueError):
-            with patch("core.labels.fetch_price_history", return_value=_frame(_ramp(130))):
+            with patch("core.labels.fetch_price_history", return_value=_frame(_ramp(_FIXTURE_SESSIONS))):
                 build_outcome_labels("TEST", "2099-01-01")
 
     def test_fetch_failure_is_unavailable(self):
@@ -343,17 +364,19 @@ class FailureStateTests(unittest.TestCase):
         self.assertEqual(labels["status"], "UNAVAILABLE")
 
     def test_as_of_before_first_bar_is_unavailable(self):
-        frame = _frame(_ramp(130))
+        frame = _frame(_ramp(_FIXTURE_SESSIONS))
         labels = _labels_for(frame, "2021-01-01")
         self.assertEqual(labels["status"], "UNAVAILABLE")
         self.assertIn("No bars at or before", labels["reason"])
 
     def test_pending_decision_at_the_latest_bar(self):
-        frame = _frame(_ramp(130))
+        frame = _frame(_ramp(_FIXTURE_SESSIONS))
         labels = _labels_for(frame, _as_of(frame, -1))
         self.assertEqual(labels["status"], "PENDING")
         self.assertEqual(labels["matured_horizons"], [])
-        self.assertEqual(len(labels["pending_horizons"]), 4)
+        self.assertEqual(
+            len(labels["pending_horizons"]), len(core_config.LABEL_HORIZON_SESSIONS)
+        )
         self.assertEqual(labels["labels_hash"], "")
 
 
@@ -422,7 +445,10 @@ class OutcomeStorageTests(unittest.TestCase):
         resolved = latest_outcome_labels("TEST", "2024-01-02", path=self.path)
         self.assertEqual(resolved["status"], "PARTIAL")
         self.assertEqual(resolved["count"], 2)
-        self.assertEqual(resolved["pending_horizons"], ["20d", "60d"])
+        self.assertEqual(
+            sorted(resolved["pending_horizons"]),
+            sorted(set(core_config.LABEL_HORIZON_SESSIONS) - {"1d", "5d"}),
+        )
         empty = latest_outcome_labels("TEST", "2030-01-01", path=self.path)
         self.assertEqual(empty["status"], "PENDING")
 
@@ -454,7 +480,7 @@ class OutcomeStorageTests(unittest.TestCase):
             load_outcome_records(path=self.path)
 
     def test_build_and_persist_roundtrip(self):
-        frame = _frame(_ramp(130))
+        frame = _frame(_ramp(_FIXTURE_SESSIONS))
         as_of = _as_of(frame, -61)
         with patch("core.labels.fetch_price_history", return_value=frame):
             first = build_outcome_labels("TEST", as_of)

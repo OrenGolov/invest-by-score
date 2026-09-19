@@ -32,6 +32,8 @@ from unittest.mock import patch
 
 import pandas as pd
 
+from core import config as core_config
+
 from core.backtest.engine import (
     BacktestUniverseError,
     offline_replay_seam,
@@ -53,6 +55,19 @@ from core.universe import (
     universe_as_of,
     universe_block_problems,
     universe_survivorship_status,
+)
+
+# Derived: the embargo must cover the longest label horizon, so a fixture
+# hardcoding 60 breaks the moment a longer horizon is declared.
+_EMBARGO = core_config.BACKTEST_EMBARGO_SESSIONS
+# A fold-running fixture needs embargo + validation + holdout, with room.
+# Must fit the CONFIG DEFAULTS too: a run that passes no geometry uses
+# embargo + fold + holdout, which at 252d is ~630 sessions.
+_RUN_SESSIONS = (
+    _EMBARGO
+    + core_config.BACKTEST_FOLD_SESSIONS
+    + core_config.BACKTEST_HOLDOUT_SESSIONS
+    + 60
 )
 
 
@@ -270,7 +285,7 @@ class EngineCoverageTests(unittest.TestCase):
         )
 
     def test_declared_universe_with_coverage_gap_warns_but_passes(self):
-        frame = _frame(_ramp(320))
+        frame = _frame(_ramp(_RUN_SESSIONS))
         store_dir = tempfile.mkdtemp()
         store = str(Path(store_dir) / "backtest_runs.jsonl")
 
@@ -284,7 +299,7 @@ class EngineCoverageTests(unittest.TestCase):
         with patch("core.backtest.engine.build_score", fake_build_score):
             result = run_walk_forward_backtest(
                 "TEST", frame,
-                fold_sessions=50, embargo_sessions=60, holdout_sessions=40,
+                fold_sessions=50, embargo_sessions=_EMBARGO, holdout_sessions=40,
                 manifest_store_path=store,
                 universe=block,
                 fetched_tickers=["TEST"],
@@ -295,7 +310,7 @@ class EngineCoverageTests(unittest.TestCase):
         self.assertIn("TEST", result["universe"]["ledger_members_at_as_of"])
 
     def test_declared_universe_without_coverage_gap_is_quiet(self):
-        frame = _frame(_ramp(320))
+        frame = _frame(_ramp(_RUN_SESSIONS))
         store_dir = tempfile.mkdtemp()
         store = str(Path(store_dir) / "backtest_runs.jsonl")
 
@@ -308,7 +323,7 @@ class EngineCoverageTests(unittest.TestCase):
         with patch("core.backtest.engine.build_score", fake_build_score):
             result = run_walk_forward_backtest(
                 "TEST", frame,
-                fold_sessions=50, embargo_sessions=60, holdout_sessions=40,
+                fold_sessions=50, embargo_sessions=_EMBARGO, holdout_sessions=40,
                 manifest_store_path=store,
                 universe=block,
                 fetched_tickers=["TEST", "DEAD"],
@@ -319,7 +334,7 @@ class EngineCoverageTests(unittest.TestCase):
         from core import config as core_config
 
         self.assertEqual(UNIVERSE_VERSION, core_config.UNIVERSE_VERSION)
-        frame = _frame(_ramp(320))
+        frame = _frame(_ramp(_RUN_SESSIONS))
         store_dir = tempfile.mkdtemp()
         store = str(Path(store_dir) / "backtest_runs.jsonl")
 
@@ -329,7 +344,7 @@ class EngineCoverageTests(unittest.TestCase):
         with patch("core.backtest.engine.build_score", fake_build_score):
             result = run_walk_forward_backtest(
                 "TEST", frame,
-                fold_sessions=50, embargo_sessions=60, holdout_sessions=40,
+                fold_sessions=50, embargo_sessions=_EMBARGO, holdout_sessions=40,
                 manifest_store_path=store,
             )
         self.assertEqual(
@@ -337,7 +352,7 @@ class EngineCoverageTests(unittest.TestCase):
         )
 
     def test_manifest_discloses_the_price_basis(self):
-        frame = _frame(_ramp(320))
+        frame = _frame(_ramp(_RUN_SESSIONS))
         store_dir = tempfile.mkdtemp()
         store = str(Path(store_dir) / "backtest_runs.jsonl")
 
@@ -347,7 +362,7 @@ class EngineCoverageTests(unittest.TestCase):
         with patch("core.backtest.engine.build_score", fake_build_score):
             result = run_walk_forward_backtest(
                 "TEST", frame,
-                fold_sessions=50, embargo_sessions=60, holdout_sessions=40,
+                fold_sessions=50, embargo_sessions=_EMBARGO, holdout_sessions=40,
                 manifest_store_path=store,
             )
         basis = result["manifest"]["provider_overrides"]["price_basis"]

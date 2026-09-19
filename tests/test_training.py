@@ -17,6 +17,8 @@ import pathlib
 import tempfile
 import unittest
 
+from core import config as core_config
+
 import numpy as np
 import pandas as pd
 
@@ -38,7 +40,16 @@ from core.training_dataset import build_training_dataset
 from tests._dataset_fixture import load_frame, shared_dataset
 
 _FIXTURE = pathlib.Path(__file__).resolve().parent.parent / "data" / "NVDA_5y_1d.parquet"
-_FOLDS = {"fold_sessions": 60, "embargo_sessions": 60, "holdout_sessions": 60}
+# Derived: the embargo must cover the longest label horizon. A fixed 60
+# stopped being legal the moment F2 declared a 252d horizon.
+_EMBARGO = core_config.BACKTEST_EMBARGO_SESSIONS
+_FOLDS = {
+    "fold_sessions": 60,
+    "embargo_sessions": _EMBARGO,
+    "holdout_sessions": 60,
+}
+# A walk-forward fit needs 2*fold + embargo + holdout rows.
+_MIN_ROWS = 2 * 60 + _EMBARGO + 60
 
 
 def _frame() -> pd.DataFrame:
@@ -56,7 +67,7 @@ class TrainingTestCase(unittest.TestCase):
         # live scoring path and costs ~45s, and it was previously rebuilt
         # identically by each class.
         cls.frame = load_frame()
-        cls.dataset = shared_dataset(-700, -400)
+        cls.dataset = shared_dataset(-900, -300)
 
 
 class TestRegistryGate(TrainingTestCase):

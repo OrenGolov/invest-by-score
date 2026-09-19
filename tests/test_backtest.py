@@ -51,6 +51,7 @@ from core.backtest.manifest import (
     persist_run_manifest,
     validate_manifest,
 )
+from core.forecast_horizons import horizon_sessions
 from core.labels import _record_hash, build_outcome_labels
 
 
@@ -70,6 +71,15 @@ def _frame(closes, start="2022-01-03"):
 
 def _ramp(sessions, step=1.0, base=100.0):
     return [base + step * index for index in range(sessions)]
+
+
+# Derived from config: the embargo must cover the longest label horizon, so a
+# fixture hardcoding 60 silently breaks the moment a longer horizon is declared
+# (F2 added 252d and did exactly that).
+_EMBARGO = core_config.BACKTEST_EMBARGO_SESSIONS
+# Sessions a fold-running fixture needs: embargo + a validation window + a
+# holdout tail, with headroom. Fixed 260/300 stopped fitting at 252d.
+_RUN_SESSIONS = _EMBARGO + 150
 
 
 class CostModelTests(unittest.TestCase):
@@ -225,9 +235,14 @@ class FoldGeometryTests(unittest.TestCase):
             build_walk_forward_folds(400, fold_sessions=50, embargo_sessions=59, holdout_sessions=40)
 
     def test_fold_geometry_boundaries_and_holdout_isolation(self):
-        geometry = build_walk_forward_folds(300, fold_sessions=60, embargo_sessions=60, holdout_sessions=40)
-        self.assertEqual(geometry["holdout"], [260, 299])
-        self.assertEqual(len(geometry["folds"]), 2)
+        sessions = _EMBARGO * 5
+        geometry = build_walk_forward_folds(
+            sessions, fold_sessions=60, embargo_sessions=_EMBARGO, holdout_sessions=40
+        )
+        # Derived from the session count, not pinned to a literal: the holdout is
+        # always the final 40 sessions wherever the series ends.
+        self.assertEqual(geometry["holdout"], [sessions - 40, sessions - 1])
+        self.assertGreaterEqual(len(geometry["folds"]), 2)
         for fold in geometry["folds"]:
             train_end = fold["train"][1]
             validation_start, validation_end = fold["validation"]
@@ -243,12 +258,12 @@ class FoldGeometryTests(unittest.TestCase):
 
     def test_too_short_history_is_rejected(self):
         with self.assertRaises(ValueError):
-            build_walk_forward_folds(150, fold_sessions=60, embargo_sessions=60, holdout_sessions=40)
+            build_walk_forward_folds(_EMBARGO + 20, fold_sessions=60, embargo_sessions=_EMBARGO, holdout_sessions=40)
 
 
 class ManifestTests(unittest.TestCase):
     def test_manifest_is_complete_and_deterministic(self):
-        frame = _frame(_ramp(300))
+        frame = _frame(_ramp(_RUN_SESSIONS))
         first = build_manifest(
             "TEST", frame,
             {"embargo": 60, "fold_sessions": 60},
@@ -266,7 +281,7 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(validate_manifest(first), [])
 
     def test_changed_inputs_change_the_run_hash(self):
-        frame = _frame(_ramp(300))
+        frame = _frame(_ramp(_RUN_SESSIONS))
         base = build_manifest("TEST", frame, {"embargo": 60}, {}, {})
         changed = build_manifest("TEST", frame, {"embargo": 61}, {}, {})
         self.assertNotEqual(base["run_hash"], changed["run_hash"])
@@ -351,9 +366,13 @@ class WalkForwardEngineTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         # Rise then fall: the signal enters on the ramp and exits on the break.
-        closes = _ramp(140, step=2.0) + _ramp(140, step=-2.0, base=100.0 + 2.0 * 139)
+        # Sized from the embargo: a fold spans embargo + fold + holdout, so a
+        # fixed 280-session ramp stopped fitting the moment F2's 252d horizon
+        # widened the embargo. Half ramps up, half back down.
+        _leg = max(140, _EMBARGO + 120)
+        closes = _ramp(_leg, step=2.0) + _ramp(_leg, step=-2.0, base=100.0 + 2.0 * (_leg - 1))
         cls.frame = _frame(closes)
-        cls.geometry_kwargs = dict(fold_sessions=50, embargo_sessions=60, holdout_sessions=40)
+        cls.geometry_kwargs = dict(fold_sessions=50, embargo_sessions=_EMBARGO, holdout_sessions=40)
         cls._tmp = tempfile.TemporaryDirectory()
         cls.manifest_store = Path(cls._tmp.name) / "backtest_runs.jsonl"
         cls.default_run = run_walk_forward_backtest(
@@ -391,7 +410,9 @@ class WalkForwardEngineTests(unittest.TestCase):
     def test_structure_folds_holdout_and_labels(self):
         run = self.default_run
         self.assertEqual(run["label_alignment"], "verified")
-        self.assertEqual(len(run["folds"]), 2)
+        # Count is a function of the fixture length, not the contract; the
+        # per-fold invariants below are what this test is actually about.
+        self.assertGreaterEqual(len(run["folds"]), 2)
         holdout_start = run["geometry"]["holdout"][0]
         for fold in run["folds"]:
             self.assertEqual(fold["evaluation"], "validation_fold")
@@ -473,11 +494,25 @@ class LeakageRejectionTests(unittest.TestCase):
 
     @staticmethod
     def _first_decision(frame):
-        return frame.index[110].strftime("%Y-%m-%d %H:%M:%S")
+        """The first bar the engine actually SCORES.
+
+        Not merely past the embargo: a decision inside the embargo gap is never
+        evaluated, so tampering with its label proved nothing. Read the fold
+        geometry instead of guessing an offset.
+        """
+        geometry = build_walk_forward_folds(
+            len(frame), fold_sessions=50, embargo_sessions=_EMBARGO, holdout_sessions=40
+        )
+        first_validation_start = geometry["folds"][0]["validation"][0]
+        return frame.index[first_validation_start].strftime("%Y-%m-%d %H:%M:%S")
 
     def test_canonical_injected_labels_pass(self):
-        frame = _frame(_ramp(260, step=1.0))
-        decision_positions = list(range(110, 210)) + list(range(220, 260))
+        frame = _frame(_ramp(_RUN_SESSIONS, step=1.0))
+        # Every bar: this test is about LEAK DETECTION, not fold arithmetic, so
+        # covering the whole frame keeps it valid whatever the geometry becomes.
+        # A fixed 110..260 range silently stopped covering the decisions once
+        # F2's 252d horizon widened the embargo.
+        decision_positions = list(range(len(frame)))
         injected = {}
         with offline_replay_seam({"TEST": frame}):
             for position in decision_positions:
@@ -491,7 +526,7 @@ class LeakageRejectionTests(unittest.TestCase):
         with patch("core.backtest.engine.build_score", fake_build_score):
             result = run_walk_forward_backtest(
                 "TEST", frame,
-                fold_sessions=50, embargo_sessions=60, holdout_sessions=40,
+                fold_sessions=50, embargo_sessions=_EMBARGO, holdout_sessions=40,
                 injected_labels=injected,
                 manifest_store_path=self.manifest_store,
             )
@@ -505,25 +540,31 @@ class LeakageRejectionTests(unittest.TestCase):
         self.assertEqual(validate_manifest(persisted), [])
 
     def test_one_bar_early_label_is_rejected_before_any_metric(self):
-        frame = _frame(_ramp(260, step=1.0))
-        first_decision = self._first_decision(frame)
+        frame = _frame(_ramp(_RUN_SESSIONS, step=1.0))
+        # Inject canonical labels for EVERY decision, then tamper with exactly
+        # one. Injecting only the first left later decisions unlabelled, so the
+        # engine aborted on a missing label before reaching the tampered one --
+        # a green test that proved nothing about leak detection.
+        injected = {}
         with offline_replay_seam({"TEST": frame}):
-            canonical = build_outcome_labels("TEST", first_decision)
-        leaked_5d = dict(canonical["horizons"]["5d"])
+            for position in range(len(frame)):
+                as_of = frame.index[position].strftime("%Y-%m-%d %H:%M:%S")
+                injected[as_of] = build_outcome_labels("TEST", as_of)["horizons"]
+
+        first_decision = self._first_decision(frame)
+        canonical = injected[first_decision]
+        entry_position = frame.index.get_loc(
+            pd.Timestamp(canonical["5d"]["entry_bar"])
+        )
         # Shift the exit one bar early: the classic off-by-one leak.
-        leaked_5d["exit_bar"] = frame.index[114].strftime("%Y-%m-%d %H:%M:%S")
+        early_position = entry_position + horizon_sessions("5d") - 1
+        leaked_5d = dict(canonical["5d"])
+        leaked_5d["exit_bar"] = frame.index[early_position].strftime("%Y-%m-%d %H:%M:%S")
         leaked_5d["forward_return"] = round(
-            float(frame["Close"].iloc[114]) / canonical["entry_close"] - 1.0, 6
+            float(frame["Close"].iloc[early_position]) / float(leaked_5d["entry_close"]) - 1.0, 6
         )
         leaked_5d["record_hash"] = _record_hash(leaked_5d)
-        injected = {
-            first_decision: {
-                "1d": canonical["horizons"]["1d"],
-                "5d": leaked_5d,
-                "20d": canonical["horizons"]["20d"],
-                "60d": canonical["horizons"]["60d"],
-            }
-        }
+        injected[first_decision] = {**canonical, "5d": leaked_5d}
 
         def fake_build_score(ticker, as_of, persist_audit=False, **kwargs):
             return SimpleNamespace(score=5.0, action="ANALYSIS_ONLY")
@@ -532,7 +573,7 @@ class LeakageRejectionTests(unittest.TestCase):
             with self.assertRaises(BacktestLeakageError) as ctx:
                 run_walk_forward_backtest(
                     "TEST", frame,
-                    fold_sessions=50, embargo_sessions=60, holdout_sessions=40,
+                    fold_sessions=50, embargo_sessions=_EMBARGO, holdout_sessions=40,
                     injected_labels=injected,
                     manifest_store_path=self.manifest_store,
                 )
@@ -549,7 +590,7 @@ class ManifestMandateTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.manifest_store = Path(self._tmp.name) / "backtest_runs.jsonl"
-        self.frame = _frame(_ramp(260, step=1.0))
+        self.frame = _frame(_ramp(_RUN_SESSIONS, step=1.0))
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -563,7 +604,7 @@ class ManifestMandateTests(unittest.TestCase):
         with patch("core.backtest.engine.build_score", fake_build_score):
             return run_walk_forward_backtest(
                 "TEST", self.frame,
-                fold_sessions=50, embargo_sessions=60, holdout_sessions=40,
+                fold_sessions=50, embargo_sessions=_EMBARGO, holdout_sessions=40,
                 manifest_store_path=self.manifest_store,
             )
 
@@ -646,7 +687,7 @@ class ManifestMandateTests(unittest.TestCase):
             with self.assertRaises(BacktestLeakageError):
                 run_walk_forward_backtest(
                     "TEST", self.frame,
-                    fold_sessions=50, embargo_sessions=60, holdout_sessions=40,
+                    fold_sessions=50, embargo_sessions=_EMBARGO, holdout_sessions=40,
                     injected_labels=injected,
                     manifest_store_path=self.manifest_store,
                 )

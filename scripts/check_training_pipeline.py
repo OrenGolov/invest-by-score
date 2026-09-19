@@ -25,6 +25,8 @@ import pandas as pd
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
+from core.config import BACKTEST_EMBARGO_SESSIONS  # noqa: E402
+
 from core.config import TRAINING_DEFAULT_SEED  # noqa: E402
 from core.training import (  # noqa: E402
     TrainingError,
@@ -34,7 +36,14 @@ from core.training import (  # noqa: E402
 from core.training_dataset import build_training_dataset  # noqa: E402
 
 FIXTURE = REPO_ROOT / "data" / "NVDA_5y_1d.parquet"
-FOLDS = {"fold_sessions": 60, "embargo_sessions": 60, "holdout_sessions": 60}
+# Derived: the embargo must cover the longest label horizon. A fixed 60
+# stopped being legal the moment F2 declared a 252d horizon, and the row
+# slice widened with it (a fit needs 2*fold + embargo + holdout rows).
+FOLDS = {
+    "fold_sessions": 60,
+    "embargo_sessions": BACKTEST_EMBARGO_SESSIONS,
+    "holdout_sessions": 60,
+}
 
 
 def main() -> int:
@@ -63,7 +72,7 @@ def main() -> int:
 
     frame = pd.read_parquet(FIXTURE)
     frame.index = pd.DatetimeIndex(frame.index)
-    times = [ts.strftime("%Y-%m-%d %H:%M:%S") for ts in frame.index[-700:-300]]
+    times = [ts.strftime("%Y-%m-%d %H:%M:%S") for ts in frame.index[-900:-200]]
     dataset = build_training_dataset({"NVDA": times}, {"NVDA": frame})
     if not dataset.rows:
         failures.append("dataset builder produced no rows for the gate")

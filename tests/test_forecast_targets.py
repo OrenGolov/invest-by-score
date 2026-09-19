@@ -276,8 +276,11 @@ class LiveLabelTests(unittest.TestCase):
     def test_every_target_scores_against_real_labels(self):
         from core.labels import build_outcome_labels
 
-        labels = build_outcome_labels("NVDA", "2026-06-15")
-        if labels.get("status") != "OK":
+        # Far enough back that every horizon INCLUDING 252d has matured; at a
+        # recent as_of the status is PARTIAL by design, which is not a reason
+        # to skip the contract check.
+        labels = build_outcome_labels("NVDA", "2024-06-15")
+        if labels.get("status") not in ("OK", "PARTIAL"):
             self.skipTest("label builder unavailable in this environment")
         coverage = target_coverage(labels, "20d")
         self.assertEqual(

@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import pathlib
 import unittest
+
+from core import config as core_config
 from types import SimpleNamespace
 
 import pandas as pd
@@ -42,7 +44,16 @@ from core.training_dataset import build_training_dataset
 from tests._dataset_fixture import shared_dataset
 
 _FIXTURE = pathlib.Path(__file__).resolve().parent.parent / "data" / "NVDA_5y_1d.parquet"
-_FOLDS = {"fold_sessions": 60, "embargo_sessions": 60, "holdout_sessions": 60}
+# Derived: the embargo must cover the longest label horizon. A fixed 60
+# stopped being legal the moment F2 declared a 252d horizon.
+_EMBARGO = core_config.BACKTEST_EMBARGO_SESSIONS
+_FOLDS = {
+    "fold_sessions": 60,
+    "embargo_sessions": _EMBARGO,
+    "holdout_sessions": 60,
+}
+# A walk-forward fit needs 2*fold + embargo + holdout rows.
+_MIN_ROWS = 2 * 60 + _EMBARGO + 60
 
 # Deterministic algorithms: the seed is inert, so the fitted parameters — and
 # therefore the artifact — must be identical regardless of it.
@@ -54,7 +65,7 @@ _STOCHASTIC = ("random_forest", "gradient_boosting")
 class ReproducibilityTestCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.dataset = shared_dataset(-700, -400)
+        cls.dataset = shared_dataset(-900, -300)
 
 
 class TestGuaranteeHolds(ReproducibilityTestCase):

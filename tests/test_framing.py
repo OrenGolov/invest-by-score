@@ -33,6 +33,20 @@ from core.framing import (
     assumption_entries,
 )
 from core.backtest.costs import COST_TABLE_V2
+from core import config as core_config
+
+# Derived: the embargo must cover the longest label horizon, so a fixture
+# hardcoding 60 breaks the moment a longer horizon is declared.
+_EMBARGO = core_config.BACKTEST_EMBARGO_SESSIONS
+# A fold-running fixture needs embargo + validation + holdout, with room.
+# Must fit the CONFIG DEFAULTS too: a run that passes no geometry uses
+# embargo + fold + holdout, which at 252d is ~630 sessions.
+_RUN_SESSIONS = (
+    _EMBARGO
+    + core_config.BACKTEST_FOLD_SESSIONS
+    + core_config.BACKTEST_HOLDOUT_SESSIONS
+    + 60
+)
 # shared manifest input value; kept in sync with core via the cost_table we
 # pass into the manifest under versions.cost_table
 _COST_TABLE_MANIFEST_VALUE: str = "backtest-cost-table-v2"
@@ -78,7 +92,11 @@ def _aggregate(decision_count: int = 3) -> dict:
 
 
 def _frame(closes):
-    index = pd.date_range("2022-01-03", periods=len(closes), freq="B")
+    # End at the last business day on or before today and count BACKWARDS. A
+    # fixed 2022 start ran past the present once the fixture scaled for the
+    # 252d horizon, and the label builder rightly refuses a future as_of.
+    end = pd.Timestamp.now().normalize() - pd.tseries.offsets.BDay(1)
+    index = pd.date_range(end=end, periods=len(closes), freq="B")
     return pd.DataFrame(
         {
             "Open": list(closes),
@@ -299,9 +317,13 @@ class TestFramingStore(unittest.TestCase):
 class _FramingEngineTestsBase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        closes = _ramp(200, step=2.0) + _ramp(200, step=-2.0, base=100.0 + 2.0 * 199)
+        # Base derives from the leg length: a literal 199 was tied to the old
+        # 200-session leg and left a price discontinuity once it scaled.
+        closes = _ramp(_RUN_SESSIONS, step=2.0) + _ramp(
+            _RUN_SESSIONS, step=-2.0, base=100.0 + 2.0 * (_RUN_SESSIONS - 1)
+        )
         cls.frame = _frame(closes)
-        cls.geometry_kwargs = dict(fold_sessions=50, embargo_sessions=60, holdout_sessions=40)
+        cls.geometry_kwargs = dict(fold_sessions=50, embargo_sessions=_EMBARGO, holdout_sessions=40)
         cls._tmp = tempfile.TemporaryDirectory()
         cls.manifest_store = pathlib.Path(cls._tmp.name) / "backtest_runs.jsonl"
 

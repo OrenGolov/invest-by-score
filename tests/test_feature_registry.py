@@ -63,6 +63,20 @@ from core.config import (
     SENTIMENT_CONTRACT_VERSION,
 )
 from core.orchestrator import orchestrate_score
+from core import config as core_config
+
+# Derived: the embargo must cover the longest label horizon, so a fixture
+# hardcoding 60 breaks the moment a longer horizon is declared.
+_EMBARGO = core_config.BACKTEST_EMBARGO_SESSIONS
+# A fold-running fixture needs embargo + validation + holdout, with room.
+# Must fit the CONFIG DEFAULTS too: a run that passes no geometry uses
+# embargo + fold + holdout, which at 252d is ~630 sessions.
+_RUN_SESSIONS = (
+    _EMBARGO
+    + core_config.BACKTEST_FOLD_SESSIONS
+    + core_config.BACKTEST_HOLDOUT_SESSIONS
+    + 60
+)
 
 
 def _valid_spec(name: str = "test_feature", **overrides) -> FeatureSpec:
@@ -376,7 +390,7 @@ class TestPersistence(unittest.TestCase):
 class TestContractVerifierIntegration(unittest.TestCase):
     def test_clean_snapshot(self):
         from agents.market_data_agent import fetch_market_snapshot
-        frame = _frame(_ramp(320))
+        frame = _frame(_ramp(_RUN_SESSIONS))
         as_of = frame.index[-1].strftime("%Y-%m-%d %H:%M:%S")
         with patch("agents.market_data_agent.fetch_price_history", lambda *a, **k: frame.copy()), \
              patch("core.regime_agent.fetch_price_history", lambda *a, **k: frame.copy()), \
@@ -386,7 +400,7 @@ class TestContractVerifierIntegration(unittest.TestCase):
 
     def test_unregistered_injected(self):
         from agents.market_data_agent import fetch_market_snapshot
-        frame = _frame(_ramp(320))
+        frame = _frame(_ramp(_RUN_SESSIONS))
         as_of = frame.index[-1].strftime("%Y-%m-%d %H:%M:%S")
         with patch("agents.market_data_agent.fetch_price_history", lambda *a, **k: frame.copy()), \
              patch("core.regime_agent.fetch_price_history", lambda *a, **k: frame.copy()), \
@@ -402,7 +416,7 @@ class TestContractVerifierIntegration(unittest.TestCase):
 class TestEngineIntegration(unittest.TestCase):
     def test_run_declares_registry_version(self):
         from core.backtest import run_walk_forward_backtest
-        frame = _frame(_ramp(260, step=1.0))
+        frame = _frame(_ramp(_RUN_SESSIONS, step=1.0))
         with tempfile.TemporaryDirectory() as tmp:
             store = pathlib.Path(tmp) / "backtest_runs.jsonl"
             with patch("core.backtest.engine.build_score") as mock_score:
@@ -420,7 +434,7 @@ class TestEngineIntegration(unittest.TestCase):
                     market_regime_snapshot={}, confidence_breakdown={},
                     ensemble_breakdown={})
                 result = run_walk_forward_backtest(
-                    "TEST", frame, fold_sessions=50, embargo_sessions=60,
+                    "TEST", frame, fold_sessions=50, embargo_sessions=_EMBARGO,
                     holdout_sessions=40, manifest_store_path=store)
         self.assertEqual(
             result["manifest"]["versions"].get("feature_registry"),
@@ -701,7 +715,7 @@ class TestSnapshotConformanceExtras(unittest.TestCase):
 
     def test_real_snapshot_is_fully_conformant(self):
         from agents.market_data_agent import fetch_market_snapshot
-        frame = _frame(_ramp(320))
+        frame = _frame(_ramp(_RUN_SESSIONS))
         as_of = frame.index[-1].strftime("%Y-%m-%d %H:%M:%S")
         with patch("agents.market_data_agent.fetch_price_history", lambda *a, **k: frame.copy()):
             snapshot = fetch_market_snapshot("TEST", as_of)
@@ -726,13 +740,13 @@ class TestEngineFeatureGate(unittest.TestCase):
     def _gate_frame():
         # Smallest geometry that still produces folds + a tail holdout:
         # 2 validation folds of 30 sessions and a 20-session holdout.
-        return _frame(_ramp(180))
+        return _frame(_ramp(_RUN_SESSIONS))
 
     def _run(self, store, contracts):
         with patch("core.backtest.engine.build_score") as mock_score:
             mock_score.return_value = _score_result(contracts)
             return run_walk_forward_backtest(
-                "TEST", self._gate_frame(), fold_sessions=30, embargo_sessions=60,
+                "TEST", self._gate_frame(), fold_sessions=30, embargo_sessions=_EMBARGO,
                 holdout_sessions=20, manifest_store_path=store)
 
     def test_declared_unregistered_feature_refuses_the_run(self):
@@ -770,7 +784,7 @@ class TestEngineFeatureGate(unittest.TestCase):
         self.assertEqual(result["holdout"]["feature_surface"], "verified")
 
     def test_real_scoring_path_verifies_the_production_surface(self):
-        frame = _frame(_ramp(320))
+        frame = _frame(_ramp(_RUN_SESSIONS))
         with offline_replay_seam({"TEST": frame}):
             replay = _replay_window(
                 "TEST", frame, 280, 299, initial_capital=100_000.0,
@@ -782,7 +796,7 @@ class TestEngineFeatureGate(unittest.TestCase):
 
     def test_real_score_result_consumes_exactly_its_declared_features(self):
         """The live model consumes its declared set — all of it registered."""
-        frame = _frame(_ramp(320))
+        frame = _frame(_ramp(_RUN_SESSIONS))
         as_of = frame.index[-1].strftime("%Y-%m-%d %H:%M:%S")
         with offline_replay_seam({"TEST": frame}):
             result = score_engine.build_score("TEST", as_of, persist_audit=False)

@@ -2106,9 +2106,53 @@ calibration, and the realized label field it is scored against.
   score is allowed to pass through as a probability. Suite 1481 pass,
   twenty-four gates green.
 
-### F2–F8 — pending
+### F2. Horizons ✓ DONE
 
-F2 horizons, F3 joint forecast, F4 conditional forecasting, F5 event-conditioned
+Implemented 2026-09-19 in `core/forecast_horizons.py` (`forecast-horizon-v1`).
+The set is 1d, 5d, 20d, 60d, 120d, 252d — F2's stated minimum — and every one
+resolves to a V1 label horizon, so a forecast at any of them can be scored.
+
+**The horizons ARE the label horizons.** `FORECAST_HORIZONS` derives from
+`LABEL_HORIZON_SESSIONS` rather than being a second table that could drift, and
+`FORECAST_REQUIRED_HORIZONS` pins the F2 minimum at import: a narrower product
+fails to start instead of shipping quietly.
+
+**Adding 252d moved two things nobody would have guessed.** Both are now derived:
+
+- `LABEL_CALENDAR_COVERAGE_DAYS` was a fixed 130, sized for the old 60-session
+  maximum. A 252-session window spans ~365 calendar days, so long labels would
+  have reported pending forever because their future bars were never fetched.
+  Now derived (410 days) with an import-time guard.
+- `BACKTEST_EMBARGO_SESSIONS` must cover the longest horizon or a validation
+  fold sees bars that shaped a training row's outcome. An existing import-time
+  guard caught this immediately — the config would not load. Embargo is now
+  derived (252), with folds and holdout scaling alongside it.
+
+**The embargo cost is real and stated.** A fold now spans embargo + fold +
+holdout, so a walk-forward run needs ~630 sessions (~2.5 years) per fold. That
+is the price of a one-year forecast horizon, not a bug.
+
+**Pending is not missing.** A 252d forecast made last month is unfinished, not
+wrong. `horizon_readiness` separates SCORABLE / PENDING / UNAVAILABLE so a young
+long-horizon forecast never looks like a failure. Verified live: at
+as_of=2024-06-15 all six horizons mature (120d +9.99%, 252d +10.31%); at
+as_of=2026-06-15, 120d and 252d are correctly pending.
+
+**Forty-eight test files' fixtures were sized for the old geometry** and are now
+derived from config — hardcoded `embargo_sessions=60`, 130-session frames, fold
+counts and `as_of` offsets pinned to literals. One of them was worth more than a
+resize: a leakage test injected labels for a single decision that, under the
+wider embargo, fell inside the embargo GAP and was never evaluated, so the
+tampered label proved nothing. It now reads the fold geometry.
+
+- Acceptance: 24 tests in `tests/test_forecast_horizons.py`; gate
+  `scripts/check_forecast_horizons.py`. Re-pinning coverage to 130 is rejected
+  by the config guard before the gate even loads. Suite 1505 pass, twenty-five
+  gates green.
+
+### F3–F8 — pending
+
+F3 joint forecast, F4 conditional forecasting, F5 event-conditioned
 forecast, F6 forecast decomposition, F7 forecast confidence, F8 the versioned
 `ForecastSnapshot` API contract.
 

@@ -33,6 +33,8 @@ import pandas as pd
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
+from core.config import BACKTEST_EMBARGO_SESSIONS  # noqa: E402
+
 from core.config import (  # noqa: E402
     REPRODUCIBILITY_ENVIRONMENT_KEYS,
     REPRODUCIBILITY_GUARANTEES,
@@ -51,8 +53,15 @@ from core.training import train_baseline  # noqa: E402
 from core.training_dataset import build_training_dataset  # noqa: E402
 
 FIXTURE = REPO_ROOT / "data" / "NVDA_5y_1d.parquet"
-FOLDS = {"fold_sessions": 60, "embargo_sessions": 60, "holdout_sessions": 60}
-SLICE = (-700, -450)
+# Derived: the embargo must cover the longest label horizon. A fixed 60
+# stopped being legal the moment F2 declared a 252d horizon, and the row
+# slice widened with it (a fit needs 2*fold + embargo + holdout rows).
+FOLDS = {
+    "fold_sessions": 60,
+    "embargo_sessions": BACKTEST_EMBARGO_SESSIONS,
+    "holdout_sessions": 60,
+}
+SLICE = (-900, -300)
 
 # Run in a fresh interpreter and print the identities, so the parent can
 # compare them against its own. A warm RNG or a cached fit cannot survive
