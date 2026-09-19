@@ -298,12 +298,23 @@ def contract_findings(labels: dict | None) -> list[str]:
                 f"truth fails the contract it is scored against"
             )
 
-    # 2. The relative target has no benchmark in its realized value.
-    if label_field_for("probability_outperform") == label_field_for("expected_return"):
+    # 2. A target that shares another's label field WITHOUT declaring itself
+    # unavailable would silently be scored against the wrong quantity. Checked
+    # by BEHAVIOUR, not by field name: probability_outperform still declares
+    # `forward_return` for shape uniformity, but `label_unavailable` stops it
+    # resolving, so comparing names alone would report a defect that is fixed.
+    probe = {
+        "horizons": {
+            "20d": {"status": "OK", "forward_return": 0.01, "label_up": True,
+                    "adverse_excursion": -0.01, "realized_vol": 0.01}
+        }
+    }
+    relative = realized_value("probability_outperform", probe, "20d")
+    if relative is not None and relative == realized_value("expected_return", probe, "20d"):
         findings.append(
-            "probability_outperform and expected_return resolve to the same realized "
-            "field, so the relative target is scored against the raw stock return with "
-            "no benchmark subtracted — it does not measure outperformance today"
+            "probability_outperform resolves to the same realized value as "
+            "expected_return, so the relative target is scored against the raw "
+            "stock return with no benchmark subtracted"
         )
 
     return findings

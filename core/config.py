@@ -420,7 +420,13 @@ REGIME_RISKOFF_MOMENTUM_DAMPING = 0.5
 # scoring path (single price truth); label thresholds are versioned via
 # OUTCOME_LABEL_VERSION so changing them never rewrites history.
 
-OUTCOME_LABEL_VERSION = "outcome-label-v1"
+# v2: adverse_excursion is floored at 0.0. It answers "worst DRAWDOWN within
+# the horizon", and a drawdown is a loss from entry — but on a gap-up every low
+# sits above the entry close, so an unfloored min() returned the smallest GAIN
+# and the realized label violated its own F1 bound (-1.0, 0.0). Measured: 9 of
+# 300 real 20d labels. The honest answer on a gap-up is zero drawdown, not a
+# positive one.
+OUTCOME_LABEL_VERSION = "outcome-label-v2"
 
 # Horizon name -> trading-session count after the as_of entry bar.
 # F2 horizons. 120d and 252d are the long end the forecasting engine needs; a
@@ -2146,9 +2152,20 @@ FORECAST_TARGET_CONTRACTS: dict[str, dict[str, object]] = {
         "bounds": (0.0, 1.0),
         "requires_calibration": True,
         "requires_benchmark": True,
-        # Scored against the stock's realized return minus the benchmark's over
-        # the same window; the label builder supplies the stock side.
+        # NOT SCORABLE TODAY, and saying so is the point. This target needs the
+        # stock return MINUS the benchmark's over the same window, and the V1
+        # label set carries no benchmark return at all. Pointing `label_field`
+        # at `forward_return` made the target look scorable while silently
+        # scoring it against the raw stock return — identical to
+        # expected_return, and measuring nothing about outperformance.
+        # `label_field` stays declared so the contract shape is uniform;
+        # `label_unavailable` is what a consumer must read.
         "label_field": "forward_return",
+        "label_unavailable": (
+            "the V1 label set carries no benchmark return, so "
+            "P(stock > benchmark) has no realized counterpart and cannot be "
+            "scored; a relative-return label is owned by a later sprint"
+        ),
         "question": "P(stock return > benchmark return) over the horizon",
     },
 }

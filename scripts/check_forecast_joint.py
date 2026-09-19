@@ -16,8 +16,10 @@ on holds:
 5. the four REJECTED coherence rules stay rejected, each still carrying the
    measurement that rejected it. Re-adding one would flag legitimate market
    behaviour as an error;
-6. contract defects are REPORTED, not hidden — a positive adverse excursion
-   (gap-up; 9 of 300 real 20d labels) surfaces as a finding;
+6. contract defects are REPORTED, not hidden. The positive-adverse-excursion
+   check remains as a REGRESSION GUARD: the label builder now floors at 0
+   (outcome-label-v2), so a positive value reaching F3 means the floor was
+   removed. Healthy labels must raise NO findings;
 7. the grid is complete and in shortest-first order ("120d" sorts before "1d");
 8. with no model the object is honest: status NO_MODEL, zero emitted values,
    and a reason.
@@ -180,10 +182,18 @@ def main() -> int:
             "a POSITIVE adverse excursion raised no finding — a gap-up leaves every "
             "low above entry, and 9 of 300 real 20d labels violate the F1 bound"
         )
-    if not any("outperform" in f for f in contract_findings(_labels())):
+    # The relative-target defect is FIXED (probability_outperform is marked
+    # label_unavailable), so the finding must now stay SILENT. Checked by
+    # behaviour: the field name is still declared for shape uniformity.
+    if any("outperform" in f for f in contract_findings(_labels())):
         failures.append(
-            "the relative-target defect raised no finding — probability_outperform "
-            "scores against the raw stock return with no benchmark subtracted"
+            "probability_outperform resolves to the raw stock return again — the "
+            "label_unavailable marker was removed, and the target silently went "
+            "back to measuring nothing about outperformance"
+        )
+    if contract_findings(_labels()):
+        failures.append(
+            f"healthy labels raised findings: {contract_findings(_labels())}"
         )
 
     # 7. the grid is complete and ordered

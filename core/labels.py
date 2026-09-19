@@ -159,7 +159,15 @@ def _horizon_record(
         record["risk_adjusted"] = round(record["forward_return"] / record["realized_vol"], 4)
     if horizon == "20d":
         lows = [float(value) for value in window["Low"]]
-        record["adverse_excursion"] = round(min(low / entry_close - 1.0 for low in lows), 6)
+        # Floored at 0.0: this is the worst DRAWDOWN, and a drawdown is a loss
+        # from entry. On a gap-up every low sits above the entry close, so an
+        # unfloored min() returns the smallest GAIN — a different quantity
+        # wearing the same name, and one that violates the declared bound
+        # (-1.0, 0.0) the F1 target is scored against. Zero drawdown is the
+        # honest answer when the price never traded back to entry.
+        record["adverse_excursion"] = round(
+            min(0.0, min(low / entry_close - 1.0 for low in lows)), 6
+        )
         record["label_up"] = bool(forward_return > OUTCOME_LABEL_UP_THRESHOLD)
     record["record_hash"] = _record_hash(record)
     return record

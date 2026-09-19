@@ -45,6 +45,7 @@ import logging
 
 from core.calibration import UncalibratedProbabilityError, calibrated_probability
 from core.config import (
+    FORECAST_HORIZONS,
     FORECAST_KIND_DISTRIBUTION,
     FORECAST_KIND_PROBABILITY,
     FORECAST_TARGET_CONTRACT_VERSION,
@@ -155,6 +156,12 @@ def realized_value(target: str, labels: dict, horizon: str) -> float | None:
     unfinished window is judged against noise.
     """
     contract = target_contract(target)
+    # A target whose realized counterpart does not exist yields nothing. Without
+    # this, probability_outperform fell through to `forward_return` and returned
+    # the RAW STOCK RETURN — byte-identical to expected_return, and measuring
+    # nothing about outperformance.
+    if contract.get("label_unavailable"):
+        return None
     horizons = (labels or {}).get("horizons") or {}
     entry = horizons.get(horizon)
     if not entry or entry.get("status") != "OK":
@@ -185,6 +192,16 @@ def build_target_request(
     contract = target_contract(target)
     if not str(horizon or "").strip():
         raise ForecastTargetError("a horizon is required")
+    # Validated against the DECLARED set, not merely non-empty. A request for
+    # "banana-d" previously returned status OK, so a typo became a forecast
+    # nobody could ever score. Read from config rather than importing F2, which
+    # keeps the target module free of a horizon-module dependency.
+    if horizon not in FORECAST_HORIZONS:
+        raise ForecastTargetError(
+            f"unknown horizon {horizon!r} (known: {list(FORECAST_HORIZONS)}) — a "
+            f"forecast at an undeclared horizon has no realized outcome to be "
+            f"scored against"
+        )
 
     if contract["requires_benchmark"] and not benchmark:
         return {

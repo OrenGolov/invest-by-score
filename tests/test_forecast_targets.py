@@ -254,9 +254,20 @@ class TargetRequestTests(unittest.TestCase):
 
 
 class CoverageTests(unittest.TestCase):
-    def test_a_matured_horizon_supports_every_target(self):
+    def test_a_matured_horizon_supports_every_SCORABLE_target(self):
+        """probability_outperform is deliberately excluded.
+
+        The V1 label set carries no benchmark return, so P(stock > benchmark)
+        has no realized counterpart. It previously resolved to `forward_return`
+        and returned the RAW STOCK RETURN — looking scorable while measuring
+        nothing about outperformance.
+        """
         coverage = target_coverage(_labels(), "20d")
-        self.assertEqual(coverage["unscorable_targets"], [])
+        self.assertEqual(coverage["unscorable_targets"], ["probability_outperform"])
+
+    def test_the_relative_target_declares_why_it_cannot_be_scored(self):
+        contract = target_contract(FORECAST_TARGET_RELATIVE)
+        self.assertIn("benchmark return", contract["label_unavailable"])
 
     def test_an_unmatured_horizon_supports_nothing(self):
         """Six Nones are less useful than saying the horizon is not ready."""
@@ -284,6 +295,49 @@ class LiveLabelTests(unittest.TestCase):
             self.skipTest("label builder unavailable in this environment")
         coverage = target_coverage(labels, "20d")
         self.assertEqual(
-            coverage["unscorable_targets"], [],
-            "a target with no realized counterpart cannot be validated",
+            coverage["unscorable_targets"], ["probability_outperform"],
+            "only the relative target lacks a realized counterpart; any other "
+            "unscorable target means a label field went missing",
         )
+
+
+class ContractDefectFixTests(unittest.TestCase):
+    """The three defects F3 surfaced, each fixed rather than papered over."""
+
+    def test_the_relative_target_no_longer_returns_the_stock_return(self):
+        """It resolved to `forward_return` — byte-identical to expected_return,
+        and measuring nothing about outperformance."""
+        labels = _labels()
+        self.assertIsNotNone(realized_value(FORECAST_TARGET_RETURN, labels, "20d"))
+        self.assertIsNone(realized_value(FORECAST_TARGET_RELATIVE, labels, "20d"))
+
+    def test_the_relative_target_explains_its_unavailability(self):
+        contract = target_contract(FORECAST_TARGET_RELATIVE)
+        self.assertTrue(contract.get("label_unavailable"))
+
+    def test_no_other_target_is_marked_unavailable(self):
+        """Only the relative target genuinely lacks a realized counterpart."""
+        marked = [
+            name for name in FORECAST_TARGETS
+            if target_contract(name).get("label_unavailable")
+        ]
+        self.assertEqual(marked, [FORECAST_TARGET_RELATIVE])
+
+    def test_an_undeclared_horizon_is_refused(self):
+        """'banana-d' previously returned status OK, so a typo became a
+        forecast nobody could ever score."""
+        with self.assertRaises(ForecastTargetError):
+            build_target_request(FORECAST_TARGET_RETURN, "banana-d")
+
+    def test_a_plausible_but_undeclared_horizon_is_refused(self):
+        """90d looks reasonable and is not a declared horizon."""
+        with self.assertRaises(ForecastTargetError):
+            build_target_request(FORECAST_TARGET_RETURN, "90d")
+
+    def test_every_declared_horizon_is_still_accepted(self):
+        from core.config import FORECAST_HORIZONS
+
+        for horizon in FORECAST_HORIZONS:
+            with self.subTest(horizon=horizon):
+                request = build_target_request(FORECAST_TARGET_RETURN, horizon)
+                self.assertEqual(request["status"], TARGET_STATUS_OK)

@@ -497,3 +497,52 @@ class OutcomeStorageTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AdverseExcursionFloorTests(unittest.TestCase):
+    """v2: a drawdown cannot be positive.
+
+    `adverse_excursion` answers "worst DRAWDOWN within the horizon", and a
+    drawdown is a loss from entry. On a gap-up every low sits ABOVE the entry
+    close, so an unfloored `min()` returned the smallest GAIN — a different
+    quantity wearing the same name, and one that violated the F1 bound
+    (-1.0, 0.0) the target is scored against. Measured: 9 of 300 real 20d
+    labels on live market data.
+    """
+
+    @staticmethod
+    def _gap_up_frame():
+        """Every bar after entry trades strictly above the entry close."""
+        closes = [100.0] * 30 + [112.0 + i * 0.1 for i in range(_LONGEST + 40)]
+        frame = _frame(closes)
+        # Lows above the entry close: the price never traded back down.
+        frame["Low"] = [c * 0.999 for c in closes]
+        return frame
+
+    def test_a_gap_up_reports_zero_drawdown_not_a_gain(self):
+        frame = self._gap_up_frame()
+        labels = _labels_for(frame, _as_of(frame, -(_LONGEST + 1)))
+        excursion = labels["horizons"]["20d"]["adverse_excursion"]
+        self.assertLessEqual(excursion, 0.0)
+
+    def test_the_excursion_never_violates_its_declared_bound(self):
+        from core.forecast_targets import bounds_problems
+
+        frame = self._gap_up_frame()
+        labels = _labels_for(frame, _as_of(frame, -(_LONGEST + 1)))
+        excursion = labels["horizons"]["20d"]["adverse_excursion"]
+        self.assertEqual(bounds_problems("adverse_excursion", excursion), [])
+
+    def test_a_real_drawdown_is_still_measured(self):
+        """The floor must not swallow genuine losses."""
+        frame = self.__class__._gap_up_frame()
+        entry_position = len(frame) - (_LONGEST + 1)
+        entry_close = float(frame["Close"].iloc[entry_position])
+        frame.loc[frame.index[entry_position + 5], "Low"] = entry_close * 0.88
+        labels = _labels_for(frame, _as_of(frame, -(_LONGEST + 1)))
+        self.assertAlmostEqual(
+            labels["horizons"]["20d"]["adverse_excursion"], -0.12, places=4
+        )
+
+    def test_the_label_version_records_the_change(self):
+        self.assertEqual(core_config.OUTCOME_LABEL_VERSION, "outcome-label-v2")

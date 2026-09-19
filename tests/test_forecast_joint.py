@@ -269,14 +269,21 @@ class ContractFindingTests(unittest.TestCase):
         findings = contract_findings(_labels(adverse_excursion=-0.075))
         self.assertFalse(any("adverse_excursion at" in f for f in findings))
 
-    def test_the_relative_target_defect_is_reported(self):
-        """probability_outperform scores against the raw stock return."""
-        findings = contract_findings(_labels())
-        self.assertTrue(any("outperform" in f for f in findings))
+    def test_the_relative_target_defect_stays_fixed(self):
+        """It used to resolve to `forward_return` and return the raw stock
+        return. Now marked label_unavailable, so it resolves to nothing and the
+        finding is silent — checked by BEHAVIOUR, since the field name is still
+        declared for shape uniformity."""
+        self.assertFalse(any("outperform" in f for f in contract_findings(_labels())))
+
+    def test_healthy_labels_raise_no_findings_at_all(self):
+        self.assertEqual(contract_findings(_labels()), [])
 
     def test_findings_travel_with_the_forecast(self):
+        """A positive AE can no longer come from the label builder, but the
+        check remains as a regression guard against the floor being removed."""
         forecast = build_joint_forecast("T", "2024-06-15", labels=_labels(adverse_excursion=0.01))
-        self.assertGreaterEqual(len(forecast["findings"]), 2)
+        self.assertGreaterEqual(len(forecast["findings"]), 1)
 
 
 class JointAssemblyTests(unittest.TestCase):
