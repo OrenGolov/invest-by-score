@@ -132,7 +132,8 @@ PORTFOLIO_TICKERS = [
     "SNOW",
     "SKHY",
     "RCAT",
-    "ASTS"
+    "ASTS",
+    "STX"
 ]
 
 

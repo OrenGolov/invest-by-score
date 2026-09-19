@@ -78,3 +78,75 @@ class TestPortfolioList(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PortfolioWiringTests(unittest.TestCase):
+    """Adding a ticker to PORTFOLIO_TICKERS is not the same as wiring it up.
+
+    A holding must be present in THREE registries or it silently degrades
+    something: the universe ledger (or point-in-time status drops to
+    `unverifiable`), the entity registry (or its news resolves to nobody), and
+    — for operating companies — the sector map (or it permanently loses
+    sector-relative strength, because no sector means no XLx benchmark).
+
+    Both RCAT/ASTS and STX were added to the list alone and broke exactly this.
+    One test naming all three is what catches the next one.
+    """
+
+    @staticmethod
+    def _funds():
+        """Holdings with no single sector, so deliberately unmapped.
+
+        A sector ETF is not a benchmark for itself, and a broad fund spans
+        every sector — so `sector: None` is the correct answer, not a gap.
+        """
+        return {"VOO", "CIBR", "SOXX", "NASA"}
+
+    def test_every_holding_is_in_the_universe_ledger(self):
+        from core.universe import latest_entries_by_ticker
+
+        entries = latest_entries_by_ticker()
+        missing = sorted(set(PORTFOLIO_TICKERS) - set(entries))
+        self.assertEqual(
+            missing, [],
+            f"unledgered holdings degrade the universe to 'unverifiable': {missing}",
+        )
+
+    def test_every_holding_is_in_the_entity_registry(self):
+        from core.entity_resolution import build_default_entity_registry
+
+        registry = build_default_entity_registry()
+        missing = sorted(set(PORTFOLIO_TICKERS) - set(registry))
+        self.assertEqual(
+            missing, [],
+            f"unregistered holdings resolve their news to nobody: {missing}",
+        )
+
+    def test_every_non_fund_holding_has_a_sector(self):
+        from core.macro_registry import SYMBOL_TO_SECTOR
+
+        unmapped = {t for t in PORTFOLIO_TICKERS if t not in SYMBOL_TO_SECTOR}
+        unexpected = sorted(unmapped - self._funds())
+        self.assertEqual(
+            unexpected, [],
+            f"these are operating companies with no sector, so they lose "
+            f"sector-relative strength entirely: {unexpected}",
+        )
+
+    def test_the_unmapped_set_is_exactly_the_funds(self):
+        """A fund creeping into the sector map would give it a benchmark that
+        is partly itself."""
+        from core.macro_registry import SYMBOL_TO_SECTOR
+
+        unmapped = {t for t in PORTFOLIO_TICKERS if t not in SYMBOL_TO_SECTOR}
+        self.assertEqual(unmapped, self._funds())
+
+    def test_the_universe_is_point_in_time_complete(self):
+        from core.universe import latest_entries_by_ticker, universe_survivorship_status
+
+        self.assertEqual(
+            universe_survivorship_status(
+                list(PORTFOLIO_TICKERS), latest_entries_by_ticker(), "2026-09-19"
+            ),
+            "point_in_time_complete",
+        )

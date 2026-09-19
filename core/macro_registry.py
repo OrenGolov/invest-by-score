@@ -319,6 +319,13 @@ SYMBOL_TO_SECTOR: dict[str, str] = {
     "SKHY": "Information Technology",
     "GLW": "Information Technology",
     "DELL": "Information Technology",
+    "STX": "Information Technology",
+    # These three are operating COMPANIES, not funds, and were losing
+    # sector-relative context: with no sector there is no XLx benchmark, so
+    # C2's sector relative_strength was permanently None for them.
+    "CBRS": "Information Technology",   # Cerebras Systems — AI accelerators
+    "SPCX": "Industrials",              # SpaceX — aerospace
+    "KEEL": "Industrials",              # Keel Infrastructure
     "ORCL": "Information Technology",
     "NOW": "Information Technology",
     "PLTR": "Information Technology",

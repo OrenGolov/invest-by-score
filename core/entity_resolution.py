@@ -180,6 +180,7 @@ def build_default_entity_registry() -> dict[str, EntityRecord]:
         EntityRecord("TER", "Teradyne Inc.", ("Teradyne",), ("Greg Smith",)),
         EntityRecord("ALAB", "Astera Labs", ("Astera Labs",), ("Jitendra Mohan",)),
         EntityRecord("SKHY", "SK hynix Inc.", ("SK hynix",), ()),
+        EntityRecord("STX", "Seagate Technology", ("Seagate",), ("Dave Mosley",)),
         EntityRecord("CBRS", "Cerebras Systems", ("Cerebras",), ("Andrew Feldman",)),
 
         # --- Mega-cap technology --------------------------------------------
