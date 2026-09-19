@@ -2247,3 +2247,115 @@ def _validate_forecast_horizons() -> None:
 
 
 _validate_forecast_horizons()
+
+
+# --- Joint forecast (F3) ---------------------------------------------------------
+# One object reporting every target across every horizon together, with the
+# uncertainty that belongs to each cell. F3 DEFINES and VALIDATES the joint
+# contract; it fits no models, because none exist yet (the measured incumbent
+# is a momentum baseline at 0.575 directional accuracy).
+#
+# The shape rule that carries the design: a cell carries a `value` key IF AND
+# ONLY IF its status is OK. Not `value: None` — the key is ABSENT. The
+# dashboard's existing idiom is `Number(x ?? 0)`, so a null P(up) would coalesce
+# to 0.0% and render as CERTAIN DOWN — the most dangerous possible misreading,
+# produced by defensive-looking code. With the key absent the failure is loud at
+# the boundary instead of plausible on the screen.
+
+JOINT_FORECAST_CONTRACT_VERSION = "joint-forecast-v1"
+JOINT_FORECAST_PIPELINE_VERSION = "joint-forecast-pipeline-v1"
+
+# Snapshot-level status.
+JOINT_STATUS_OK = "OK"
+JOINT_STATUS_PARTIAL = "PARTIAL"
+JOINT_STATUS_NO_MODEL = "NO_MODEL"
+JOINT_STATUS_UNAVAILABLE = "UNAVAILABLE"
+
+# Cell-level status, in STRICT precedence order — first match wins. Precedence
+# is declared as data so the reason a cell is empty is never ambiguous, and so
+# a reader can see which explanation outranks which.
+CELL_STATUS_UNAVAILABLE = "UNAVAILABLE"          # no label set at all
+CELL_STATUS_PENDING = "PENDING"                  # the horizon's window has not closed
+CELL_STATUS_LABEL_UNBACKED = "LABEL_UNBACKED"    # no realized counterpart at this horizon
+CELL_STATUS_NEEDS_BENCHMARK = "NEEDS_BENCHMARK"  # relative target, no benchmark supplied
+CELL_STATUS_DEGENERATE_INTERVAL = "DEGENERATE_INTERVAL"  # zero-width uncertainty
+CELL_STATUS_UNCALIBRATED = "UNCALIBRATED"        # probability with no fitted map
+CELL_STATUS_NO_MODEL = "NO_MODEL"                # nothing to produce a value
+CELL_STATUS_OK = "OK"
+
+JOINT_CELL_PRECEDENCE: tuple[str, ...] = (
+    CELL_STATUS_UNAVAILABLE,
+    CELL_STATUS_PENDING,
+    CELL_STATUS_LABEL_UNBACKED,
+    CELL_STATUS_NEEDS_BENCHMARK,
+    CELL_STATUS_DEGENERATE_INTERVAL,
+    CELL_STATUS_UNCALIBRATED,
+    CELL_STATUS_NO_MODEL,
+    CELL_STATUS_OK,
+)
+
+# An interval narrower than this is not uncertainty, it is arithmetic. MEASURED:
+# `prediction_interval([0.55, 0.55, 0.55])` returns width 0.0 at folds=3, so a
+# fold-COUNT floor passes its own check while publishing perfect certainty.
+# Width is the guard; the count is decorative.
+JOINT_MIN_INTERVAL_WIDTH = 1e-9
+
+# Coherence verdicts.
+JOINT_COHERENCE_OK = "OK"
+JOINT_COHERENCE_FLAGGED = "FLAGGED"
+JOINT_COHERENCE_VIOLATED = "VIOLATED"
+JOINT_COHERENCE_NOT_EVALUATED = "NOT_EVALUATED"
+
+# Coherence rules F3 deliberately does NOT enforce, with the measurement that
+# rejected each. Declared as DATA so the reasoning is auditable and so a future
+# reader cannot re-add one believing it was merely overlooked.
+JOINT_REJECTED_RULES: dict[str, str] = {
+    "monotonic_return": (
+        "returns must grow with horizon — REJECTED: real NVDA labels at "
+        "2024-06-15 run -0.7%, -10.4%, -4.2%, -11.4%, +10.0%, +10.3% across "
+        "1d..252d. A stock falling for 60 sessions and recovering by 120 is "
+        "ordinary, not incoherent."
+    ),
+    "direction_matches_return": (
+        "sign(E[return]) must agree with P(up) > 0.5 — REJECTED: a skewed "
+        "payoff (75% of +2%, 25% of -9%) gives P(up)=0.73 with E[return]="
+        "-0.0075. Both are correct simultaneously."
+    ),
+    "volatility_grows_with_horizon": (
+        "realized volatility must grow with horizon — REJECTED: 1d volatility "
+        "is structurally None (labels.py needs >= 2 sessions for a dispersion), "
+        "so the rule cannot even be evaluated at the short end."
+    ),
+    "adverse_excursion_below_return": (
+        "adverse_excursion <= min(0, expected_return) — REJECTED: a gap-up "
+        "produces a POSITIVE adverse excursion (entry 100, lows 101/103/105 "
+        "-> +0.01), and 9 of 300 real 20d labels violate it. The realized "
+        "label is ground truth; a rule that calls ground truth malformed is "
+        "the wrong rule."
+    ),
+}
+
+
+def _validate_joint_forecast_config() -> None:
+    """Import-time guard: the cell vocabulary must be total and ordered."""
+    declared = {
+        CELL_STATUS_UNAVAILABLE, CELL_STATUS_PENDING, CELL_STATUS_LABEL_UNBACKED,
+        CELL_STATUS_NEEDS_BENCHMARK, CELL_STATUS_DEGENERATE_INTERVAL,
+        CELL_STATUS_UNCALIBRATED, CELL_STATUS_NO_MODEL, CELL_STATUS_OK,
+    }
+    if set(JOINT_CELL_PRECEDENCE) != declared:
+        raise ValueError("JOINT_CELL_PRECEDENCE must cover exactly the declared cell statuses")
+    if len(JOINT_CELL_PRECEDENCE) != len(declared):
+        raise ValueError("JOINT_CELL_PRECEDENCE contains a duplicate")
+    if JOINT_CELL_PRECEDENCE[-1] != CELL_STATUS_OK:
+        raise ValueError("OK must be the LAST precedence entry — every refusal outranks it")
+    if JOINT_MIN_INTERVAL_WIDTH <= 0.0:
+        raise ValueError("the minimum interval width must be strictly positive")
+    if not JOINT_REJECTED_RULES:
+        raise ValueError(
+            "the rejected-rule register must not be empty — the reasoning for "
+            "NOT enforcing a rule is as load-bearing as the rules that are"
+        )
+
+
+_validate_joint_forecast_config()

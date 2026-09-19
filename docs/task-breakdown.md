@@ -2150,10 +2150,75 @@ tampered label proved nothing. It now reads the fold geometry.
   by the config guard before the gate even loads. Suite 1505 pass, twenty-five
   gates green.
 
-### F3–F8 — pending
+### F3. Joint forecast ✓ DONE
 
-F3 joint forecast, F4 conditional forecasting, F5 event-conditioned
-forecast, F6 forecast decomposition, F7 forecast confidence, F8 the versioned
+Implemented 2026-09-19 in `core/forecast_joint.py` (`joint-forecast-v1`).
+Composes F1's six targets with F2's six horizons into one 36-cell object, each
+cell carrying its own status, uncertainty and reason.
+
+**F3 defines and validates the joint contract; it fits no models.** None exist
+— the measured incumbent is a momentum baseline at 0.575. Every cell needing a
+model refuses honestly, so the object is useful today as a contract.
+
+**The shape rule that carries the design.** A cell carries a `value` key IF AND
+ONLY IF its status is OK — the key is ABSENT otherwise, not `None`. The
+dashboard's existing idiom is `Number(x ?? 0)`, so a null P(up) would coalesce
+to `0.0%` and render as CERTAIN DOWN: the most dangerous possible misreading,
+produced by defensive-looking code. Same rule for `interval`/`dispersion` — an
+interval beside a withheld estimate is an estimate by another name.
+
+**Cell precedence is declared data and total**, OK last, so a refusal always
+names its specific obstacle: UNAVAILABLE → PENDING → LABEL_UNBACKED →
+NEEDS_BENCHMARK → DEGENERATE_INTERVAL → UNCALIBRATED → NO_MODEL → OK. On real
+NVDA labels the 36 cells split into four distinct refusals, not one blanket
+status.
+
+**Width guards uncertainty, not fold count.** MEASURED: an empirical interval
+NARROWS as folds decrease (0.089 wide at 2 folds vs 0.238 at 30 for the same
+true spread), and `prediction_interval([0.55]*3)` returns width 0.0 at
+`folds: 3`. A fold-count floor passes its own check while publishing perfect
+certainty.
+
+**Four coherence rules were REJECTED, each by measurement**, and the reasoning
+lives in `JOINT_REJECTED_RULES` so nobody re-adds one believing it was merely
+overlooked:
+
+| rejected rule | why |
+|---|---|
+| monotonic returns | real NVDA labels run `− − − − + +` across 1d..252d |
+| sign(E[r]) matches P(up)>0.5 | a skewed payoff gives P(up)=0.73 with E[r]=−0.0075 |
+| volatility grows with horizon | 1d `realized_vol` is structurally None (needs ≥2 sessions) |
+| `adverse_excursion ≤ min(0, E[r])` | a gap-up makes AE POSITIVE; 9 of 300 real 20d labels violate it |
+
+The last was the flagship invariant of all three design proposals, called
+"arithmetically impossible to violate". It is false, and a rule that calls
+ground truth malformed is the wrong rule.
+
+**Three pre-existing contract defects are REPORTED, not papered over**, as
+`findings` on every built forecast:
+
+- a realized `adverse_excursion` can violate its own F1 bound (gap-up; 3% of
+  real 20d labels) — either the bound or `labels.py` is wrong, and fixing
+  either is a deliberate separate change;
+- `probability_outperform` resolves to the same realized field as
+  `expected_return`, so the relative target is scored against the raw stock
+  return with no benchmark subtracted — it does not measure outperformance;
+- `build_target_request` does not validate its horizon against F2.
+
+**PIT correctness is structural**: the module never fetches, labels arrive as a
+parameter, so there is no provider to read past `as_of` with.
+
+- Design was produced by a 12-agent workflow (3 proposals, all REJECTED by
+  adversarial critique; 49 traps, 20 fatal). Every load-bearing claim was then
+  re-run against the live repo — one (sklearn missing) proved FALSE and was
+  discarded.
+- Acceptance: 43 tests in `tests/test_forecast_joint.py`; gate
+  `scripts/check_forecast_joint.py`, verified to FAIL when `value: None` is
+  reintroduced. Suite 1548 pass, twenty-six gates green.
+
+### F4–F8 — pending
+
+F4 conditional forecasting, F4 conditional forecasting, F5 event-conditioned forecast, F6 forecast decomposition, F7 forecast confidence, F8 the versioned
 `ForecastSnapshot` API contract.
 
 ---
