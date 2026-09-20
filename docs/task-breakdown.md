@@ -2997,6 +2997,88 @@ F6 forecast decomposition, F7 forecast confidence, F8 the versioned
 
 ---
 
+## Sprint L — Continuous Learning & Institutional Memory
+
+Goal: controlled learning, not uncontrolled self-modification.
+
+### L1. Outcome closure ✓ DONE
+
+`forecast → horizon expires → actual outcome → error → calibration`.
+`core/outcome_closure.py` plus the L1 block in `core/config.py`.
+
+**L1 could not assume a forecast existed to close.** MEASURED: nothing
+persisted a `ForecastSnapshot` — F8 builds one on demand and discards it, and
+the 3,301-row decision audit holds **zero** forecast-shaped rows. It stores
+SCORES, which have no horizon and therefore cannot expire. So L1 owns an
+append-only **forecast ledger**, written when the forecast is made.
+
+**Maturity is composed, not re-derived.** `build_outcome_labels` and
+`horizon_readiness` already answer "has this expired?" and "what actually
+happened?" — MEASURED, NVDA at 2024-06-15 has all six horizons matured while
+2026-09-10 has only 1d and 5d. The gate verifies the composition by
+OBSERVING the call, because a local re-implementation would satisfy a text
+search while being the second notion of maturity W5 forbids.
+
+**Error is scored per CLAIM TIER.** One universal function cannot serve four
+kinds of claim:
+
+| tier | claims | scored by |
+|---|---|---|
+| POINT | a number | Brier |
+| INTERVAL | a range | **coverage** — did the outcome fall inside? |
+| DIRECTIONAL | a side | hit / miss |
+| INSUFFICIENT | nothing | **NOT_SCORED** |
+
+Brier on an interval is undefined. MEASURED, a `[0.39, 0.73]` interval around
+a true rate of 0.55 contains the realised value in 93.8% of 2,000 draws —
+coverage is the quantity that interval claimed.
+
+**THE DECIDING MEASUREMENT: the scoreboard is gameable by refusing.** Over 200
+forecasts from a genuinely skilled forecaster, refusing the hardest cases
+(those nearest 0.5):
+
+```
+refuse   0%:  Brier 0.2206 over 200 scored
+refuse  50%:  Brier 0.2043 over 100 scored
+refuse  90%:  Brier 0.1379 over  19 scored
+refuse  99%:  Brier 0.0198 over   2 scored    <- 11x "better"
+```
+
+This system is *designed* to refuse often (F4 tiers, F5 stages, F7
+confidence), so the hazard is live. Every report publishes the scored /
+refused / pending counts beside the error, and below
+`CLOSURE_MIN_SCORED_SHARE` the figure is marked UNRELIABLE. A refusal itself
+is NOT_SCORED: zero error would reward silence, maximum error would punish
+honesty. Verified end to end — the gamed Brier still falls, but `reliable`
+flips to False with the refusal count beside it.
+
+**Closure is idempotent.** A CLOSED forecast is terminal; re-closing would
+double-count one observation and silently re-weight every metric derived from
+the ledger. `EXPIRED_NO_DATA` stays distinct from OPEN, because "we could not
+score it" and "it has not happened yet" have different fixes.
+
+**Verified on real data**: NVDA at 2024-06-15, a 0.62 bullish POINT forecast
+closed against a realised −4.19% — Brier 0.3844, correctly penalised;
+re-closing returned the same row unscored; an unmatured 252d stayed OPEN.
+
+**A layered guard was found untestable and split.** The shape rule (a refusal
+carries no value) lived only in validation, and the builder happily kept the
+number. It is now enforced at construction AND in validation, with the gate
+attacking each layer on its own — a guard sitting behind an effective one
+cannot be tested through it.
+
+- Acceptance: 43 tests in `tests/test_outcome_closure.py`; gate
+  `scripts/check_outcome_closure.py`, verified to FAIL under eleven reinjected
+  invariants — scoring refusals, Brier on intervals, dropping coverage,
+  marking a gamed report reliable, re-closing a CLOSED forecast, dropping
+  ledger dedup, both shape-rule layers, dropping EXPIRED_NO_DATA, re-deriving
+  maturity locally, and calibrating on any sample size. Suite 1961 pass,
+  35 gates green.
+
+### L2–L? — pending
+
+---
+
 ## Sprint R — Portfolio Risk Context (completing the fail-closed system)
 
 The W2 policy table gates single-decision quality; this sprint adds the

@@ -3886,3 +3886,168 @@ def _validate_promotion_config() -> None:
 
 
 _validate_promotion_config()
+
+
+# ---------------------------------------------------------------------------
+# Sprint L1 - Outcome closure
+# ---------------------------------------------------------------------------
+# forecast -> horizon expires -> actual outcome -> error -> calibration.
+#
+# The sprint goal is "controlled learning, not uncontrolled self-modification",
+# and closure is where that control lives: a forecast is scored ONCE, against
+# the outcome that actually happened, by a measure that fits the claim it made.
+#
+# L1 CANNOT ASSUME A FORECAST EXISTS TO CLOSE. MEASURED: nothing persists a
+# ForecastSnapshot - F8 builds one on demand and it is discarded, and the
+# 3,301-row decision audit holds ZERO forecast-shaped rows. It stores SCORES,
+# which have no horizon and therefore cannot expire. So L1's first job is the
+# FORECAST LEDGER.
+#
+# THE MATURITY QUESTION IS ALREADY SOLVED. `build_outcome_labels` and
+# `horizon_readiness` (V1/F2) answer "has this expired?" and "what actually
+# happened?". MEASURED: NVDA at 2024-06-15 has all six horizons matured, while
+# 2026-09-10 has 1d and 5d matured and the rest pending. L1 COMPOSES them.
+FORECAST_LEDGER_VERSION = "forecast-ledger-v1"
+OUTCOME_CLOSURE_VERSION = "outcome-closure-v1"
+CLOSURE_CONTRACT_VERSION = "closure-contract-v1"
+
+# The append-only ledger. One row per (ticker, as_of, horizon, target) written
+# WHEN THE FORECAST IS MADE, so a later outcome has something to close against.
+FORECAST_LEDGER_PATH = "data/forecast_ledger.jsonl"
+
+# Closure states. A forecast moves OPEN -> MATURED -> CLOSED, and a horizon
+# whose window elapsed without usable data lands in EXPIRED_NO_DATA rather
+# than being silently dropped: "we could not score it" and "it never existed"
+# are different facts.
+CLOSURE_OPEN = "OPEN"                      # window has not elapsed
+CLOSURE_MATURED = "MATURED"                # window elapsed, not yet scored
+CLOSURE_CLOSED = "CLOSED"                  # scored against a real outcome
+CLOSURE_EXPIRED_NO_DATA = "EXPIRED_NO_DATA"  # elapsed, but no usable outcome
+
+CLOSURE_STATES: tuple[str, ...] = (
+    CLOSURE_OPEN,
+    CLOSURE_MATURED,
+    CLOSURE_CLOSED,
+    CLOSURE_EXPIRED_NO_DATA,
+)
+
+# States from which a forecast may still be closed. A CLOSED forecast is
+# terminal: re-closing it would double-count one observation and silently
+# re-weight every metric derived from the ledger.
+CLOSURE_CLOSEABLE_STATES: tuple[str, ...] = (CLOSURE_MATURED,)
+
+# ERROR IS SCORED PER CLAIM TIER, never by one universal function. F4/F5 emit
+# four kinds of claim and one measure cannot serve them:
+#
+#   POINT        a number   -> Brier / log loss
+#   INTERVAL     a range    -> COVERAGE: did the outcome fall inside?
+#   DIRECTIONAL  a side     -> direction hit or miss
+#   INSUFFICIENT nothing    -> NOT_SCORED
+#
+# MEASURED, Brier on an interval is undefined: a [0.39, 0.73] interval around
+# a true rate of 0.55 contains the realised value in 93.8% of 2,000 draws.
+# Coverage is the quantity that interval claimed, so coverage is what is
+# scored.
+SCORE_METHOD_BRIER = "brier"
+SCORE_METHOD_COVERAGE = "coverage"
+SCORE_METHOD_DIRECTION = "direction"
+SCORE_METHOD_NOT_SCORED = "not_scored"
+
+CLOSURE_SCORE_METHODS: dict[str, str] = {
+    "POINT": SCORE_METHOD_BRIER,
+    "INTERVAL": SCORE_METHOD_COVERAGE,
+    "DIRECTIONAL": SCORE_METHOD_DIRECTION,
+    "INSUFFICIENT": SCORE_METHOD_NOT_SCORED,
+}
+
+# A refusal is NOT_SCORED, and that is load-bearing. Scoring it as zero error
+# would reward silence; scoring it as maximum error would punish honesty.
+# Neither is a measurement of anything.
+CLOSURE_SCORE_REFUSALS = False
+
+# THE SCOREBOARD IS GAMEABLE BY REFUSING, and it was measured rather than
+# argued. Over 200 forecasts from a genuinely skilled forecaster (skill 0.58),
+# refusing the hardest cases - those nearest 0.5 - improves the average error:
+#
+#   refuse   0%:  Brier 0.2206 over 200 scored
+#   refuse  50%:  Brier 0.2043 over 100 scored
+#   refuse  90%:  Brier 0.1379 over  19 scored
+#   refuse  99%:  Brier 0.0198 over   2 scored    <- 11x "better"
+#
+# This system is DESIGNED to refuse often (F4 tiers, F5 stages, F7
+# confidence), so the hazard is live. Every report therefore publishes the
+# refusal and pending counts beside the error: an error figure must never be
+# readable without the coverage it came from.
+CLOSURE_REPORT_COVERAGE = True
+
+# Below this share of scored forecasts, an error figure is reported as
+# UNRELIABLE rather than as a headline. Not a round number: it is the point at
+# which the measured gaming curve above has already halved the apparent error.
+CLOSURE_MIN_SCORED_SHARE = 0.50
+
+# Minimum closed forecasts before a calibration evaluation is attempted.
+# Aligned with F4's measured POINT floor, so one sample-size policy governs
+# both the forecast and its evaluation.
+CLOSURE_MIN_FOR_CALIBRATION = 40
+
+
+def _validate_closure_config() -> None:
+    """Import-time guard for the L1 contract."""
+    if len(set(CLOSURE_STATES)) != len(CLOSURE_STATES):
+        raise ValueError("CLOSURE_STATES contains a duplicate")
+    for state in (CLOSURE_OPEN, CLOSURE_MATURED, CLOSURE_CLOSED,
+                  CLOSURE_EXPIRED_NO_DATA):
+        if state not in CLOSURE_STATES:
+            raise ValueError(f"closure state {state!r} is not declared")
+    if CLOSURE_EXPIRED_NO_DATA not in CLOSURE_STATES:
+        raise ValueError(
+            "EXPIRED_NO_DATA must stay declared: 'we could not score it' and "
+            "'it never existed' are different facts"
+        )
+    if CLOSURE_CLOSED in CLOSURE_CLOSEABLE_STATES:
+        raise ValueError(
+            "a CLOSED forecast must not be closeable again - re-closing "
+            "double-counts one observation and silently re-weights every "
+            "metric derived from the ledger"
+        )
+    if not CLOSURE_CLOSEABLE_STATES:
+        raise ValueError("no state can be closed, so nothing can ever be scored")
+    unknown = set(CLOSURE_CLOSEABLE_STATES) - set(CLOSURE_STATES)
+    if unknown:
+        raise ValueError(f"closeable states must be declared: {sorted(unknown)}")
+
+    if set(CLOSURE_SCORE_METHODS) != {
+        "POINT", "INTERVAL", "DIRECTIONAL", "INSUFFICIENT"
+    }:
+        raise ValueError(
+            "CLOSURE_SCORE_METHODS must cover exactly the four F4 claim tiers"
+        )
+    if CLOSURE_SCORE_METHODS["INTERVAL"] != SCORE_METHOD_COVERAGE:
+        raise ValueError(
+            "an INTERVAL claim is scored by COVERAGE: Brier on a range is "
+            "undefined, and coverage is the quantity the interval claimed"
+        )
+    if CLOSURE_SCORE_METHODS["INSUFFICIENT"] != SCORE_METHOD_NOT_SCORED:
+        raise ValueError(
+            "a refusal is NOT_SCORED: zero error would reward silence and "
+            "maximum error would punish honesty"
+        )
+    if CLOSURE_SCORE_REFUSALS:
+        raise ValueError(
+            "refusals must not be scored - see CLOSURE_SCORE_METHODS"
+        )
+    if not CLOSURE_REPORT_COVERAGE:
+        raise ValueError(
+            "coverage must travel with every error figure. MEASURED: refusing "
+            "the hardest 99% of forecasts improves Brier from 0.2206 to "
+            "0.0198, so an error read without its refusal rate is meaningless"
+        )
+    if not 0.0 < CLOSURE_MIN_SCORED_SHARE <= 1.0:
+        raise ValueError("the minimum scored share must lie in (0, 1]")
+    if CLOSURE_MIN_FOR_CALIBRATION < 2:
+        raise ValueError("calibration needs more than one observation")
+    if not FORECAST_LEDGER_PATH.startswith("data/"):
+        raise ValueError("the forecast ledger belongs under data/")
+
+
+_validate_closure_config()
