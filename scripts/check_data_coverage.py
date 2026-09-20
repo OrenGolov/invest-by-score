@@ -42,11 +42,14 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from core.config import (  # noqa: E402
     COLLECT_COVERAGE_MAX_MISSING,
+    COLLECT_NEWS_BATCH_SIZE,
+    COLLECT_NEWS_SKIP_SECTORLESS,
     COLLECT_COVERAGE_WINDOW_BUSINESS_DAYS,
     COLLECT_PERISHABLE_SOURCES,
     COLLECT_REPORT_PATH,
     COLLECT_SOURCES,
     NEWS_LOOKBACK_DAYS,
+    NEWS_PROVIDER_DAILY_LIMIT,
 )
 from core.raw_store import RAW_STORE_DIR  # noqa: E402
 
@@ -304,6 +307,75 @@ def main() -> int:
                 f"collector has no collector for it — it would be silently "
                 f"skipped every day"
             )
+
+    # ---------------------------------------------------------------- 7
+    # QUOTA AWARENESS. MEASURED: the provider allows 100 requests/day and the
+    # collector makes one call per ticker, so an unbatched run over the whole
+    # portfolio exceeds it — every request returned HTTP 429 the day this was
+    # found. A batch that grows past the ceiling silently reintroduces that.
+    from fetch_data import PORTFOLIO_TICKERS  # noqa: PLC0415
+
+    if COLLECT_NEWS_BATCH_SIZE > NEWS_PROVIDER_DAILY_LIMIT:
+        failures.append(
+            f"the news batch ({COLLECT_NEWS_BATCH_SIZE}) exceeds the "
+            f"provider's {NEWS_PROVIDER_DAILY_LIMIT}/day ceiling on its own"
+        )
+    if COLLECT_NEWS_BATCH_SIZE >= len(PORTFOLIO_TICKERS):
+        failures.append(
+            f"the news batch ({COLLECT_NEWS_BATCH_SIZE}) covers the whole "
+            f"{len(PORTFOLIO_TICKERS)}-ticker portfolio, so no batching "
+            f"happens — MEASURED, that is what produced HTTP 429"
+        )
+
+    # The batch must actually reduce, and must exclude sector-less tickers.
+    import scripts.daily_collect as collector  # noqa: PLC0415
+
+    batch, skipped, _start = collector.news_batch(list(PORTFOLIO_TICKERS))
+    if len(batch) > COLLECT_NEWS_BATCH_SIZE:
+        failures.append(
+            f"news_batch returned {len(batch)} tickers, above the declared "
+            f"batch size of {COLLECT_NEWS_BATCH_SIZE}"
+        )
+    # Asserted on the OUTCOME, not on the flag: gating this check behind
+    # COLLECT_NEWS_SKIP_SECTORLESS made it vacuous the moment the flag was
+    # turned off, which is exactly the edit it exists to catch.
+    from core.market_context import sector_for  # noqa: PLC0415
+
+    funds = [t for t in PORTFOLIO_TICKERS if sector_for(t) is None]
+    if funds and not skipped:
+        failures.append(
+            f"the portfolio holds {len(funds)} sector-less ticker(s) "
+            f"({', '.join(sorted(funds))}) but none was skipped — a fund's "
+            f"news is market commentary, which E5 calls confounded, so the "
+            f"call buys a memory about the market rather than the holding"
+        )
+    if funds and not COLLECT_NEWS_SKIP_SECTORLESS:
+        failures.append(
+            "COLLECT_NEWS_SKIP_SECTORLESS was disabled while the portfolio "
+            "still holds funds; each one then spends a scarce API call on "
+            "market commentary"
+        )
+    for fund in skipped:
+        if fund in batch:
+            failures.append(f"{fund}: skipped yet still present in the batch")
+
+    # Rotation must cover the whole eligible set in a bounded number of runs.
+    eligible = [t for t in PORTFOLIO_TICKERS if t not in set(skipped)]
+    runs_needed = -(-len(eligible) // max(COLLECT_NEWS_BATCH_SIZE, 1))
+    covered: set[str] = set()
+    for run in range(runs_needed):
+        start = (run * COLLECT_NEWS_BATCH_SIZE) % len(eligible)
+        ordered = sorted(eligible)
+        covered |= {
+            ordered[(start + offset) % len(ordered)]
+            for offset in range(COLLECT_NEWS_BATCH_SIZE)
+        }
+    if len(covered) < len(eligible):
+        failures.append(
+            f"rotation covers only {len(covered)} of {len(eligible)} eligible "
+            f"tickers in {runs_needed} run(s) — some holding would never have "
+            f"its news collected"
+        )
 
     if failures:
         print("data-coverage gate FAILED:")

@@ -2723,6 +2723,35 @@ fails, loudly, but only where a report proves collection was expected.
 **Measured runtime:** a full 77-ticker run over all five sources takes
 **1m10s**, well inside the task's 2-hour limit.
 
+**Quota-aware batching — added after the free tier was exhausted.** MEASURED:
+the provider allows 100 requests/day and the collector makes ONE call per
+ticker, so 77 tickers plus ad-hoc testing exceeded it and every request
+returned HTTP 429.
+
+**The cost is per CALL, not per byte.** An ETF costs exactly the same one call
+as any stock, so excluding funds saves 3–4 calls of 77 — it is not a bandwidth
+measure. They are excluded for a better reason: MEASURED, C3 already gives
+VOO, SOXX, CIBR and NASA no sector ("a fund has no single sector, and a sector
+ETF is not a benchmark for itself"), and E6 matches analogs on event_type
+against a company's chart state. A fund-level headline is market commentary —
+exactly what E5 attribution calls CONFOUNDED — so the call buys a memory about
+the market rather than the holding. They keep their inferred memories from
+price history, which cost no quota. The exclusion is DERIVED from `sector_for`,
+so adding a fund needs no edit.
+
+**The remaining 73 rotate in batches of 40.** MEASURED: 40 covers all 73 in
+two runs and leaves 60 calls spare for retries and ad-hoc work — the margin
+whose absence produced the 429. A sequential cursor gives a visit spread of 1
+over 20 runs, where a date-derived stride left 2.
+
+**A 429 stops the run on the FIRST occurrence** rather than burning 40 doomed
+calls, and the cursor is NOT advanced, so the next run retries those tickers
+instead of skipping them.
+
+**The events stage reuses the same batch.** `forward()` fetches news itself,
+so passing the full list would have spent the quota a second time on tickers
+the news stage had already covered — caught before it shipped.
+
 - Acceptance: 31 tests in `tests/test_daily_collect.py` (including three
   clone-safety cases run against a temporary repo copy); gate
   `scripts/check_data_coverage.py`, verified to FAIL under six reinjected

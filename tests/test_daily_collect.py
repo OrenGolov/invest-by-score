@@ -17,8 +17,13 @@ import unittest
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
+from unittest.mock import patch
+
+import scripts.daily_collect as daily_collect
 from core.config import (
     COLLECT_COVERAGE_MAX_MISSING,
+    COLLECT_NEWS_BATCH_SIZE,
+    NEWS_PROVIDER_DAILY_LIMIT,
     COLLECT_COVERAGE_WINDOW_BUSINESS_DAYS,
     COLLECT_MAX_TICKERS_PER_RUN,
     COLLECT_PERISHABLE_SOURCES,
@@ -30,6 +35,7 @@ from core.config import (
 from scripts.check_data_coverage import business_days_back
 from scripts.daily_collect import (
     COLLECTORS,
+    news_batch,
     STATUS_FAILED,
     STATUS_OK,
     STATUS_PARTIAL,
@@ -291,6 +297,124 @@ class CloneSafetyTests(unittest.TestCase):
     def test_a_collecting_machine_with_a_current_ledger_passes(self):
         current = [d.isoformat() for d in business_days_back(date.today(), 10)]
         self.assertEqual(self._run(current, report=True), 0)
+
+
+class QuotaAwareNewsTests(unittest.TestCase):
+    """The provider allows 100 calls/day and each ticker is one call.
+
+    MEASURED: 77 tickers plus ad-hoc testing exhausted the quota, and every
+    request returned HTTP 429. The cost is PER CALL, not per byte, so an ETF
+    costs exactly what a stock does — funds are excluded for a different
+    reason, and the batch is what protects the quota.
+    """
+
+    def test_the_batch_is_bounded(self):
+        from fetch_data import PORTFOLIO_TICKERS
+
+        batch, _skipped, _start = news_batch(list(PORTFOLIO_TICKERS))
+        self.assertLessEqual(len(batch), COLLECT_NEWS_BATCH_SIZE)
+
+    def test_the_batch_does_not_cover_the_whole_portfolio(self):
+        from fetch_data import PORTFOLIO_TICKERS
+
+        # If it did, no batching would happen — which is what produced the 429.
+        self.assertLess(COLLECT_NEWS_BATCH_SIZE, len(PORTFOLIO_TICKERS))
+
+    def test_the_batch_stays_inside_the_daily_ceiling(self):
+        self.assertLessEqual(COLLECT_NEWS_BATCH_SIZE, NEWS_PROVIDER_DAILY_LIMIT)
+
+    def test_sector_less_tickers_are_skipped(self):
+        from core.market_context import sector_for
+        from fetch_data import PORTFOLIO_TICKERS
+
+        batch, skipped, _start = news_batch(list(PORTFOLIO_TICKERS))
+        funds = [t for t in PORTFOLIO_TICKERS if sector_for(t) is None]
+        self.assertTrue(funds, "fixture expects the portfolio to hold funds")
+        for fund in funds:
+            self.assertIn(fund, skipped, fund)
+            self.assertNotIn(fund, batch, fund)
+
+    def test_the_named_etfs_are_excluded(self):
+        from fetch_data import PORTFOLIO_TICKERS
+
+        batch, skipped, _start = news_batch(list(PORTFOLIO_TICKERS))
+        for etf in ("VOO", "SOXX", "CIBR"):
+            self.assertIn(etf, skipped, etf)
+            self.assertNotIn(etf, batch, etf)
+
+    def test_a_short_list_is_not_batched(self):
+        batch, _skipped, start = news_batch(["AAPL", "MSFT"])
+        self.assertEqual(sorted(batch), ["AAPL", "MSFT"])
+        self.assertEqual(start, 0)
+
+    def test_rotation_covers_every_eligible_ticker(self):
+        from core.market_context import sector_for
+        from fetch_data import PORTFOLIO_TICKERS
+
+        eligible = sorted(t for t in PORTFOLIO_TICKERS if sector_for(t) is not None)
+        runs = -(-len(eligible) // COLLECT_NEWS_BATCH_SIZE)
+        covered = set()
+        for run in range(runs):
+            start = (run * COLLECT_NEWS_BATCH_SIZE) % len(eligible)
+            covered |= {
+                eligible[(start + offset) % len(eligible)]
+                for offset in range(COLLECT_NEWS_BATCH_SIZE)
+            }
+        self.assertEqual(covered, set(eligible))
+
+    def test_the_cursor_advances_between_runs(self):
+        with tempfile.TemporaryDirectory() as folder:
+            cursor = Path(folder) / "cursor.json"
+            with patch.object(daily_collect, "COLLECT_NEWS_CURSOR_PATH", str(cursor)),                     patch.object(daily_collect, "REPO_ROOT", Path(folder)):
+                from fetch_data import PORTFOLIO_TICKERS
+
+                first, skipped, start = news_batch(list(PORTFOLIO_TICKERS))
+                daily_collect._advance_cursor(
+                    len(PORTFOLIO_TICKERS) - len(skipped), start
+                )
+                second, _s, second_start = news_batch(list(PORTFOLIO_TICKERS))
+            self.assertNotEqual(start, second_start)
+            self.assertNotEqual(first, second)
+
+    def test_an_unreadable_cursor_starts_at_the_head(self):
+        with tempfile.TemporaryDirectory() as folder:
+            cursor = Path(folder) / "cursor.json"
+            cursor.write_text("not json", encoding="utf-8")
+            with patch.object(daily_collect, "COLLECT_NEWS_CURSOR_PATH", str(cursor)),                     patch.object(daily_collect, "REPO_ROOT", Path(folder)):
+                from fetch_data import PORTFOLIO_TICKERS
+
+                _batch, _skipped, start = news_batch(list(PORTFOLIO_TICKERS))
+            self.assertEqual(start, 0)
+
+    def test_a_quota_error_stops_the_run_early(self):
+        # Burning the rest of the batch on doomed calls only deepens the
+        # overage, and the cursor must NOT advance past untried tickers.
+        calls = {"n": 0}
+
+        def exhausted(ticker, as_of):
+            calls["n"] += 1
+            return {
+                "status": "UNAVAILABLE",
+                "reason": "news provider request failed: HTTP Error 429: Too Many Requests",
+            }
+
+        with tempfile.TemporaryDirectory() as folder:
+            cursor = Path(folder) / "cursor.json"
+            with patch("core.news_adapter.build_news_snapshot", exhausted),                     patch.object(daily_collect, "COLLECT_NEWS_CURSOR_PATH", str(cursor)),                     patch.object(daily_collect, "REPO_ROOT", Path(folder)):
+                result = daily_collect.collect_news(
+                    ["AAPL", "MSFT", "NVDA", "AMD", "TSLA"] * 20, "2026-09-20", False
+                )
+                self.assertFalse(cursor.exists())
+        self.assertTrue(result["quota_exhausted"])
+        self.assertEqual(calls["n"], 1)
+
+    def test_the_events_stage_reuses_the_news_batch(self):
+        # forward() fetches news itself, so passing the full list would spend
+        # the quota a second time on tickers this run already covered.
+        source = (REPO_ROOT / "scripts" / "daily_collect.py").read_text(encoding="utf-8")
+        events = source[source.index("def collect_events("):source.index("COLLECTORS =")]
+        self.assertIn("news_batch(tickers)", events)
+        self.assertNotIn("forward(tickers", events)
 
 
 if __name__ == "__main__":

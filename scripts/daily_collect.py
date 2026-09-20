@@ -67,6 +67,9 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from core.config import (  # noqa: E402
     COLLECT_MAX_TICKERS_PER_RUN,
+    COLLECT_NEWS_BATCH_SIZE,
+    COLLECT_NEWS_CURSOR_PATH,
+    COLLECT_NEWS_SKIP_SECTORLESS,
     COLLECT_PERISHABLE_SOURCES,
     COLLECT_REPORT_PATH,
     COLLECT_SOURCES,
@@ -111,12 +114,81 @@ def collect_prices(tickers, as_of: str, dry_run: bool) -> dict:
     return {"attempted": len(tickers), "ok": ok, "failed": failed}
 
 
+def news_batch(tickers) -> tuple[list[str], list[str], int]:
+    """The subset of tickers this run should fetch, and what it skipped.
+
+    Two reductions, for two different reasons:
+
+    1. SECTOR-LESS tickers are dropped entirely. MEASURED, C3 gives VOO, SOXX,
+       CIBR and NASA no sector, and E6 matches analogs on event_type against a
+       company's chart state. A fund-level headline is market commentary,
+       which E5 attribution calls CONFOUNDED — so the call buys a memory about
+       the market, not the holding. They keep their inferred memories from
+       price history, which cost no quota.
+    2. The remainder is ROTATED in batches. MEASURED: the provider allows 100
+       requests/day and each ticker is one call, so 77 plus any ad-hoc work
+       exceeds it — today every request returned HTTP 429. A batch of 40
+       covers all 73 in two runs and leaves 60 calls spare.
+
+    The cursor advances sequentially rather than by a date-derived stride:
+    MEASURED, sequential gives a visit spread of 1 over 20 runs where a stride
+    left 2.
+    """
+    from core.market_context import sector_for
+
+    skipped: list[str] = []
+    eligible = list(tickers)
+    if COLLECT_NEWS_SKIP_SECTORLESS:
+        skipped = [t for t in eligible if sector_for(t) is None]
+        eligible = [t for t in eligible if sector_for(t) is not None]
+
+    eligible.sort()
+    if not eligible or len(eligible) <= COLLECT_NEWS_BATCH_SIZE:
+        return eligible, skipped, 0
+
+    cursor_file = REPO_ROOT / COLLECT_NEWS_CURSOR_PATH
+    cursor = 0
+    try:
+        cursor = int(json.loads(cursor_file.read_text(encoding="utf-8"))["cursor"])
+    except Exception:
+        cursor = 0  # a missing or unreadable cursor starts at the head
+
+    start = cursor % len(eligible)
+    batch = [
+        eligible[(start + offset) % len(eligible)]
+        for offset in range(COLLECT_NEWS_BATCH_SIZE)
+    ]
+    return batch, skipped, start
+
+
+def _advance_cursor(eligible_count: int, start: int) -> None:
+    """Move the cursor on, so the next run fetches the next batch."""
+    if eligible_count <= 0:
+        return
+    cursor_file = REPO_ROOT / COLLECT_NEWS_CURSOR_PATH
+    try:
+        cursor_file.parent.mkdir(parents=True, exist_ok=True)
+        cursor_file.write_text(
+            json.dumps({
+                "cursor": (start + COLLECT_NEWS_BATCH_SIZE) % eligible_count,
+                "updated": datetime.now(timezone.utc).isoformat(),
+            }),
+            encoding="utf-8",
+        )
+    except Exception as exc:  # a cursor failure must not lose the day's news
+        LOGGER.warning("could not advance the news cursor: %s", exc)
+
+
 def collect_news(tickers, as_of: str, dry_run: bool) -> dict:
     """THE PERISHABLE ONE. A day missed here is a day lost permanently."""
     from core.news_adapter import build_news_snapshot
 
+    batch, skipped, start = news_batch(tickers)
+    eligible_count = len(tickers) - len(skipped)
+
     ok, unavailable, failed = 0, [], []
-    for ticker in tickers:
+    quota_exhausted = False
+    for ticker in batch:
         if dry_run:
             ok += 1
             continue
@@ -125,15 +197,28 @@ def collect_news(tickers, as_of: str, dry_run: bool) -> dict:
             status = str(snapshot.get("status", "")).upper()
             if status == "UNAVAILABLE":
                 unavailable.append(ticker)
+                # A 429 means the quota is gone; every further call this run
+                # is wasted and would only deepen the overage.
+                if "429" in str(snapshot.get("reason", "")):
+                    quota_exhausted = True
+                    break
             else:
                 ok += 1
         except Exception as exc:
             LOGGER.warning("news fetch failed for %s: %s", ticker, exc)
             failed.append(ticker)
         time.sleep(COLLECT_THROTTLE_SECONDS)
+
+    if not dry_run and not quota_exhausted:
+        _advance_cursor(eligible_count, start)
+
     return {
-        "attempted": len(tickers), "ok": ok,
+        "attempted": len(batch), "ok": ok,
         "unavailable": unavailable, "failed": failed,
+        "batch": len(batch), "eligible": eligible_count,
+        "skipped_sectorless": sorted(skipped),
+        "cursor_start": start,
+        "quota_exhausted": quota_exhausted,
     }
 
 
@@ -194,7 +279,13 @@ def collect_events(tickers, as_of: str, dry_run: bool) -> dict:
     sys.path.insert(0, str(REPO_ROOT / "scripts"))
     from build_event_memory import forward
 
-    report = forward(tickers, as_of, False, None)
+    # The SAME batch the news stage fetched. `forward` fetches news itself, so
+    # passing the full list here would spend the quota a second time on
+    # tickers this run already covered — and on the sector-less ones the news
+    # stage deliberately skipped. The cursor is NOT advanced by this call;
+    # collect_news owns it.
+    batch, _skipped, _start = news_batch(tickers)
+    report = forward(batch, as_of, False, None)
     unavailable = len(report.get("news_unavailable") or [])
     return {
         # `attempted` counts what this source COULD act on. When news is
@@ -337,6 +428,26 @@ def main() -> int:
             if key not in ("seconds",) and value not in ([], 0, None, "")
         }
         print(f"  {source:<13} {status:<8}{perishable:<12} {detail}")
+
+    news = report["sources"].get("news") or {}
+    if news.get("skipped_sectorless"):
+        print()
+        print(
+            f"  news covered {news.get('batch')} of {news.get('eligible')} "
+            f"eligible tickers (cursor {news.get('cursor_start')}); "
+            f"{len(news['skipped_sectorless'])} fund(s) skipped: "
+            f"{', '.join(news['skipped_sectorless'])}"
+        )
+        print(
+            "      A fund has no sector, so its news is market commentary "
+            "rather than a company event — E5 would call it confounded. They "
+            "keep their inferred memories from price history."
+        )
+    if news.get("quota_exhausted"):
+        print()
+        print("  PROVIDER QUOTA EXHAUSTED (HTTP 429): the run stopped early.")
+        print("      The rotation cursor was NOT advanced, so the next run")
+        print("      retries these same tickers rather than skipping them.")
 
     if report["perishable_lost"]:
         print()

@@ -3007,6 +3007,48 @@ COLLECT_MAX_TICKERS_PER_RUN = 200
 # leaves no line here, and the coverage gate reads exactly that.
 COLLECT_REPORT_PATH = "data/collection_report.jsonl"
 
+# -- Quota-aware news collection ------------------------------------------
+#
+# MEASURED: the NewsAPI free tier allows 100 requests/day and the collector
+# makes ONE call per ticker, so 77 tickers plus any ad-hoc testing exceeds it.
+# Today's runs returned HTTP 429 (quota exhausted) for every ticker.
+#
+# THE COST IS PER CALL, NOT PER BYTE. An ETF costs exactly the same one call as
+# any stock, so excluding funds saves 3-4 calls out of 77 -- it is not a
+# bandwidth measure. Funds are excluded for a different and better reason
+# below.
+#
+# FUNDS ARE EXCLUDED BECAUSE THEIR NEWS IS NOT A COMPANY EVENT. MEASURED, C3
+# already refuses VOO/SOXX/CIBR/NASA a sector ("a fund has no single sector,
+# and a sector ETF is not a benchmark for itself"), and E6 retrieval matches
+# on event_type against a company's chart state. A fund-level headline is
+# market commentary, which is precisely what E5 attribution calls CONFOUNDED.
+# Spending a scarce call on one buys an observed memory that describes the
+# market rather than the holding.
+#
+# They keep their INFERRED memories from price history -- those are real price
+# moves and cost no quota.
+#
+# The exclusion is DERIVED, not a hardcoded list: any ticker C3 cannot give a
+# sector is skipped, so adding a fund to the portfolio needs no edit here.
+# The provider's documented daily request ceiling on the free tier. Declared
+# so the gate can refuse a batch that exceeds it, rather than discovering the
+# limit again through a day of HTTP 429s.
+NEWS_PROVIDER_DAILY_LIMIT = 100
+
+COLLECT_NEWS_SKIP_SECTORLESS = True
+
+# Tickers per news run. MEASURED against the 100/day ceiling: 40 covers all 73
+# sector-mapped holdings in two runs and leaves 60 calls spare for retries and
+# ad-hoc work -- the margin whose absence produced today's 429.
+COLLECT_NEWS_BATCH_SIZE = 40
+
+# Where the rotation cursor lives, so consecutive runs advance rather than
+# re-fetching the same head of the list. MEASURED: a sequential cursor covers
+# 73/73 in 2 runs with a visit spread of 1 over 20 runs, where a date-derived
+# stride left a spread of 2.
+COLLECT_NEWS_CURSOR_PATH = "data/collect_cursor.json"
+
 # How many business days back the coverage gate checks. Long enough to catch
 # a scheduler that died last week, short enough that the historical gaps
 # already in the ledger do not fail every future run.
@@ -3043,6 +3085,16 @@ def _validate_collect_config() -> None:
         raise ValueError("the coverage window must span at least one day")
     if COLLECT_COVERAGE_MAX_MISSING < 0:
         raise ValueError("the missing-day allowance must not be negative")
+    if COLLECT_NEWS_BATCH_SIZE < 1:
+        raise ValueError("a news run must cover at least one ticker")
+    if COLLECT_NEWS_BATCH_SIZE > 100:
+        raise ValueError(
+            f"a batch of {COLLECT_NEWS_BATCH_SIZE} exceeds the provider's "
+            f"100-request daily ceiling on its own, before any retry or "
+            f"ad-hoc call"
+        )
+    if not COLLECT_NEWS_CURSOR_PATH.startswith("data/"):
+        raise ValueError("the rotation cursor belongs under data/")
     if COLLECT_COVERAGE_MAX_MISSING >= COLLECT_COVERAGE_WINDOW_BUSINESS_DAYS:
         raise ValueError(
             "the allowance must be smaller than the window, or a scheduler "
