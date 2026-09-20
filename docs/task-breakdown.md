@@ -3129,6 +3129,21 @@ in `data/universe.jsonl`.**
 Eligible pool 73 → 75; still 2 runs to cover all at a batch of 40, 60 calls
 spare against the 100/day ceiling.
 
+### Sprint L open items — to close before the sprint ends
+
+1. **Live runs must use TODAY's chart state.** `scripts/run_forecasts.py`
+   currently derives each ticker's chart state from its most recent MEMORY,
+   which is correct for backfilling history and wrong for a live daily run:
+   every forecast would be anchored to a stale setup. Must be fixed before
+   this is scheduled alongside the collector.
+2. **VOO news tracking is an open decision.** It is currently skipped as a
+   broad-market fund whose news E5 would call confounded — but the S&P 500 is
+   one of the most important series the system follows, and the operator has
+   asked to revisit. Not a defect; a judgement to re-make deliberately.
+3. **NASA has no metadata.** `data/universe.jsonl` carries its ticker and
+   nothing else, so it cannot be classified as a fund or a company. Skipped
+   for news until resolved.
+
 ### L2–L? — pending
 
 ---
