@@ -27,6 +27,8 @@ import pandas as pd
 
 from core.config import (
     EVENT_MEMORY_CHART_FIELDS,
+    EVENT_MEMORY_FIELD_SCALE,
+    EVENT_MEMORY_SIMILARITY_FIELDS,
     EVENT_MEMORY_MIN_ANALOGS,
     EVENT_MEMORY_MIN_SIMILARITY,
     EVENT_MEMORY_RESPONSE_HORIZONS,
@@ -351,8 +353,6 @@ class TestReport(MemoryTestCase):
         self.assertEqual(memory_report(self.path)["memories"], 0)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class TestNearZeroSimilarity(unittest.TestCase):
@@ -417,3 +417,93 @@ class TestNearZeroSimilarity(unittest.TestCase):
         self.assertEqual(
             chart_similarity({"unknown_field": 10.0}, {"unknown_field": 10.5}), 0.0
         )
+
+
+class TestSimilarityIsShapeNotPriceLevel(unittest.TestCase):
+    """Analog retrieval must match what the chart is DOING, not what it costs.
+
+    MEASURED before this was fixed: with `close` and `atr_14` inside the
+    similarity, two identical chart shapes at $180 and $420 scored 0.846, and
+    84.5% of all pairs clearing the 0.70 retrieval bar were the SAME TICKER —
+    adjacent sessions of one stock, which is one situation counted many times
+    rather than an analog set.
+    """
+
+    def test_level_fields_are_recorded_but_not_matched_on(self):
+        # Recording and matching are different jobs: a memory should still say
+        # what the stock cost, it just is not evidence of similarity.
+        for level_field in ("close", "atr_14"):
+            self.assertIn(level_field, EVENT_MEMORY_CHART_FIELDS)
+            self.assertNotIn(level_field, EVENT_MEMORY_SIMILARITY_FIELDS)
+
+    def test_similarity_fields_are_a_subset_of_recorded_fields(self):
+        self.assertTrue(
+            set(EVENT_MEMORY_SIMILARITY_FIELDS) <= set(EVENT_MEMORY_CHART_FIELDS)
+        )
+
+    def test_identical_shape_at_a_different_price_is_a_perfect_analog(self):
+        cheap = _snapshot(close=180.0, atr_14=3.5)
+        pricey = _snapshot(close=420.0, atr_14=8.2)
+        self.assertGreaterEqual(chart_similarity(cheap, pricey), 0.999)
+
+    def test_the_same_setup_on_a_pricier_stock_clears_the_retrieval_bar(self):
+        pool = [
+            _memory(f"p{i}", chart_state=_snapshot(close=400.0 + i, atr_14=8.0))
+            for i in range(EVENT_MEMORY_MIN_ANALOGS + 1)
+        ]
+        analogs = find_analogs(_snapshot(close=180.0, atr_14=3.5), "earnings", pool)
+        self.assertEqual(len(analogs), len(pool))
+
+    def test_dropping_the_levels_sharpened_discrimination(self):
+        # The fix must not have made everything similar to everything.
+        cheap = _snapshot(close=180.0, atr_14=3.5)
+        opposed = _snapshot(
+            rsi=28.0, volatility=0.55, volume_ratio_20d=3.0,
+            trend_slope_60d=-0.0012, trend_vs_20d_mean=-0.09,
+            market_regime="bearish", change_5d=-0.07, change_20d=-0.18,
+            change_60d=-0.31, price_vs_ma_50=-0.12, price_vs_ma_200=-0.26,
+        )
+        self.assertLess(chart_similarity(cheap, opposed), EVENT_MEMORY_MIN_SIMILARITY)
+
+    def test_the_absolute_scales_still_protect_near_zero_fields(self):
+        # What the declared scales were FOR: a purely relative measure calls
+        # +0.0012 and -0.0009 completely dissimilar, though both are flat.
+        self.assertGreater(
+            chart_similarity(
+                _snapshot(trend_slope_60d=0.0012),
+                _snapshot(trend_slope_60d=-0.0009),
+            ),
+            0.9,
+        )
+
+
+class TestVolatilityScaleMatchesItsUnit(unittest.TestCase):
+    """The chart state carries ANNUALIZED volatility, not daily.
+
+    MEASURED: at the old 0.01 scale (set for daily vol) the field contributed
+    a mean of 0.029 across 4,000 real pairs — any 1pp gap scored zero, so two
+    ordinary stocks at 20% and 25% vol were called completely dissimilar.
+    """
+
+    def _field_score(self, left: float, right: float) -> float:
+        scale = EVENT_MEMORY_FIELD_SCALE["volatility"]
+        return max(0.0, 1.0 - abs(left - right) / scale)
+
+    def test_ordinary_volatilities_are_not_called_dissimilar(self):
+        self.assertGreaterEqual(self._field_score(0.20, 0.25), 0.5)
+
+    def test_a_real_volatility_regime_change_still_registers(self):
+        self.assertLessEqual(self._field_score(0.15, 0.60), 0.25)
+
+    def test_the_scale_is_asserted_on_the_field_not_the_whole_chart(self):
+        # With ten other fields identical, a single differing field cannot
+        # move the whole-chart mean below the retrieval bar. A whole-chart
+        # assertion here would test the scale's NEIGHBOURS, not the scale.
+        calm = _snapshot(volatility=0.15)
+        wild = _snapshot(volatility=0.60)
+        self.assertGreater(chart_similarity(calm, wild), EVENT_MEMORY_MIN_SIMILARITY)
+        self.assertLessEqual(self._field_score(0.15, 0.60), 0.25)
+
+
+if __name__ == "__main__":
+    unittest.main()

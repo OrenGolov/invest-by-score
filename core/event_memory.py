@@ -56,6 +56,7 @@ from typing import Any, Iterable
 
 from core.config import (
     EVENT_MEMORY_CHART_FIELDS,
+    EVENT_MEMORY_SIMILARITY_FIELDS,
     EVENT_MEMORY_FIELD_SCALE,
     EVENT_MEMORY_MIN_ANALOGS,
     EVENT_MEMORY_MIN_SIMILARITY,
@@ -271,19 +272,31 @@ def load_memory_objects(path: str | Path | None = None) -> list[EventMemory]:
 def chart_similarity(
     left: dict[str, Any],
     right: dict[str, Any],
-    fields: Iterable[str] = EVENT_MEMORY_CHART_FIELDS,
+    fields: Iterable[str] = EVENT_MEMORY_SIMILARITY_FIELDS,
 ) -> float:
-    """Similarity between two chart states, in [0, 1].
+    """Similarity between two chart SHAPES, in [0, 1].
 
-    Compared field by field. Fields with a declared scale in
-    `EVENT_MEMORY_FIELD_SCALE` use it; the rest fall back to a relative
-    comparison, which keeps a $500 stock and a $50 stock with the same shape
-    comparable.
+    Compared field by field over `EVENT_MEMORY_SIMILARITY_FIELDS`, which is
+    the recorded chart state MINUS its price-level fields. Fields with a
+    declared scale in `EVENT_MEMORY_FIELD_SCALE` use it; the rest fall back to
+    a relative comparison.
 
-    Only the fields in `fields` are compared — a value outside that list is
-    not part of the chart state and is ignored. Fields absent from either
-    side are skipped rather than treated as matching, because a missing
-    field is not agreement.
+    **Levels are recorded but never matched on.** `close` and `atr_14` say how
+    expensive the stock is, not what the chart is doing, and every other field
+    is already scale-free. MEASURED: with the levels included, two IDENTICAL
+    chart shapes at $180 and $420 scored 0.846, and 84.5% of all pairs clearing
+    the 0.70 retrieval bar were the SAME TICKER — adjacent sessions of one
+    stock, which is one situation counted many times rather than an analog set.
+    Without them the same pair scores 1.000 while an OPPOSITE-shape pair falls
+    from 0.230 to 0.090, so discrimination improved rather than loosened.
+
+    An absolute scale, where one is declared, is what keeps a purely relative
+    measure from collapsing near zero: two nearly-flat slopes (+0.0012 vs
+    -0.0009) are both "flat", yet relative difference calls them 0.0 similar
+    and drags an otherwise-0.97 match below the retrieval bar.
+
+    Fields absent from either side are skipped rather than treated as
+    matching, because a missing field is not agreement.
     """
     scores: list[float] = []
     for field_name in fields:

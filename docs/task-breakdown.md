@@ -2317,6 +2317,59 @@ finding a global point-estimate rule would have published.
   per-cell selection into one global floor, and removing the floor entirely.
   Suite 1621 pass, twenty-seven gates green.
 
+### E6 retrieval fix — analog similarity matched price level, not chart shape
+
+Found while measuring F5's preconditions. `chart_similarity` compared `close`
+(scale 20.0) and `atr_14` (scale 2.0) across tickers trading at completely
+different prices, so a $180 stock scored ~0.0 against a $420 stock on those
+fields **forever**, regardless of what either chart was doing. The chart state
+also carries ANNUALIZED volatility while the scale was 0.01 — set for daily
+vol — so any 1pp gap scored zero.
+
+MEASURED, 1,608 real chart states across 12 tickers x 5y, at the unchanged
+0.70 bar with event-type matching required:
+
+| metric | before | after |
+|---|---|---|
+| share reaching the E6 floor of 5 analogs | **0.000** | **0.247** |
+| share reaching C7's floor of 3 | 0.053 | 0.373 |
+| probes retrieving ZERO analogs | 0.813 | 0.393 |
+
+Zero of 150 probes had ever reached the floor of 5. Worse, **84.5% of every
+pair that did clear 0.70 was the SAME TICKER** — adjacent sessions of one
+stock. An "analog set" built that way is one situation counted many times, a
+pseudo-replication that makes a base rate read far more confident than its
+evidence supports.
+
+The fix separates RECORDING from MATCHING: `EVENT_MEMORY_CHART_FIELDS` still
+records the levels (a memory should say what the stock cost), while a new
+`EVENT_MEMORY_SIMILARITY_FIELDS` excludes them from comparison. Every
+remaining field is already scale-free. Volatility's scale moved 0.01 → 0.15
+to match its actual unit.
+
+Discrimination IMPROVED rather than loosened — this was not a threshold
+relaxation:
+
+```
+identical shape, different price level:  0.846 -> 1.000
+OPPOSITE chart shape:                    0.230 -> 0.090
+two nearly-flat slopes (the property
+  the absolute scales exist to protect): 0.999 -> 0.999
+```
+
+`EVENT_MEMORY_MIN_SIMILARITY` is deliberately unchanged at 0.70. MEASURED, no
+threshold is both selective and productive — 0.55 yields 33 analogs at mean
+similarity 0.63 (weak matches), 0.80 yields 0. Moving the bar only slides
+along that curve, so the bar stays honest and F5 lets F4's `select_claim`
+decide what the retrieved set can actually support.
+
+- Import-time guard refuses `close`/`atr_14` in the similarity fields and any
+  field outside the recorded set. Gate extended with four guards, each
+  verified to FAIL when reverted: level fields re-added, volatility scale
+  reverted to 0.01, widened to 2.0, and similarity fields emptied.
+- Acceptance: 9 new tests (52 in `tests/test_event_memory.py`). Suite 1630
+  pass, 27 gates green.
+
 ### F5–F8 — pending
 
 F5 event-conditioned forecast, F6 forecast decomposition, F7 forecast

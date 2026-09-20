@@ -1288,6 +1288,24 @@ EVENT_MEMORY_CHART_FIELDS = (
     "price_vs_ma_50", "price_vs_ma_200",
 )
 
+# The subset of the above that SIMILARITY is computed over. `close` and
+# `atr_14` are LEVEL fields: they say how expensive the stock is, not what the
+# chart is doing. Every other field is already scale-free (a ratio or a percent
+# change), so including levels made analog retrieval a price-level filter.
+#
+# MEASURED, two IDENTICAL chart shapes at different price levels ($180 vs
+# $420): similarity 0.846 with the level fields, 1.000 without. Over 5,466
+# random CROSS-ticker pairs of real chart states the mean rose 0.356 -> 0.401,
+# and discrimination IMPROVED rather than loosened: an OPPOSITE-shape pair fell
+# 0.230 -> 0.090.
+#
+# The levels stay in EVENT_MEMORY_CHART_FIELDS because a memory should still
+# RECORD what the stock cost at the time; they are simply not evidence of
+# similarity. Recording and matching are different jobs.
+EVENT_MEMORY_SIMILARITY_FIELDS = tuple(
+    name for name in EVENT_MEMORY_CHART_FIELDS if name not in ("close", "atr_14")
+)
+
 # The response horizons a memory records. Aligned with the event study so a
 # remembered response and a fresh measurement always describe the same window.
 EVENT_MEMORY_RESPONSE_HORIZONS = ("1d", "5d", "20d", "60d")
@@ -1299,9 +1317,15 @@ EVENT_MEMORY_RESPONSE_HORIZONS = ("1d", "5d", "20d", "60d")
 # yet relative difference calls them 0.0 similar and drags a 0.97 match below
 # the retrieval bar. Fields absent here fall back to relative comparison.
 EVENT_MEMORY_FIELD_SCALE = {
-    "close": 20.0,              # price levels differ hugely across tickers
+    "close": 20.0,              # retained for recording; not a similarity field
     "rsi": 20.0,                # 20 RSI points is a regime apart
-    "volatility": 0.01,         # 1pp of daily vol is a different character
+    # MEASURED: the chart state carries ANNUALIZED volatility (0.28 = 28%),
+    # not daily, so a 0.01 scale meant any 1pp gap scored ZERO — two ordinary
+    # stocks at 20% and 25% vol were called completely dissimilar, and the
+    # field contributed a mean of 0.029 across 4,000 real pairs. At 0.15 a
+    # 15%/18% pair scores 0.80 and a genuinely different 28%/55% pair still
+    # scores 0.00, which is the discrimination the field was meant to provide.
+    "volatility": 0.15,
     "volume_ratio_20d": 0.5,
     "atr_14": 2.0,
     "trend_slope_60d": 0.25,
@@ -1345,6 +1369,25 @@ def _validate_event_memory_config() -> None:
             raise ValueError(
                 f"EVENT_MEMORY_FIELD_SCALE[{name!r}] must be positive — a zero "
                 f"scale would make every difference infinite"
+            )
+    if not EVENT_MEMORY_SIMILARITY_FIELDS:
+        raise ValueError("similarity needs at least one field to compare")
+    extra = set(EVENT_MEMORY_SIMILARITY_FIELDS) - set(EVENT_MEMORY_CHART_FIELDS)
+    if extra:
+        raise ValueError(
+            f"EVENT_MEMORY_SIMILARITY_FIELDS must be a SUBSET of the recorded "
+            f"chart fields; unknown: {sorted(extra)}"
+        )
+    # The level fields must stay OUT of similarity. MEASURED: including them
+    # scores two identical chart shapes at 0.846 when the stocks trade at
+    # different prices, and retrieval then returns near-duplicates of the same
+    # ticker (84.5% of pairs clearing the 0.70 bar were the same ticker).
+    for level_field in ("close", "atr_14"):
+        if level_field in EVENT_MEMORY_SIMILARITY_FIELDS:
+            raise ValueError(
+                f"{level_field!r} is a PRICE-LEVEL field and must not be a "
+                f"similarity field — it makes analog retrieval a price filter, "
+                f"matching a $180 stock only to other $180 stocks"
             )
 
 

@@ -35,7 +35,9 @@ from core.attribution import attribute_study  # noqa: E402
 from core.config import (  # noqa: E402
     EVENT_MEMORY_CHART_FIELDS,
     EVENT_MEMORY_MIN_ANALOGS,
+    EVENT_MEMORY_FIELD_SCALE,
     EVENT_MEMORY_MIN_SIMILARITY,
+    EVENT_MEMORY_SIMILARITY_FIELDS,
     EVENT_MEMORY_RESPONSE_HORIZONS,
 )
 from core.event_contract import Event  # noqa: E402
@@ -192,6 +194,80 @@ def main() -> int:
     ))]
     if find_analogs(_snapshot(), "earnings", dissimilar):
         failures.append("a dissimilar chart was returned as an analog")
+
+    # 5b. SHAPE, not price level. MEASURED: with `close` and `atr_14` inside
+    # the similarity, two IDENTICAL chart shapes at $180 and $420 scored 0.846,
+    # and 84.5% of every pair clearing the 0.70 bar was the SAME TICKER —
+    # adjacent sessions of one stock, which is one situation counted many times
+    # rather than an analog set. Retrieval had become a price filter.
+    for level_field in ("close", "atr_14"):
+        if level_field in EVENT_MEMORY_SIMILARITY_FIELDS:
+            failures.append(
+                f"{level_field!r} is back in the similarity fields — analog "
+                f"retrieval becomes a price filter that matches a $180 stock "
+                f"only to other $180 stocks"
+            )
+    cheap = _snapshot(close=180.0, atr_14=3.5)
+    pricey = _snapshot(close=420.0, atr_14=8.2)
+    if chart_similarity(cheap, pricey) < 0.999:
+        failures.append(
+            f"two IDENTICAL chart shapes at different price levels scored "
+            f"{chart_similarity(cheap, pricey):.3f} — the same setup on a "
+            f"pricier stock is the canonical analog, and it must not be "
+            f"penalised for the share price"
+        )
+    # The same guard must not have made everything similar to everything.
+    opposed = _snapshot(
+        rsi=28.0, volatility=0.55, volume_ratio_20d=3.0, trend_slope_60d=-0.0012,
+        trend_vs_20d_mean=-0.09, market_regime="bearish", change_5d=-0.07,
+        change_20d=-0.18, change_60d=-0.31, price_vs_ma_50=-0.12,
+        price_vs_ma_200=-0.26,
+    )
+    if chart_similarity(cheap, opposed) >= EVENT_MEMORY_MIN_SIMILARITY:
+        failures.append(
+            f"an OPPOSITE chart shape scored {chart_similarity(cheap, opposed):.3f}, "
+            f"above the retrieval bar — dropping the level fields must sharpen "
+            f"discrimination, not loosen it"
+        )
+    # And it must not have broken what the absolute scales were FOR: a purely
+    # relative measure collapses near zero, calling two nearly-flat slopes
+    # completely dissimilar.
+    # The volatility scale must match the UNIT the chart state carries.
+    # MEASURED: the state holds ANNUALIZED vol (0.28 = 28%), but the scale was
+    # 0.01 — set for daily vol — so any 1pp gap scored ZERO and the field
+    # contributed a mean of 0.029 across 4,000 real pairs. Two ordinary stocks
+    # at 20% and 25% vol were called completely dissimilar.
+
+    # ...without going blind to a real volatility regime change. Asserted on
+    # the FIELD, not the whole-chart mean: with ten other fields identical, a
+    # single differing field cannot move the mean below the retrieval bar, so
+    # a whole-chart assertion here would test the scale's neighbours instead
+    # of the scale.
+    vol_scale = EVENT_MEMORY_FIELD_SCALE["volatility"]
+    calm_vs_wild = max(0.0, 1.0 - abs(0.15 - 0.60) / vol_scale)
+    if calm_vs_wild > 0.25:
+        failures.append(
+            f"a 15% and a 60% annualized volatility score {calm_vs_wild:.3f} on "
+            f"the volatility field (scale {vol_scale}) — the scale has been "
+            f"widened until the field no longer discriminates a genuine "
+            f"volatility regime change"
+        )
+    ordinary_field = max(0.0, 1.0 - abs(0.20 - 0.25) / vol_scale)
+    if ordinary_field < 0.5:
+        failures.append(
+            f"two ordinary volatilities (20% vs 25%) score {ordinary_field:.3f} "
+            f"on the volatility field (scale {vol_scale}) — the scale is set "
+            f"for DAILY vol while the chart state carries ANNUALIZED"
+        )
+
+    flat_a = _snapshot(trend_slope_60d=0.0012)
+    flat_b = _snapshot(trend_slope_60d=-0.0009)
+    if chart_similarity(flat_a, flat_b) < 0.9:
+        failures.append(
+            f"two nearly-flat slopes scored {chart_similarity(flat_a, flat_b):.3f} "
+            f"— the declared absolute scales exist to stop a relative measure "
+            f"collapsing near zero, and that protection is gone"
+        )
 
     if chart_similarity(_snapshot(), _snapshot()) != 1.0:
         failures.append("an identical chart does not score 1.0 similarity")
