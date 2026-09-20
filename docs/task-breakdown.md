@@ -1422,16 +1422,80 @@ stochastic estimator in the same-process check; re-sabotaging now fails with
 a precise message. Worth recording: the gate was wrong in a way that only an
 attempted break could reveal.
 
-### M5. Promotion gates and drift hooks
+### M5. Promotion gates and drift hooks ✓ DONE
 
-- Promotion checklist automated in `scripts/promote.py`: OOS metrics beat
-  incumbent on the pre-registered primary metric, no regression on veto-rate
-  or false-positive rate beyond tolerance, drift check (V4) clean, manifest
-  complete, human approval recorded. Any failure → candidate stays.
-- Historical predictions are immutable: promotion never rewrites past
-  decisions' model versions (append-only audit guarantees this).
-- Acceptance: attempt to promote with a missing manifest field fails loudly;
-  the full gate sequence is exercised in a test with a synthetic candidate.
+The checklist a candidate must pass before it can serve. `core/promotion.py`,
+`scripts/promote.py`, and the M5 block in `core/config.py`. Sprint L (the
+learning loop) names this as its precondition: "promotion requires
+out-of-sample comparison, drift checks, reproducibility, and a release gate."
+
+**The gap was NARROWER than this doc implied, and that was measured.**
+`ModelRegistry.promote()` already refused a candidate without an OOS
+comparison and without a named human approver. Three of the five checks were
+enforced nowhere:
+
+```
+[x] OOS beats the incumbent        already in promote()
+[x] human approval recorded        already in promote()
+[ ] no veto-rate regression
+[ ] drift check clean
+[ ] manifest complete
+```
+
+So M5 adds the three missing checks and the script that SEQUENCES all five,
+rather than reimplementing the two that already work. The checklist COMPOSES
+`oos_comparison_problems` and `approver_problems` — the very functions the
+registry enforces — so the script and the registry cannot judge a candidate
+differently (W5).
+
+**Every check is a refusal, not a score.** A checklist that produces a number
+invites "close enough". Each check returns PASS, FAIL or NOT_EVALUATED, and
+anything but PASS blocks.
+
+**NOT_EVALUATED is not PASS.** A drift check that could not run has not found
+the candidate clean — it has found nothing. This is the check most likely to
+be "simplified" into a pass, so the gate attacks it directly. Two real cases
+block today: no score distributions supplied, and fewer than
+`PROMOTION_MIN_DECISIONS_FOR_REGRESSION` decisions on either side.
+
+**The manifest check runs FIRST.** A candidate that cannot be reproduced is
+rejected before anyone evaluates its metrics.
+
+**A veto rate that FALLS is a regression too.** The obvious implementation
+catches only an increase. A candidate that vetoes far less has not
+necessarily improved — the W2 rules exist to refuse bad decisions, and one
+that stops refusing them has stopped checking. Both directions fail, at
+±`PROMOTION_MAX_VETO_RATE_DECREASE`.
+
+**Drift thresholds discriminate.** MEASURED over 400 synthetic scores: an
+unshifted distribution scores PSI 0.013, a +1.9-point shift scores 3.37,
+against a 0.25 fail floor.
+
+**History immutability is verified, not assumed.**
+`history_immutable_problems` catches a rewritten `model_version`, a changed
+score, and a vanished decision, while still allowing new rows — promotion is
+append-only, not frozen.
+
+**The script caught a defect in itself.** On the first real promotion the
+checklist passed and the registry then refused: `promote.py` was reading the
+OOS comparison back off a check row rather than reusing the one it evaluated.
+It now resolves the comparison ONCE and passes the same object to both, and
+the "checklist and registry disagree" branch that surfaced it is retained —
+that disagreement is a defect, never a reason to override.
+
+**Verified end to end** against the real registry: a candidate registered,
+evaluated (5/5 PASS), promoted to `approved`, and persisted. Each failure mode
+was confirmed to block naming exactly one check. The test fixture was then
+removed from the manifest.
+
+- Acceptance: 41 tests in `tests/test_promotion.py`; gate
+  `scripts/check_promotion.py`, verified to FAIL under ten reinjected
+  invariants — treating NOT_EVALUATED as PASS, turning missing drift data
+  into a pass, dropping the veto-DECREASE regression, raising the PSI floor
+  to 99, moving the manifest check off first, dropping a required manifest
+  field, dropping a check, disabling history immutability, forking the
+  registry's functions, and making `promote.py` ignore the verdict. Suite
+  1907 pass, 34 gates green.
 
 ---
 

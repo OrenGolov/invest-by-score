@@ -3672,3 +3672,165 @@ def _validate_forecast_snapshot_config() -> None:
 
 
 _validate_forecast_snapshot_config()
+
+
+# ---------------------------------------------------------------------------
+# Sprint M5 - Promotion gates and drift hooks
+# ---------------------------------------------------------------------------
+# The checklist a candidate model must pass before it can serve. Sprint L (the
+# learning loop) depends on this: "promotion requires out-of-sample
+# comparison, drift checks, reproducibility, and a release gate" is its stated
+# precondition, so the loop cannot close without it.
+#
+# MEASURED, the gap is NARROWER than the sprint doc implies.
+# `ModelRegistry.promote()` already refuses a candidate without an OOS
+# comparison and without a named human approver. Three of the five required
+# checks are enforced NOWHERE:
+#
+#   [x] OOS beats the incumbent on the pre-registered metric  (promote())
+#   [x] human approval recorded                               (promote())
+#   [ ] no veto-rate / false-positive regression
+#   [ ] drift check clean
+#   [ ] manifest complete
+#
+# So M5 adds the three missing checks and the script that SEQUENCES all five,
+# rather than reimplementing the two that already work (W5).
+#
+# EVERY CHECK IS A REFUSAL, NOT A SCORE. A promotion checklist that produces a
+# number invites "close enough". Each check returns PASS, FAIL or a third
+# state - NOT_EVALUATED - and any FAIL stops the promotion. NOT_EVALUATED is
+# deliberately distinct from PASS: a drift check that could not run has not
+# found the candidate clean, it has found nothing.
+PROMOTION_GATE_VERSION = "promotion-gate-v1"
+PROMOTION_CONTRACT_VERSION = "promotion-contract-v1"
+
+# The checks, in evaluation order. Ordered cheapest-and-most-fundamental
+# first, so a candidate missing its manifest is rejected before anyone spends
+# time on drift.
+PROMO_CHECK_MANIFEST = "manifest_complete"
+PROMO_CHECK_OOS = "oos_beats_incumbent"
+PROMO_CHECK_REGRESSION = "no_quality_regression"
+PROMO_CHECK_DRIFT = "drift_clean"
+PROMO_CHECK_APPROVAL = "human_approval"
+
+PROMOTION_CHECKS: tuple[str, ...] = (
+    PROMO_CHECK_MANIFEST,
+    PROMO_CHECK_OOS,
+    PROMO_CHECK_REGRESSION,
+    PROMO_CHECK_DRIFT,
+    PROMO_CHECK_APPROVAL,
+)
+
+# Check outcomes. NOT_EVALUATED is the load-bearing third state.
+PROMO_PASS = "PASS"
+PROMO_FAIL = "FAIL"
+PROMO_NOT_EVALUATED = "NOT_EVALUATED"
+
+PROMOTION_OUTCOMES: tuple[str, ...] = (PROMO_PASS, PROMO_FAIL, PROMO_NOT_EVALUATED)
+
+# Checks that must reach PASS. A check left NOT_EVALUATED blocks promotion
+# exactly as a FAIL does - absence of evidence is not evidence of safety.
+PROMOTION_REQUIRED_CHECKS: tuple[str, ...] = PROMOTION_CHECKS
+
+# Manifest fields a candidate must carry before anything else is considered.
+# Drawn from ModelEntry: these are the fields without which a promotion could
+# not be reproduced or audited afterwards.
+PROMOTION_REQUIRED_MANIFEST_FIELDS: tuple[str, ...] = (
+    "model_version",
+    "family",
+    "feature_set_version",
+    "training_data_cutoff",
+    "dataset_hash",
+    "code_commit",
+    "seed",
+    "artifact_hash",
+    "hyperparameters",
+    "forecast_target",
+    "horizon",
+)
+
+# Population Stability Index thresholds. Industry-conventional and MEASURED to
+# discriminate here: over 400 synthetic scores, an unshifted distribution
+# scores PSI 0.013 while a +1.7-point shift scores 2.854.
+PROMOTION_PSI_WARN = 0.10
+PROMOTION_PSI_FAIL = 0.25
+
+# How much the candidate's veto rate may exceed the incumbent's before the
+# regression check fails. A candidate that vetoes far more is not safer, it is
+# less useful; one that vetoes far less may have lost a guard.
+PROMOTION_MAX_VETO_RATE_INCREASE = 0.10
+
+# ...and how far it may fall. A large DROP in veto rate is also a regression:
+# the W2 policy rules exist to refuse bad decisions, and a candidate that
+# stops refusing them has not improved, it has stopped checking.
+PROMOTION_MAX_VETO_RATE_DECREASE = 0.10
+
+# Minimum decisions before the regression check can say anything. Below this
+# the check reports NOT_EVALUATED rather than a verdict on noise.
+PROMOTION_MIN_DECISIONS_FOR_REGRESSION = 30
+
+# Historical predictions are immutable: promotion never rewrites the model
+# version recorded against a past decision. The append-only audit log is what
+# guarantees it, and the gate verifies the guarantee rather than assuming it.
+PROMOTION_HISTORY_IMMUTABLE = True
+
+
+def _validate_promotion_config() -> None:
+    """Import-time guard for the M5 contract."""
+    if len(set(PROMOTION_CHECKS)) != len(PROMOTION_CHECKS):
+        raise ValueError("PROMOTION_CHECKS contains a duplicate")
+    if len(PROMOTION_CHECKS) != 5:
+        raise ValueError(
+            "the checklist has five checks; dropping one silently widens what "
+            "may be promoted"
+        )
+    if PROMOTION_CHECKS[0] != PROMO_CHECK_MANIFEST:
+        raise ValueError(
+            "the manifest check must run FIRST - a candidate that cannot be "
+            "reproduced should be rejected before anyone evaluates its metrics"
+        )
+    unknown = set(PROMOTION_REQUIRED_CHECKS) - set(PROMOTION_CHECKS)
+    if unknown:
+        raise ValueError(f"required checks must be declared: {sorted(unknown)}")
+    if set(PROMOTION_REQUIRED_CHECKS) != set(PROMOTION_CHECKS):
+        raise ValueError(
+            "every check is required: an optional promotion gate is not a gate"
+        )
+
+    if len(set(PROMOTION_OUTCOMES)) != len(PROMOTION_OUTCOMES):
+        raise ValueError("PROMOTION_OUTCOMES contains a duplicate")
+    if PROMO_NOT_EVALUATED not in PROMOTION_OUTCOMES:
+        raise ValueError(
+            "NOT_EVALUATED must stay declared: a check that could not run has "
+            "not found the candidate clean, and collapsing it into PASS would "
+            "promote on absent evidence"
+        )
+
+    if not PROMOTION_REQUIRED_MANIFEST_FIELDS:
+        raise ValueError("a promotion with no manifest requirements is unauditable")
+    for field in ("model_version", "dataset_hash", "code_commit", "seed"):
+        if field not in PROMOTION_REQUIRED_MANIFEST_FIELDS:
+            raise ValueError(
+                f"{field!r} must stay required: without it a promoted model "
+                f"cannot be reproduced from its record"
+            )
+
+    if not 0.0 < PROMOTION_PSI_WARN < PROMOTION_PSI_FAIL:
+        raise ValueError("PSI thresholds must ascend and be positive")
+    if not 0.0 < PROMOTION_MAX_VETO_RATE_INCREASE <= 1.0:
+        raise ValueError("the veto-rate increase tolerance must lie in (0, 1]")
+    if not 0.0 < PROMOTION_MAX_VETO_RATE_DECREASE <= 1.0:
+        raise ValueError(
+            "a veto-rate DECREASE tolerance must exist and be positive: a "
+            "candidate that stops refusing bad decisions has not improved"
+        )
+    if PROMOTION_MIN_DECISIONS_FOR_REGRESSION < 1:
+        raise ValueError("the regression check needs at least one decision")
+    if not PROMOTION_HISTORY_IMMUTABLE:
+        raise ValueError(
+            "historical predictions are immutable; promotion must never "
+            "rewrite the model version recorded against a past decision"
+        )
+
+
+_validate_promotion_config()

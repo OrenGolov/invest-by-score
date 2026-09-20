@@ -84,8 +84,15 @@ class NoKeyContractTests(unittest.TestCase):
     }
 
     def test_no_key_contract_is_byte_for_byte_the_legacy_stub(self):
-        self.assertEqual(fetch_news_snapshot("MSFT", "2024-01-02"), self.LEGACY_UNAVAILABLE)
-        self.assertNotIn("pipeline", fetch_news_snapshot("MSFT", "2024-01-02"))
+        # The environment must be CLEARED, as the sibling test below does.
+        # Without it this asserted the no-key contract while a real key was
+        # present, so it passed only by accident of the machine it ran on —
+        # and started failing the day NEWS_PROVIDER_API_KEY was configured.
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(
+                fetch_news_snapshot("MSFT", "2024-01-02"), self.LEGACY_UNAVAILABLE
+            )
+            self.assertNotIn("pipeline", fetch_news_snapshot("MSFT", "2024-01-02"))
 
     def test_provider_resolution_requires_key(self):
         with patch.dict(os.environ, {}, clear=True):
