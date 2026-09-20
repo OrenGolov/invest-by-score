@@ -1337,6 +1337,73 @@ EVENT_MEMORY_FIELD_SCALE = {
     "price_vs_ma_200": 0.15,
 }
 
+# PROVENANCE — was this memory OBSERVED, or INFERRED from price behaviour?
+#
+# MEASURED: no configured source supplies dated historical events. The news
+# adapter looks back NEWS_LOOKBACK_DAYS (7) and needs an API key; Alpha
+# Vantage supplies at most the NEXT earnings date, one forward date per
+# ticker. So a store that reaches back years can only be built by INFERENCE.
+#
+# A quarterly cadence filter dates earnings well — keeping the largest volume
+# spike in each 63-session window yields 19-20 picks per 19 windows across 12
+# tickers, matching the ~20 real earnings events in 5 years, at median gaps of
+# 61-64 against a theoretical 63.
+#
+# THE DECIDING FACT: `fetch_fundamental_snapshot` returns earnings_date=None,
+# and there is no historical earnings calendar anywhere in the system. An
+# inferred date has nothing to be scored against. It can be FLAGGED; it cannot
+# be VERIFIED. This field therefore records WHAT PRODUCED the memory, not a
+# confidence — a confidence would imply a measurement that does not exist.
+MEMORY_PROVENANCE_OBSERVED = "observed"    # a real, sourced event
+MEMORY_PROVENANCE_INFERRED = "inferred"    # dated from price behaviour
+
+EVENT_MEMORY_PROVENANCES: tuple[str, ...] = (
+    MEMORY_PROVENANCE_OBSERVED,
+    MEMORY_PROVENANCE_INFERRED,
+)
+
+# An unlabelled memory is indistinguishable from an observed one once written,
+# so provenance is REQUIRED at the door rather than defaulted. The default on
+# the dataclass exists only so older readers do not crash; `memory_problems`
+# refuses a memory that does not state it.
+EVENT_MEMORY_REQUIRE_PROVENANCE = True
+
+# The methods an inferred memory may name. Declared as data so a reader can
+# tell exactly what produced a date, and so a new method cannot appear without
+# being written down here first.
+EVENT_MEMORY_INFERENCE_METHODS: dict[str, str] = {
+    "quarterly_volume_cadence": (
+        "the largest 20-day-relative volume spike in each 63-session window, "
+        "excluding quarterly triple-witching dates and requiring an opening "
+        "gap, which together match the quarterly earnings cadence. "
+        "MEASURED against PUBLISHED earnings dates for AAPL/MSFT/NVDA/JPM: "
+        "PRECISION 0.65 (23 picks, 15 within +/-2 sessions of a real "
+        "earnings date). A plain volume-cadence filter scores only 0.35 "
+        "because 31.7% of its picks land on quarterly TRIPLE-WITCHING dates "
+        "-- options expiry, not earnings -- which share the same quarterly "
+        "high-volume signature. Tightening further trades away nearly all "
+        "the volume (3 picks at 0.67), so ~0.65 is the ceiling this signal "
+        "supports. ROUGHLY ONE IN THREE inferred events is therefore NOT the "
+        "event it is labelled as; the price move is real, the attribution is "
+        "not. This is why such memories are never laundered into observed "
+        "ones and why F5 degrades a forecast that leans on them."
+    ),
+}
+
+# The MEASURED precision of each inference method, against published ground
+# truth. Declared as data because a reader of an inferred memory needs to know
+# how often the label is wrong, and because a method whose precision was never
+# measured must not be usable at all.
+EVENT_MEMORY_INFERENCE_PRECISION: dict[str, float] = {
+    "quarterly_volume_cadence": 0.65,
+}
+
+# An inference method below this precision is not worth recording: its
+# memories would carry more mislabelling than signal. 0.65 clears it; the
+# unfiltered 0.35 variant does not, which is why the witching and gap filters
+# are part of the method rather than an option on it.
+EVENT_MEMORY_MIN_INFERENCE_PRECISION = 0.50
+
 # Analog retrieval. Similarity is computed over the chart-state fields above,
 # and a match must clear this bar before it is offered as a comparable.
 EVENT_MEMORY_MIN_SIMILARITY = 0.7
@@ -1372,6 +1439,49 @@ def _validate_event_memory_config() -> None:
             )
     if not EVENT_MEMORY_SIMILARITY_FIELDS:
         raise ValueError("similarity needs at least one field to compare")
+    if len(set(EVENT_MEMORY_PROVENANCES)) != len(EVENT_MEMORY_PROVENANCES):
+        raise ValueError("EVENT_MEMORY_PROVENANCES contains a duplicate")
+    if MEMORY_PROVENANCE_OBSERVED not in EVENT_MEMORY_PROVENANCES:
+        raise ValueError("a memory must be able to be observed")
+    if MEMORY_PROVENANCE_INFERRED not in EVENT_MEMORY_PROVENANCES:
+        raise ValueError(
+            "the inferred provenance must stay declared — removing it would "
+            "not delete the inferred memories already written, it would only "
+            "stop them being recognisable as inferred"
+        )
+    if not EVENT_MEMORY_REQUIRE_PROVENANCE:
+        raise ValueError(
+            "provenance must be required at the door: an unlabelled memory is "
+            "indistinguishable from an observed one once written"
+        )
+    if not EVENT_MEMORY_INFERENCE_METHODS:
+        raise ValueError(
+            "an inferred memory must be able to name the method that produced "
+            "it, or a reader cannot tell what they are looking at"
+        )
+    for name, rationale in EVENT_MEMORY_INFERENCE_METHODS.items():
+        if "MEASURED" not in rationale:
+            raise ValueError(
+                f"inference method {name!r} does not carry its measurement — "
+                f"an inference method without evidence is a guess with a name"
+            )
+        if name not in EVENT_MEMORY_INFERENCE_PRECISION:
+            raise ValueError(
+                f"inference method {name!r} has no MEASURED precision — a "
+                f"method whose error rate was never measured must not be "
+                f"usable, because nobody can weigh what it produces"
+            )
+    for name, precision in EVENT_MEMORY_INFERENCE_PRECISION.items():
+        if name not in EVENT_MEMORY_INFERENCE_METHODS:
+            raise ValueError(f"precision declared for unknown method {name!r}")
+        if not 0.0 < precision <= 1.0:
+            raise ValueError(f"precision for {name!r} must lie in (0, 1]")
+        if precision < EVENT_MEMORY_MIN_INFERENCE_PRECISION:
+            raise ValueError(
+                f"inference method {name!r} scores {precision}, below the "
+                f"{EVENT_MEMORY_MIN_INFERENCE_PRECISION} floor — its memories "
+                f"would carry more mislabelling than signal"
+            )
     extra = set(EVENT_MEMORY_SIMILARITY_FIELDS) - set(EVENT_MEMORY_CHART_FIELDS)
     if extra:
         raise ValueError(
@@ -2737,6 +2847,15 @@ EVENT_FORECAST_EFFECTIVE_PER_TICKER = 5
 # implied, because a later edit to either number alone would break it silently.
 EVENT_FORECAST_MIN_DISTINCT_FOR_POINT = 8
 
+# An analog set built mostly from INFERRED events is weaker evidence than one
+# built from observed ones: the price move is real, but which event produced
+# it -- or whether one did at all -- was never sourced. MEASURED: an inferred
+# date cannot be validated, because fetch_fundamental_snapshot returns
+# earnings_date=None and no historical earnings calendar exists anywhere in
+# the system. Below this share of OBSERVED analogs the forecast is DEGRADED
+# and says so, the same treatment a confounded set receives.
+EVENT_FORECAST_MIN_OBSERVED_SHARE = 0.50
+
 # Reported alongside every forecast. Retrieval yield is the binding constraint
 # on this whole sprint, so it is never silently absorbed.
 # MEASURED after the E6 fix, 1,608 real chart states, bar 0.70, type matched:
@@ -2819,6 +2938,8 @@ def _validate_event_forecast_config() -> None:
         )
     if not 0.0 <= EVENT_FORECAST_MIN_ASSOCIATED_SHARE <= 1.0:
         raise ValueError("the associated share must lie in [0, 1]")
+    if not 0.0 <= EVENT_FORECAST_MIN_OBSERVED_SHARE <= 1.0:
+        raise ValueError("the observed share must lie in [0, 1]")
     if not EVENT_FORECAST_HORIZONS:
         raise ValueError(
             "no horizon is both recorded by a memory and declared by the "

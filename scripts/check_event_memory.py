@@ -82,7 +82,8 @@ def _snapshot(**overrides) -> dict:
 def _memory(event_id: str = "e1", **overrides) -> EventMemory:
     payload = dict(
         event_id=event_id, ticker="NVDA", published_time="2026-01-05 00:00:00",
-        event_type="earnings", direction="positive", chart_state=_snapshot(),
+        event_type="earnings", direction="positive",
+        provenance="observed", chart_state=_snapshot(),
         response={"20d": {"abnormal_return": 0.03}},
         attribution={"20d": "event_associated"},
     )

@@ -2444,6 +2444,125 @@ AMD/INTC refused at `matches` (no analogs). Each names its own stage.
   early return that withholds a refused interval, and running stages past the
   first failure. Suite 1676 pass, 28 gates green.
 
+### Event-memory store — the producer F5 was missing ✓ DONE
+
+F5 retrieves from `data/event_memory.jsonl`. Nothing wrote it, so on a fresh
+clone F5 refused at its `matches` stage forever. `scripts/build_event_memory.py`
+is the producer: `news/price → event → E4 study → E5 attribution → E6 remember`.
+
+**No configured source supplies dated historical events.** MEASURED:
+
+| source | gives | reaches back |
+|---|---|---|
+| NewsAPI (`core/news_adapter`) | headlines, typed by the N1 taxonomy | **7 days** (`NEWS_LOOKBACK_DAYS`), and **no API key is configured** |
+| Alpha Vantage overview | the **NEXT** earnings date only | no history |
+| Yahoo price history | bars | 15y, but carries no event identity |
+
+`build_news_snapshot("NVDA", ...)` returns UNAVAILABLE. So a store reaching
+back years can only be built by INFERENCE, and that fact is what the design
+had to encode rather than hide.
+
+**Provenance, not confidence.** `EventMemory` gains `provenance`
+(`observed` | `inferred`) and `inference_method`. The field records WHAT
+PRODUCED the memory, deliberately not how confident we are — a confidence
+would imply a measurement that does not exist. It is REQUIRED at the door
+(`memory_problems` refuses a memory without it) and the dataclass default is
+`""`, never `"observed"`: defaulting to observed would silently launder every
+unlabelled memory into sourced evidence, and the requirement check could never
+fire.
+
+**Two modes, and the difference is the point.**
+
+- `--mode forward` records what the news provider actually reported, as
+  `observed`. Today it writes **zero** memories and says why, pointing at the
+  missing `NEWSAPI_KEY`. It is built to accrue going forward, not to fill a
+  store retroactively.
+- `--mode backfill` dates candidate earnings from price behaviour, as
+  `inferred`.
+
+**The backfill's precision was measured against published earnings dates**
+(AAPL/MSFT/NVDA/JPM), not asserted:
+
+```
+plain volume cadence                        precision 0.35
+  + exclude quarterly triple-witching       precision 0.51
+  + require a >2% opening gap               precision 0.65   <- shipped
+  + tighter volume floor                    precision 0.67, but only 3 picks
+```
+
+A plain cadence filter scores 0.35 because **31.7% of its picks land on
+quarterly TRIPLE-WITCHING dates** — options expiry, not earnings, sharing the
+same quarterly high-volume signature. Excluding those and requiring an opening
+gap closes most of the gap. In the shipped store, triple-witching
+contamination is **zero**.
+
+So **roughly one inferred "earnings" event in three is not an earnings
+event**. The price move is real and the E4 study measures it on real bars;
+what was never sourced is which event produced it, or whether a discrete event
+did at all. `EVENT_MEMORY_INFERENCE_PRECISION` records 0.65 as data, and a
+method with no measured precision is refused at import — nobody can weigh what
+was never measured.
+
+**Why it can never be laundered.** MEASURED: `fetch_fundamental_snapshot`
+returns `earnings_date=None` and no historical earnings calendar exists
+anywhere in the system, so an inferred date has nothing to be scored against.
+It can be FLAGGED, never VERIFIED. F5 therefore reports `observed_share`
+beside `same_ticker_share` and degrades a forecast that leans on inferred
+analogs.
+
+**One event type only.** The cadence supports `earnings`. Deriving ten
+taxonomy buckets from one volume signal would be fabrication wearing a
+classifier's clothes.
+
+**Store depth was chosen by measurement, not by default.** A first build at
+5y produced 801 memories, and MEASURED against it the median probe found
+**1 analog** — only 3% reached F4's INTERVAL floor of 8, so F5 still refused
+everywhere. At the 0.70 bar only 0.09% of real pairs qualify:
+
+```
+bar    pair rate    store needed for 8 analogs
+0.60      0.0089                          ~900
+0.65      0.0040                        ~2,000
+0.70      0.0009                        ~8,900   <- configured
+```
+
+Rebuilding at 15y (the deepest daily history the provider serves; `max`
+returns monthly bars and is useless here) gives **1,954 memories across 73
+tickers, 2012-2026**, and that is the shipped depth.
+
+**F5 now produces real forecasts.** MEASURED over 60 probes against the real
+store, 0 contract problems:
+
+```
+status   OK 17 | REFUSED 43        median analogs 3 (was 1), p75 11, max 41
+claims   INTERVAL 16 | POINT 1     share reaching the INTERVAL floor: 30% (was 3%)
+```
+
+```
+ ticker      claim    N  tkrs   same   value         interval
+   GLW       POINT   41    21   0.07   0.463      [0.32,0.61]
+ GOOGL    INTERVAL   37    17   0.11       -      [0.38,0.69]
+    KO    INTERVAL   23    15   0.09       -      [0.37,0.74]
+  AVGO    INTERVAL   20    17   0.05       -      [0.30,0.70]
+```
+
+Every OK forecast rests on 8-21 DISTINCT tickers with a same-ticker share of
+0.05-0.26, so the independence cap is doing its job rather than being bypassed
+by a bigger store. The 43 refusals fail at `forecast` — retrieval succeeded
+and the analog count was simply too thin — which is the honest answer, and a
+different one from the empty-store refusal F5 used to give.
+
+Lowering the similarity bar would raise the OK rate, and was already measured
+(in the E6 fix) to buy that volume only by admitting weak matches. The bar
+stays at 0.70 and the store grows instead.
+
+- Acceptance: 30 tests in `tests/test_event_store.py`, 4 new F5 provenance
+  tests; gate `scripts/check_event_store.py`, verified to FAIL under all
+  thirteen reinjected invariants — including defaulting provenance to
+  `observed`, dropping the triple-witching exclusion, removing the gap
+  filter, letting the backfill write OBSERVED, and shrinking the trailing
+  buffer below the longest recorded horizon.
+
 ### F6–F8 — pending
 
 F6 forecast decomposition, F7 forecast confidence, F8 the versioned

@@ -11,6 +11,18 @@ data/*_fundamentals_*.json
 data/decision_audit.jsonl
 data/paper_orders.jsonl
 
+# The event-memory store. Its INFERRED memories are derived: the backfill
+# rebuilds them deterministically from data/raw/ via
+# `python scripts/build_event_memory.py --mode backfill --years 15`, so
+# shipping ~3k generated rows would be committing a cache.
+#
+# NOTE for whoever turns the forward builder on: OBSERVED memories are NOT
+# rebuildable, because the news window that produced them closes after
+# NEWS_LOOKBACK_DAYS (7) and the articles are gone. Once real observed
+# memories start accruing, this store stops being a cache and needs either a
+# tracked observed-only file or a backup that is not git.
+data/event_memory.jsonl
+
 # NOT ignored (tracked on purpose): data/raw/ is the W6 append-only
 # provenance ledger and data/feature_registry.jsonl is the M1 registry.
 # "delete derived cache -> rebuild from raw -> reproduce the same result"

@@ -56,12 +56,17 @@ from typing import Any, Iterable
 
 from core.config import (
     EVENT_MEMORY_CHART_FIELDS,
-    EVENT_MEMORY_SIMILARITY_FIELDS,
     EVENT_MEMORY_FIELD_SCALE,
+    EVENT_MEMORY_INFERENCE_METHODS,
     EVENT_MEMORY_MIN_ANALOGS,
     EVENT_MEMORY_MIN_SIMILARITY,
+    EVENT_MEMORY_PROVENANCES,
+    EVENT_MEMORY_REQUIRE_PROVENANCE,
     EVENT_MEMORY_RESPONSE_HORIZONS,
+    EVENT_MEMORY_SIMILARITY_FIELDS,
     EVENT_MEMORY_VERSION,
+    MEMORY_PROVENANCE_INFERRED,
+    MEMORY_PROVENANCE_OBSERVED,
 )
 
 EVENT_MEMORY_STORE_PATH = (
@@ -95,6 +100,14 @@ class EventMemory:
     # confidence.
     attribution: dict[str, str] = field(default_factory=dict)
     entity_resolution_method: str = ""
+    # Was this OBSERVED from a real source, or INFERRED from price behaviour?
+    # Defaulted to "" rather than "observed" deliberately: a default of
+    # "observed" would silently launder every unlabelled memory into evidence.
+    # `memory_problems` refuses a memory that does not state it.
+    provenance: str = ""
+    # For an inferred memory, the method that dated it — a key of
+    # EVENT_MEMORY_INFERENCE_METHODS, so the reasoning is always retrievable.
+    inference_method: str = ""
     memory_version: str = EVENT_MEMORY_VERSION
 
     def to_dict(self) -> dict[str, Any]:
@@ -106,6 +119,14 @@ class EventMemory:
 
     def is_event_associated(self, horizon: str = "20d") -> bool:
         return self.attribution.get(horizon) == "event_associated"
+
+    def is_inferred(self) -> bool:
+        """True when this memory's event was dated by inference, not observed.
+
+        An inferred memory is real evidence about a real price move; what is
+        uncertain is WHICH event produced it, and whether one did at all.
+        """
+        return self.provenance == MEMORY_PROVENANCE_INFERRED
 
 
 def memory_problems(memory: EventMemory) -> list[str]:
@@ -138,6 +159,38 @@ def memory_problems(memory: EventMemory) -> list[str]:
             problems.append(
                 f"attribution recorded for {horizon!r} but no response was measured"
             )
+
+    # Provenance is required at the door. Once written, an unlabelled memory
+    # is indistinguishable from an observed one, and F5 would count an
+    # inferred base rate as though it had been sourced.
+    provenance = str(memory.provenance or "")
+    if EVENT_MEMORY_REQUIRE_PROVENANCE and not provenance:
+        problems.append(
+            "provenance is required — an unlabelled memory cannot be told "
+            "apart from an observed one once it is in the store"
+        )
+    elif provenance and provenance not in EVENT_MEMORY_PROVENANCES:
+        problems.append(
+            f"unknown provenance {provenance!r} "
+            f"(known: {list(EVENT_MEMORY_PROVENANCES)})"
+        )
+    if provenance == MEMORY_PROVENANCE_INFERRED:
+        method = str(memory.inference_method or "")
+        if not method:
+            problems.append(
+                "an inferred memory must name the method that dated it, or a "
+                "reader cannot tell what produced it"
+            )
+        elif method not in EVENT_MEMORY_INFERENCE_METHODS:
+            problems.append(
+                f"unknown inference method {method!r} "
+                f"(known: {sorted(EVENT_MEMORY_INFERENCE_METHODS)})"
+            )
+    elif provenance == MEMORY_PROVENANCE_OBSERVED and memory.inference_method:
+        problems.append(
+            "an OBSERVED memory names an inference method — it was either "
+            "observed or inferred, and claiming both hides which"
+        )
     return problems
 
 
@@ -146,12 +199,18 @@ def build_memory(
     study,
     attributions: dict | None = None,
     snapshot: dict | None = None,
+    provenance: str = MEMORY_PROVENANCE_OBSERVED,
+    inference_method: str = "",
 ) -> EventMemory:
     """Assemble a memory from an E1 event, an E4 study and E5 attributions.
 
     Refuses an unmeasured study: recording an event whose response was never
     measured would put a row in memory that teaches nothing while counting
     toward every analog total.
+
+    `provenance` defaults to OBSERVED because this function's inputs are a
+    real event and a real study — the caller that INFERRED its event must say
+    so explicitly, which is the only way round the guard in `memory_problems`.
     """
     if not getattr(study, "is_measured", lambda: False)():
         raise EventMemoryError(
@@ -194,6 +253,8 @@ def build_memory(
         actor=str(getattr(event, "actor", "") or ""),
         actor_type=str(getattr(event, "actor_type", "") or ""),
         chart_state=chart_state,
+        provenance=provenance,
+        inference_method=inference_method,
         context={
             "benchmark": getattr(study, "benchmark", None),
             "sector": getattr(study, "sector", None),

@@ -70,6 +70,7 @@ from core.config import (
     EVENT_FORECAST_HORIZONS,
     EVENT_FORECAST_MAX_SAME_TICKER_SHARE,
     EVENT_FORECAST_MIN_ASSOCIATED_SHARE,
+    EVENT_FORECAST_MIN_OBSERVED_SHARE,
     EVENT_FORECAST_OK,
     EVENT_FORECAST_REFUSED,
     EVENT_FORECAST_RETRIEVAL,
@@ -192,6 +193,23 @@ def associated_share(analogs, horizon: str) -> float:
         if getattr(entry["memory"], "is_event_associated", lambda _h: False)(horizon)
     )
     return round(associated / len(analogs), 6)
+
+
+def observed_share(analogs) -> float:
+    """Share of the analog set whose events were OBSERVED, not inferred.
+
+    An inferred analog carries a real price move; what was never sourced is
+    WHICH event produced it, or whether one did at all. A base rate built
+    mostly from inferred events is therefore weaker evidence, and MEASURED,
+    an inferred date cannot be validated against anything.
+    """
+    if not analogs:
+        return 0.0
+    observed = sum(
+        1 for entry in analogs
+        if not getattr(entry["memory"], "is_inferred", lambda: False)()
+    )
+    return round(observed / len(analogs), 6)
 
 
 def regime_agreement(analogs, regime: str | None) -> float | None:
@@ -335,6 +353,7 @@ def build_event_forecast(
     successes, trials, _values = _outcomes(analogs, horizon)
     same_share = same_ticker_share(analogs, representation["entity"])
     assoc_share = associated_share(analogs, horizon)
+    obs_share = observed_share(analogs)
 
     match_caveats: list[str] = []
     if analogs and same_share > EVENT_FORECAST_MAX_SAME_TICKER_SHARE:
@@ -348,6 +367,12 @@ def build_event_forecast(
             f"event-associated; the rest are confounded, and a base rate built "
             f"from them describes the market rather than the event"
         )
+    if analogs and obs_share < EVENT_FORECAST_MIN_OBSERVED_SHARE:
+        match_caveats.append(
+            f"only {obs_share:.0%} of the analogs were OBSERVED events; the "
+            f"rest were dated by inference from price behaviour, so which "
+            f"event produced the move — or whether one did — was never sourced"
+        )
 
     match_stage = _stage(
         EVENT_FORECAST_STAGE_MATCHES,
@@ -359,6 +384,7 @@ def build_event_forecast(
         min_similarity=min_similarity,
         same_ticker_share=same_share,
         associated_share=assoc_share,
+        observed_share=obs_share,
         pool_size=len(memories) if memories is not None else 0,
     )
 

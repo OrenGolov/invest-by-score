@@ -40,6 +40,7 @@ from core.forecast_conditional import (
 from core.forecast_event import (
     EventForecastError,
     associated_share,
+    observed_share,
     build_event_forecast,
     event_forecast_problems,
     regime_agreement,
@@ -67,11 +68,14 @@ def _snapshot(**overrides):
     return payload
 
 
-def _memory(index, ticker="AMD", associated=True, price=300.0, regime="bullish"):
+def _memory(index, ticker="AMD", associated=True, price=300.0, regime="bullish",
+            inferred=False):
     return EventMemory(
         event_id=f"m{index}", ticker=ticker,
         published_time="2025-06-01 00:00:00", event_type="earnings",
         direction="positive",
+        provenance=("inferred" if inferred else "observed"),
+        inference_method=("quarterly_volume_cadence" if inferred else ""),
         chart_state=_snapshot(close=price, atr_14=price / 40, market_regime=regime,
                               rsi=55.0 + (index % 3) * 0.3),
         response={"20d": {"abnormal_return": 0.03 if index % 3 else -0.02,
@@ -419,6 +423,46 @@ class CompositionTests(unittest.TestCase):
     def test_the_disclaimer_survives(self):
         forecast = _run([_memory(i, ticker=f"T{i}") for i in range(MANY)])
         self.assertIn("not a", forecast["disclaimer"])
+
+
+class ProvenanceTests(unittest.TestCase):
+    """An analog set built from INFERRED events is weaker evidence.
+
+    MEASURED: roughly one inferred "earnings" event in three is not an
+    earnings event, and an inferred date cannot be validated against anything
+    because no historical earnings calendar exists in the system.
+    """
+
+    def test_observed_share_is_measured(self):
+        analogs = [
+            {"memory": _memory(i, ticker=f"T{i}", inferred=(i < 6))}
+            for i in range(10)
+        ]
+        self.assertAlmostEqual(observed_share(analogs), 0.4, places=4)
+        self.assertEqual(observed_share([]), 0.0)
+
+    def test_a_mostly_inferred_analog_set_is_flagged(self):
+        forecast = _run(
+            [_memory(i, ticker=f"T{i}", inferred=(i < 8)) for i in range(10)]
+        )
+        stage = forecast["stages"][EVENT_FORECAST_STAGE_MATCHES]
+        self.assertEqual(stage["status"], EVENT_STAGE_DEGRADED)
+        self.assertIn("inference", stage["reason"])
+
+    def test_an_all_observed_set_is_not_flagged_for_provenance(self):
+        forecast = _run([_memory(i, ticker=f"T{i}") for i in range(10)])
+        stage = forecast["stages"][EVENT_FORECAST_STAGE_MATCHES]
+        self.assertEqual(stage["observed_share"], 1.0)
+        self.assertNotIn("inference", stage.get("reason", ""))
+
+    def test_the_observed_share_travels_with_the_forecast(self):
+        forecast = _run([_memory(i, ticker=f"T{i}", inferred=True) for i in range(10)])
+        self.assertIn(
+            "observed_share", forecast["stages"][EVENT_FORECAST_STAGE_MATCHES]
+        )
+        self.assertEqual(
+            forecast["stages"][EVENT_FORECAST_STAGE_MATCHES]["observed_share"], 0.0
+        )
 
 
 if __name__ == "__main__":
