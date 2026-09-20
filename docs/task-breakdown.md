@@ -2370,10 +2370,84 @@ decide what the retrieved set can actually support.
 - Acceptance: 9 new tests (52 in `tests/test_event_memory.py`). Suite 1630
   pass, 27 gates green.
 
-### F5–F8 — pending
+### F5. Event-conditioned forecast ✓ DONE
 
-F5 event-conditioned forecast, F6 forecast decomposition, F7 forecast
-confidence, F8 the versioned `ForecastSnapshot` API contract.
+`new event → representation → historical matches → chart → regime → forecast`.
+`core/forecast_event.py` + the F5 block in `core/config.py`.
+
+**F5 is a PIPELINE WITH PER-STAGE STATUS, not a function returning a number.**
+Every stage can fail independently and the object names which one did. "No
+forecast" tells a reader nothing; "retrieval found 1 analog and needs 5" tells
+them what is missing and what would fix it. The FIRST failure stops the
+pipeline — later stages read BLOCKED — so the reported obstacle is always the
+most upstream one rather than a downstream symptom of it.
+
+**Retrieval is the binding constraint, reported and never absorbed.** MEASURED
+on a fresh clone: `data/event_memory.jsonl` does not exist and holds zero
+memories, so stages 3–6 are unreachable. That is the honest terminal state of
+a system that has not yet observed anything. Even on a populated store of
+1,608 real chart states, and after the E6 similarity fix, **39.3% of events
+retrieve ZERO analogs** and only 24.7% reach E6's floor of five.
+
+**Composition, not a third retrieval (W5).** Two analog systems already exist
+— E6 (`find_analogs`: chart numbers **and event type**, floor 5) and C7
+(`find_reaction_analogs`: C4 structural phase, floor 3). F5 builds neither; it
+calls E6, the only one that filters by event type, which is what
+"event-conditioned" means. The gate verifies this by OBSERVING the call, not
+by trusting the declaration.
+
+**The claim strength is F4's, not a second answer.** An analog set *is* a
+conditional slice: N observations of what followed a comparable setup. F5
+calls `select_claim` rather than growing a second sample-size policy that
+would drift from the first. The gate asserts the two agree at every N.
+
+**Regime is reported, not filtered on.** `market_regime` is already an E6
+similarity field, so the roadmap's regime stage sits partly upstream of the
+match. Filtering again would weight the same evidence twice and shrink an
+already thin set for nothing, so F5 reports the retrieved set's regime
+AGREEMENT instead. An ungoverned label still fails the stage — a sixth regime
+would silently bypass the W2 stress veto.
+
+**Pseudo-replication caps the claim — found during implementation.** A first
+version published a POINT estimate from 45 analogs that were all the SAME
+ticker, flagging it DEGRADED two levels down where a dashboard would never
+show it. 45 analogs from one stock are 45 adjacent sessions of one situation,
+not 45 observations — the F4 stress cell in another costume. The fix computes
+an EFFECTIVE sample (`EVENT_FORECAST_EFFECTIVE_PER_TICKER = 5` per distinct
+ticker) and caps the claim by it:
+
+```
+45 analogs, ALL one ticker    -> effective  5 -> INSUFFICIENT, no value
+45 analogs, 12 distinct names -> effective 45 -> POINT, value 0.667
+```
+
+A caveat that does not reach the claim is not a caveat. The discount is
+deliberately crude — distinct tickers, not a correlation model — because a
+precise-looking adjustment would imply a precision retrieval cannot support.
+
+**One enforcement point, not two.** The shape rule (a `value` key exists IFF
+the claim is POINT; a refusal carries no interval) was originally guarded both
+at the call site and in `_assemble`. The gate could not break it — the
+upstream guard masked the downstream one, making the real guard untestable.
+The interval is now passed through unconditionally and `_assemble` alone
+decides, so there is exactly one place to attack and the attack lands.
+
+**Verified on REAL data**: 1,968 memories built from genuine 5y price history
+across 12 tickers, 18 probes, **0 contract problems**. Three reached OK with
+INTERVAL claims; MSFT/NVDA refused at `forecast` (retrieval worked, 2 analogs);
+AMD/INTC refused at `matches` (no analogs). Each names its own stage.
+
+- Acceptance: 46 tests in `tests/test_forecast_event.py`; gate
+  `scripts/check_forecast_event.py`, verified to FAIL under all eleven
+  reinjected invariants — including removing the independence cap, setting it
+  to 39 (just under the point floor), forking E6 retrieval, removing the
+  early return that withholds a refused interval, and running stages past the
+  first failure. Suite 1676 pass, 28 gates green.
+
+### F6–F8 — pending
+
+F6 forecast decomposition, F7 forecast confidence, F8 the versioned
+`ForecastSnapshot` API contract.
 
 ---
 

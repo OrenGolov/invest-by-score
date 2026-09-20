@@ -2627,3 +2627,215 @@ def _validate_conditional_forecast_config() -> None:
 
 
 _validate_conditional_forecast_config()
+
+
+# ---------------------------------------------------------------------------
+# Sprint F5 - Event-conditioned forecast
+# ---------------------------------------------------------------------------
+# The pipeline the roadmap names:
+#
+#   new event -> event representation -> historical event matches
+#             -> current chart -> market regime -> forecast
+#
+# F5 is a PIPELINE WITH PER-STAGE STATUS, not a function that returns a number.
+# Every stage can fail independently, and when one does the forecast must name
+# WHICH stage failed. "no forecast" is not a useful answer; "retrieval found 1
+# analog and needs 5" is.
+#
+# WHY THE STAGES ARE THE CONTRACT. MEASURED on a fresh clone: the event memory
+# store (data/event_memory.jsonl) does not exist and holds zero memories, so
+# stages 3-6 are unreachable. That is not a defect to paper over inside F5 --
+# it is the honest terminal state of a system that has not yet observed
+# anything. F5 says so, at the stage where it became true.
+#
+# COMPOSITION, NOT A THIRD RETRIEVAL (W5). Two analog-retrieval systems already
+# exist:
+#   E6 core.event_memory.find_analogs  - chart numbers + EVENT TYPE, floor 5
+#   C7 core.reaction_memory.find_reaction_analogs - C4 structural PHASE, floor 3
+# F5 builds neither. It calls E6 (the only one that filters by event type,
+# which is what "event-conditioned" means) and declares that in
+# CONDITIONAL_EVENT_RETRIEVAL. A third similarity metric would be the
+# split-brain the master context forbids.
+#
+# THE CLAIM STRENGTH IS F4'S, NOT A SECOND ANSWER. An analog set is exactly a
+# conditional slice: N observations of what followed a comparable setup. F4
+# already decides what a slice of size N can support, measured. F5 calls
+# core.forecast_conditional.select_claim rather than inventing a second
+# sample-size policy that would inevitably drift from the first.
+#
+# REGIME IS ALREADY INSIDE RETRIEVAL. `market_regime` is one of
+# EVENT_MEMORY_SIMILARITY_FIELDS, so the roadmap's "market regime" stage is
+# partly upstream of the match. F5 therefore reports regime AGREEMENT of the
+# retrieved set rather than re-filtering on it, because filtering again would
+# weight the same evidence twice and shrink an already thin set for nothing.
+EVENT_FORECAST_VERSION = "event-forecast-v1"
+EVENT_FORECAST_CONTRACT_VERSION = "event-forecast-contract-v1"
+
+# The declared stage order. This IS the pipeline: stages run in this sequence
+# and the first failure stops it, so a reader always learns the most upstream
+# obstacle rather than a downstream symptom of it.
+EVENT_FORECAST_STAGE_EVENT = "event"                  # a valid, PIT-eligible event
+EVENT_FORECAST_STAGE_REPRESENTATION = "representation"  # event -> comparable form
+EVENT_FORECAST_STAGE_MATCHES = "matches"              # historical analogs
+EVENT_FORECAST_STAGE_CHART = "chart"                  # the current chart state
+EVENT_FORECAST_STAGE_REGIME = "regime"                # market regime at as_of
+EVENT_FORECAST_STAGE_FORECAST = "forecast"            # the conditioned claim
+
+EVENT_FORECAST_STAGES: tuple[str, ...] = (
+    EVENT_FORECAST_STAGE_EVENT,
+    EVENT_FORECAST_STAGE_REPRESENTATION,
+    EVENT_FORECAST_STAGE_MATCHES,
+    EVENT_FORECAST_STAGE_CHART,
+    EVENT_FORECAST_STAGE_REGIME,
+    EVENT_FORECAST_STAGE_FORECAST,
+)
+
+# Per-stage outcomes.
+EVENT_STAGE_OK = "OK"
+EVENT_STAGE_BLOCKED = "BLOCKED"        # an upstream stage failed; not attempted
+EVENT_STAGE_FAILED = "FAILED"          # attempted, could not complete
+EVENT_STAGE_DEGRADED = "DEGRADED"      # completed, but with a caveat that travels
+
+EVENT_STAGE_STATUSES: tuple[str, ...] = (
+    EVENT_STAGE_OK,
+    EVENT_STAGE_DEGRADED,
+    EVENT_STAGE_FAILED,
+    EVENT_STAGE_BLOCKED,
+)
+
+# Overall pipeline verdicts.
+EVENT_FORECAST_OK = "OK"
+EVENT_FORECAST_REFUSED = "REFUSED"
+
+# Which retrieval F5 composes. Declared as DATA so the choice is auditable and
+# so a future reader cannot add a second one believing none was chosen.
+EVENT_FORECAST_RETRIEVAL = "event_memory.find_analogs"
+
+# Analogs drawn from ONE ticker are not independent observations. MEASURED
+# before the E6 similarity fix: 84.5% of every pair clearing the 0.70 bar was
+# the same ticker -- adjacent sessions of one stock, which is one situation
+# counted many times. Above this share the forecast is DEGRADED and says so,
+# because a base rate from a single name is a fact about that name.
+EVENT_FORECAST_MAX_SAME_TICKER_SHARE = 0.60
+
+# How many INDEPENDENT observations one ticker may contribute. Analogs from a
+# single name are adjacent sessions of one situation, resampled; counting them
+# as independent is the pseudo-replication that made the F4 stress cell read
+# P(up)=1.00 from two observations. MEASURED before the E6 similarity fix,
+# 84.5% of every pair clearing the retrieval bar was the same ticker.
+#
+# The value is deliberately crude -- distinct tickers, not a correlation model
+# -- because a precise-looking adjustment would imply a precision retrieval
+# cannot support. It is a floor on honesty, not an estimate. At 5, an
+# all-one-ticker set can never reach the POINT tier (floor 40) however many
+# rows it contains.
+EVENT_FORECAST_EFFECTIVE_PER_TICKER = 5
+
+# The fewest distinct tickers a POINT claim must rest on. Derived, not chosen:
+# with the per-ticker cap above, reaching the point floor requires at least
+# this many names. Declared so the relationship is asserted rather than
+# implied, because a later edit to either number alone would break it silently.
+EVENT_FORECAST_MIN_DISTINCT_FOR_POINT = 8
+
+# Reported alongside every forecast. Retrieval yield is the binding constraint
+# on this whole sprint, so it is never silently absorbed.
+# MEASURED after the E6 fix, 1,608 real chart states, bar 0.70, type matched:
+#   share reaching 5 analogs 0.247 | reaching 3 0.373 | ZERO analogs 0.393
+EVENT_FORECAST_REPORT_YIELD = True
+
+# Regime agreement of the retrieved set, reported not enforced. See the header:
+# market_regime is already a similarity field, so re-filtering would weight it
+# twice and shrink a thin set for no new evidence.
+EVENT_FORECAST_REPORT_REGIME_AGREEMENT = True
+
+# The horizons a conditioned forecast is offered at. Constrained to the
+# intersection of what a memory RECORDS (E6) and what the forecast layer
+# declares (F2), because a horizon outside either cannot be both retrieved and
+# expressed.
+EVENT_FORECAST_HORIZONS: tuple[str, ...] = tuple(
+    horizon for horizon in EVENT_MEMORY_RESPONSE_HORIZONS
+    if horizon in FORECAST_HORIZONS
+)
+
+# An attribution-aware floor. E5 already distinguishes an event-ASSOCIATED
+# response from a confounded one; a base rate built mostly from confounded
+# analogs describes the market, not the event. Reported as DEGRADED below this.
+EVENT_FORECAST_MIN_ASSOCIATED_SHARE = 0.50
+
+
+def _validate_event_forecast_config() -> None:
+    """Import-time guard for the F5 pipeline contract."""
+    if len(set(EVENT_FORECAST_STAGES)) != len(EVENT_FORECAST_STAGES):
+        raise ValueError("EVENT_FORECAST_STAGES contains a duplicate")
+    if EVENT_FORECAST_STAGES[0] != EVENT_FORECAST_STAGE_EVENT:
+        raise ValueError(
+            "the pipeline must begin at the event -- every later stage is "
+            "conditioned on one existing"
+        )
+    if EVENT_FORECAST_STAGES[-1] != EVENT_FORECAST_STAGE_FORECAST:
+        raise ValueError(
+            "the forecast must be the LAST stage; anything after it would be "
+            "reasoning that the published claim did not account for"
+        )
+    if EVENT_FORECAST_STAGE_MATCHES not in EVENT_FORECAST_STAGES:
+        raise ValueError("retrieval is not optional in an event-CONDITIONED forecast")
+    # Retrieval must precede the forecast, or the claim would not rest on the
+    # analogs at all.
+    if EVENT_FORECAST_STAGES.index(
+        EVENT_FORECAST_STAGE_MATCHES
+    ) >= EVENT_FORECAST_STAGES.index(EVENT_FORECAST_STAGE_FORECAST):
+        raise ValueError("matches must be retrieved BEFORE the forecast is made")
+
+    if len(set(EVENT_STAGE_STATUSES)) != len(EVENT_STAGE_STATUSES):
+        raise ValueError("EVENT_STAGE_STATUSES contains a duplicate")
+    if EVENT_STAGE_OK not in EVENT_STAGE_STATUSES:
+        raise ValueError("a stage must be able to succeed")
+
+    if EVENT_FORECAST_RETRIEVAL != "event_memory.find_analogs":
+        raise ValueError(
+            "F5 composes E6 retrieval; it must not introduce a third analog "
+            "metric beside E6 and C7 (W5: one canonical implementation)"
+        )
+    if not 0.0 < EVENT_FORECAST_MAX_SAME_TICKER_SHARE <= 1.0:
+        raise ValueError("the same-ticker share must lie in (0, 1]")
+    if EVENT_FORECAST_EFFECTIVE_PER_TICKER < 1:
+        raise ValueError("a ticker must contribute at least one observation")
+    # One ticker must not approach the POINT tier, not merely fall short of
+    # it. A value just under the floor (39 against a floor of 40) passes a
+    # naive >= check while letting a single stock's own history carry almost
+    # the entire claim. The cap is a MULTIPLE below the floor, so a point
+    # estimate always rests on several distinct names.
+    if (
+        EVENT_FORECAST_EFFECTIVE_PER_TICKER * EVENT_FORECAST_MIN_DISTINCT_FOR_POINT
+        > CONDITIONAL_MIN_SAMPLES_POINT
+    ):
+        raise ValueError(
+            f"one ticker may contribute {EVENT_FORECAST_EFFECTIVE_PER_TICKER} "
+            f"observations, so fewer than "
+            f"{EVENT_FORECAST_MIN_DISTINCT_FOR_POINT} distinct tickers could "
+            f"reach the POINT floor of {CONDITIONAL_MIN_SAMPLES_POINT} — a "
+            f"point estimate must rest on several distinct names, not one "
+            f"stock's own history"
+        )
+    if not 0.0 <= EVENT_FORECAST_MIN_ASSOCIATED_SHARE <= 1.0:
+        raise ValueError("the associated share must lie in [0, 1]")
+    if not EVENT_FORECAST_HORIZONS:
+        raise ValueError(
+            "no horizon is both recorded by a memory and declared by the "
+            "forecast layer -- an event-conditioned forecast could never be "
+            "expressed at any horizon"
+        )
+    for horizon in EVENT_FORECAST_HORIZONS:
+        if horizon not in EVENT_MEMORY_RESPONSE_HORIZONS:
+            raise ValueError(f"{horizon!r} is not recorded by a memory")
+        if horizon not in FORECAST_HORIZONS:
+            raise ValueError(f"{horizon!r} is not a declared forecast horizon")
+    if not EVENT_FORECAST_REPORT_YIELD:
+        raise ValueError(
+            "retrieval yield is the binding constraint on this sprint and must "
+            "travel with every forecast; MEASURED, 39.3% of events retrieve "
+            "ZERO analogs even after the E6 similarity fix"
+        )
+
+
+_validate_event_forecast_config()
