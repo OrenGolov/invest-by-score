@@ -2210,16 +2210,117 @@ parameter, so there is no provider to read past `as_of` with.
 
 - Design was produced by a 12-agent workflow (3 proposals, all REJECTED by
   adversarial critique; 49 traps, 20 fatal). Every load-bearing claim was then
-  re-run against the live repo — one (sklearn missing) proved FALSE and was
-  discarded.
+  re-run against the live repo. NOTE: the workflow's "sklearn missing" claim
+  was recorded here as disproven; it was in fact CORRECT. `scikit-learn==1.9.1`
+  is pinned in `requirements.txt` but was absent from the local interpreter,
+  and 66 M4/M5/M6 tests errored because of it. Installing the pinned version
+  cleared all 66.
 - Acceptance: 43 tests in `tests/test_forecast_joint.py`; gate
   `scripts/check_forecast_joint.py`, verified to FAIL when `value: None` is
   reintroduced. Suite 1548 pass, twenty-six gates green.
 
-### F4–F8 — pending
+### F4. Conditional forecasting ✓ DONE
 
-F4 conditional forecasting, F4 conditional forecasting, F5 event-conditioned forecast, F6 forecast decomposition, F7 forecast confidence, F8 the versioned
-`ForecastSnapshot` API contract.
+`P(+5% in 20D | bullish regime)` beside `P(+5% in 20D | stress regime)`.
+`core/forecast_conditional.py` + the F4 block in `core/config.py`.
+
+**The problem conditioning creates.** Slicing history by regime does not give
+five datasets; it gives one dataset cut five ways, unevenly. MEASURED, 5y SPY,
+191 PIT-correct sessions:
+
+```
+bullish 143 | risk_off 32 | range 9 | bearish 5 | stress 2
+```
+
+The roadmap's own example condition — stress — has **two** observations, and
+reads `P(up)=1.00, P(+5%)=1.00, mean +13.64%`. It is the most
+confident-looking and least trustworthy cell in the grid. The point estimate
+is inversely informative to its reliability.
+
+**There is no single right method here, and that is the design.** Both global
+policies were measured against the real slices and both fail:
+
+- a floor at `N>=30` silences range, bearish AND stress — three of five
+  regimes. The grid then cannot answer the question F4 exists to answer. That
+  is a loss of **accuracy**, not a conservative default;
+- no floor publishes the stress cell as fact. That is a loss of
+  **reliability**.
+
+So the estimator and the STRENGTH OF CLAIM are selected **per cell**, from the
+evidence that cell actually holds (`select_claim`). Every cell says the
+strongest true thing it can support, and none says more.
+
+**The tier ladder** (floors MEASURED — 40k binomial draws per N, true rate
+0.20; the derivation re-runs inside the gate):
+
+| tier | floor | what it may say | why the floor sits there |
+|---|---|---|---|
+| POINT | N ≥ 40 | a number | \|err\|>0.15 in 1.6% of draws, vs 3.7% at N=30 and 22.7% at N=10 |
+| DIRECTIONAL | N ≥ 20 **and** the interval excludes the base rate | "higher/lower than unconditional", never a number | a large 15pt effect is detected 24% of the time at N=10, 40% at N=20 |
+| INTERVAL | N ≥ 8 | a range only | where mean Wilson width first drops below 0.50 |
+| INSUFFICIENT | otherwise | its own N, and why | at N=2 a rate of 1.00 and one of 0.50 are indistinguishable |
+
+**DIRECTIONAL sits ABOVE INTERVAL although it says less.** A too-wide interval
+advertises its own weakness on its face; a directional claim that merely
+failed to DETECT an effect is indistinguishable from one that found none. The
+import-time validator asserts the ordering and names the reason, because
+re-sorting these by apparent wording strength is the obvious "cleanup".
+
+**Wilson, not M6.** `core.calibration.prediction_interval` measures spread
+ACROSS CV FOLDS; MEASURED, it returns width 0.00 at *every* N on identical
+observations. A conditional rate needs uncertainty FROM SAMPLE SIZE — a
+different quantity that renders the same way. Reusing it here would be a W5
+violation in reverse: composing the wrong existing thing rather than building
+the right one. Wilson's coverage was verified to hold (0.92–1.00) down to N=2.
+
+**Width can never stand alone.** MEASURED: a unanimous 5/5 gives Wilson width
+0.434 — NARROWER than the well-sampled 9-observation `range` cell at 0.525.
+Width rewards unanimity, and unanimity is precisely what tiny samples
+manufacture. The sample floor gates the tier; width only constrains within it.
+
+**The shape rule, extended from F3.** A cell carries a `value` key IF AND ONLY
+IF its claim is POINT. An INTERVAL cell carries an interval and no value; a
+DIRECTIONAL cell carries a direction and no value; a refused cell carries
+neither. `value: None` would coalesce to 0.0 under the dashboard's
+`Number(x ?? 0)` idiom and render a withheld probability as CERTAIN DOWN.
+
+**EMPTY_SLICE is not INSUFFICIENT.** "this regime never occurred" and "it
+occurred 3 times" are different facts with different fixes (widen the window
+vs wait for data), so they are different statuses.
+
+**Multiplicity is reported, not silently corrected.** The full grid is
+6 targets × 6 horizons × 5 regimes = 180 cells from one history, ~9 spurious
+directional findings at a 5% false-signal rate. Every DIRECTIONAL claim
+carries its comparison count so a reader can weigh it; a blanket correction
+would also suppress true findings in a 5-cell regime row.
+
+**Governance untouched.** The W2 veto `market_regime_stress` (STRESS →
+NO_TRADE) is evaluated only in `core/risk_policy.py`. A favourable stress cell
+is a REPORT, never permission to trade, and the grid carries that note.
+
+**PIT by delegation.** The module never fetches. The caller supplies
+observations, each carrying the condition that held AT its own as_of and the
+outcome of a window that had ALREADY closed.
+
+**Verified on real data**, not just fixtures: 118 PIT observations of SPY
+(2021-01→2025-06), 0 contract problems, and three claim strengths in one
+five-row table — bullish (N=78) POINT 0.731; risk_off (N=30) INTERVAL
+[0.39,0.73]; bearish/range/stress refused. The risk_off row is the case that
+justifies the design: its naive point estimate of 0.533 against a 0.661 base
+rate reads as "risk_off is meaningfully worse", but 0.661 lies *inside* the
+interval, so no such claim is supportable. The tier system withheld a false
+finding a global point-estimate rule would have published.
+
+- Acceptance: 56 tests in `tests/test_forecast_conditional.py`; gate
+  `scripts/check_conditional_forecast.py`, verified to FAIL under all nine
+  reinjected invariants — including the two that matter most, collapsing the
+  per-cell selection into one global floor, and removing the floor entirely.
+  Suite 1621 pass, twenty-seven gates green.
+
+### F5–F8 — pending
+
+F5 event-conditioned forecast, F6 forecast decomposition, F7 forecast
+confidence, F8 the versioned `ForecastSnapshot` API contract.
 
 ---
 

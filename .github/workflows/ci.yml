@@ -25,52 +25,41 @@ jobs:
       - name: Test suite
         run: python -m pytest tests/ -q
 
-      # The governance gates. These are the drift detectors the design docs
-      # rely on; before this workflow existed nothing re-ran them.
-      - name: M1 feature-registry drift gate
-        run: python scripts/check_feature_registry.py
-
-      - name: N1 taxonomy coverage gate
-        run: python scripts/check_n1_taxonomy_coverage.py
-
-      - name: M2 training-dataset drift gate
-        run: python scripts/check_training_dataset.py
-
-      - name: M2 model-registry drift gate
-        run: python scripts/check_model_registry.py
-
-      - name: M3 trial-registry drift gate
-        run: python scripts/check_trial_registry.py
-
-      - name: M3 training-pipeline drift gate
-        run: python scripts/check_training_pipeline.py
-
-      - name: M4 baseline-suite drift gate
-        run: python scripts/check_baseline_suite.py
-
-      - name: M6 calibration drift gate
-        run: python scripts/check_calibration.py
-
-      - name: M8 reproducibility drift gate
-        run: python scripts/check_reproducibility.py
-
-      - name: E1 event-contract drift gate
-        run: python scripts/check_event_contract.py
-
-      - name: E2 entity-resolution drift gate
-        run: python scripts/check_entity_resolution.py
-
-      - name: E3 actor-intelligence drift gate
-        run: python scripts/check_actor_intelligence.py
-
-      - name: E4 event-study drift gate
-        run: python scripts/check_event_study.py
-
-      - name: E5 attribution drift gate
-        run: python scripts/check_attribution.py
-
-      - name: E6 event-memory drift gate
-        run: python scripts/check_event_memory.py
-
-      - name: E7 event-chain drift gate
-        run: python scripts/check_event_chains.py
+      # The governance gates — DISCOVERED, not enumerated.
+      #
+      # This step used to list each gate by hand, and the list silently fell
+      # behind: 26 gate scripts existed while only 16 were named here, so
+      # every Sprint C and F gate passed locally and never ran on a push. A
+      # drift detector that is itself subject to drift is not a detector.
+      #
+      # Now every scripts/check_*.py runs. Adding a gate makes it enforced;
+      # there is no second place to remember. The step fails if the directory
+      # is empty, because "no gates found" must never read as "all gates
+      # passed".
+      - name: Governance gates
+        run: |
+          set -u
+          shopt -s nullglob
+          gates=(scripts/check_*.py)
+          if [ ${#gates[@]} -eq 0 ]; then
+            echo "no governance gates found -- refusing to report success"
+            exit 1
+          fi
+          echo "running ${#gates[@]} governance gates"
+          failed=()
+          for gate in "${gates[@]}"; do
+            echo "::group::$gate"
+            if python "$gate"; then
+              echo "PASS $gate"
+            else
+              echo "FAIL $gate"
+              failed+=("$gate")
+            fi
+            echo "::endgroup::"
+          done
+          if [ ${#failed[@]} -gt 0 ]; then
+            echo "FAILED GATES (${#failed[@]}/${#gates[@]}):"
+            printf '  - %s\n' "${failed[@]}"
+            exit 1
+          fi
+          echo "all ${#gates[@]} governance gates passed"

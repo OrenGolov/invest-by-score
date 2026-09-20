@@ -2376,3 +2376,211 @@ def _validate_joint_forecast_config() -> None:
 
 
 _validate_joint_forecast_config()
+
+
+# ---------------------------------------------------------------------------
+# Sprint F4 - Conditional forecasting
+# ---------------------------------------------------------------------------
+# F4 answers "P(+5% in 20D | bullish) vs P(+5% in 20D | stress)". The hard part
+# is not computing a conditional rate; it is that conditioning SHREDS the
+# sample. 6 targets x 6 horizons x 5 regimes = 180 cells drawn from one history.
+#
+# MEASURED, 5y SPY, 191 PIT-correct sessions:
+#     bullish 143 | risk_off 32 | range 9 | bearish 5 | stress 2
+# The roadmap's own example condition (stress) has TWO observations, and reads
+# P(up)=1.00, P(+5%)=1.00, mean +13.64% - the most confident-looking and least
+# trustworthy cell in the grid.
+#
+# WHY NOT ONE GLOBAL RULE. A single N floor was measured against the real
+# slices and both directions fail:
+#   - a floor at N>=30 silences range, bearish AND stress - 3 of 5 regimes.
+#     The grid then cannot answer the question F4 exists to answer, which is a
+#     loss of ACCURACY, not a conservative default.
+#   - no floor at all publishes "stress: rose 100% of the time, +13.6%" from
+#     N=2, which is a loss of RELIABILITY.
+# So the estimator and the STRENGTH OF CLAIM are selected per cell, from the
+# evidence that cell actually holds. Every cell says the strongest true thing
+# it can support, and none says more.
+#
+# THE TIERS, and the measurement that placed each boundary (40k binomial draws
+# per N, true rate 0.20; see scripts/check_conditional_forecast.py):
+#
+#   POINT (N >= 40): a point estimate is publishable.
+#       |error| > 0.15 in 1.6% of draws at N=40, vs 3.7% at N=30 and 22.7% at
+#       N=10. Mean Wilson width 0.238.
+#   INTERVAL (N >= 8): no point estimate; the interval IS the answer.
+#       Wilson coverage holds at every N measured (0.92-1.00 down to N=2), so
+#       an interval here is HONEST - it is merely wide, and a wide interval is
+#       self-limiting in a way a wrong point estimate is not. N=8 is where mean
+#       width first drops below CONDITIONAL_MAX_INTERVAL_WIDTH.
+#   DIRECTIONAL (N >= 20 AND the interval excludes the base rate): the cell may
+#       only say "higher/lower than unconditional", never a number.
+#       Detection of a LARGE 15pt effect: 24% at N=10, 40% at N=20, 49% at
+#       N=30, 69% at N=40. Below N=20 a directional claim is a coin flip
+#       dressed as a finding, so it is not offered.
+#   INSUFFICIENT (everything else): the cell reports N and refuses.
+#
+# NOTE the deliberate inversion: DIRECTIONAL demands MORE evidence than
+# INTERVAL, though it says less. An interval that is too wide advertises its
+# own weakness; a directional claim that failed to detect an effect looks
+# exactly like one that detected nothing. Ordering these by apparent
+# "strength of wording" would have been backwards.
+CONDITIONAL_FORECAST_VERSION = "conditional-forecast-v1"
+CONDITIONAL_CONTRACT_VERSION = "conditional-contract-v1"
+
+# Claim strengths, weakest-first. The ORDER is the precedence used when
+# several tiers qualify: the LAST qualifying tier wins, so a cell always makes
+# the strongest claim its evidence supports.
+CONDITIONAL_CLAIM_INSUFFICIENT = "INSUFFICIENT"
+CONDITIONAL_CLAIM_DIRECTIONAL = "DIRECTIONAL"
+CONDITIONAL_CLAIM_INTERVAL = "INTERVAL"
+CONDITIONAL_CLAIM_POINT = "POINT"
+
+CONDITIONAL_CLAIM_PRECEDENCE: tuple[str, ...] = (
+    CONDITIONAL_CLAIM_INSUFFICIENT,
+    CONDITIONAL_CLAIM_DIRECTIONAL,
+    CONDITIONAL_CLAIM_INTERVAL,
+    CONDITIONAL_CLAIM_POINT,
+)
+
+# Sample floors per tier. MEASURED above - not round numbers.
+CONDITIONAL_MIN_SAMPLES_POINT = 40
+CONDITIONAL_MIN_SAMPLES_DIRECTIONAL = 20
+CONDITIONAL_MIN_SAMPLES_INTERVAL = 8
+
+# An interval wider than this spans so much of [0,1] that it constrains
+# nothing. MEASURED: mean Wilson width is 0.474 at N=8 and 0.554 at N=5, so
+# this admits N>=8 and excludes N<=5 on width alone at a realistic base rate.
+CONDITIONAL_MAX_INTERVAL_WIDTH = 0.50
+
+# A width cap CANNOT replace the sample floor, and this is why it is not
+# allowed to. MEASURED: a unanimous 5/5 gives Wilson width 0.434 - NARROWER
+# than the well-sampled 9-observation range cell at 0.525. Width rewards
+# unanimity, and unanimity is precisely what a tiny sample manufactures. Both
+# guards apply; neither is sufficient alone.
+CONDITIONAL_WIDTH_REQUIRES_FLOOR = True
+
+# Wilson score interval, two-sided 95%. NOT core.calibration.prediction_interval:
+# MEASURED, that function returns width 0.00 at EVERY N on identical
+# observations because it measures spread ACROSS CV FOLDS. A conditional rate
+# needs uncertainty FROM SAMPLE SIZE. Same-looking output, different quantity -
+# composing it here would be a W5 violation in reverse (reusing the wrong
+# existing thing rather than duplicating the right one).
+CONDITIONAL_INTERVAL_METHOD = "wilson_score"
+CONDITIONAL_INTERVAL_Z = 1.959964
+CONDITIONAL_INTERVAL_LEVEL = 0.95
+
+# Conditions F4 slices on. The regime is the governed five-state label from N4
+# (core.regime_agent), never the ungoverned display heuristic.
+CONDITIONAL_CONDITION_REGIME = "market_regime"
+CONDITIONAL_CONDITIONS: tuple[str, ...] = (CONDITIONAL_CONDITION_REGIME,)
+
+# Cell statuses. These mirror F3 vocabulary for the obstacles F3 already
+# names, and add only what CONDITIONING introduces.
+COND_STATUS_UNAVAILABLE = "UNAVAILABLE"        # no label set at all
+COND_STATUS_PENDING = "PENDING"                # the horizon window has not closed
+COND_STATUS_LABEL_UNBACKED = "LABEL_UNBACKED"  # no realized counterpart at this horizon
+COND_STATUS_NO_CONDITION = "NO_CONDITION"      # the condition could not be resolved PIT
+COND_STATUS_EMPTY_SLICE = "EMPTY_SLICE"        # the condition never occurred in history
+COND_STATUS_INSUFFICIENT = "INSUFFICIENT"      # the slice is real but too thin to claim
+COND_STATUS_OK = "OK"
+
+CONDITIONAL_CELL_PRECEDENCE: tuple[str, ...] = (
+    COND_STATUS_UNAVAILABLE,
+    COND_STATUS_PENDING,
+    COND_STATUS_LABEL_UNBACKED,
+    COND_STATUS_NO_CONDITION,
+    COND_STATUS_EMPTY_SLICE,
+    COND_STATUS_INSUFFICIENT,
+    COND_STATUS_OK,
+)
+
+# EMPTY_SLICE is NOT INSUFFICIENT. "this regime never occurred in the sampled
+# history" and "it occurred 3 times" are different facts with different fixes
+# (widen the window vs wait for data), and collapsing them hides which one
+# applies.
+CONDITIONAL_EMPTY_SLICE_N = 0
+
+# Multiple testing is real: the full grid is 6 targets x 6 horizons x 5
+# regimes = 180 cells drawn from ONE history. At a 5% false-signal rate that
+# is ~9 spurious DIRECTIONAL findings per run. Directional claims therefore
+# carry the count of comparisons they were drawn from, so a reader can weigh
+# them; F4 reports the exposure rather than silently applying a correction
+# that would also suppress true findings in a 5-cell regime row.
+CONDITIONAL_REPORT_MULTIPLICITY = True
+
+# The STRESS -> NO_TRADE coupling (W2 veto market_regime_stress) is
+# GOVERNANCE and is unaffected by anything F4 publishes. A conditional cell
+# reading "stress: P(up) high" must never be read as permission to trade: the
+# veto is evaluated in core/risk_policy.py and F4 is a reporting surface.
+CONDITIONAL_STRESS_VETO_UNAFFECTED = True
+
+
+def _validate_conditional_forecast_config() -> None:
+    """Import-time guard for the F4 tier machinery."""
+    declared = {
+        COND_STATUS_UNAVAILABLE, COND_STATUS_PENDING, COND_STATUS_LABEL_UNBACKED,
+        COND_STATUS_NO_CONDITION, COND_STATUS_EMPTY_SLICE,
+        COND_STATUS_INSUFFICIENT, COND_STATUS_OK,
+    }
+    if set(CONDITIONAL_CELL_PRECEDENCE) != declared:
+        raise ValueError(
+            "CONDITIONAL_CELL_PRECEDENCE must cover exactly the declared statuses"
+        )
+    if len(CONDITIONAL_CELL_PRECEDENCE) != len(declared):
+        raise ValueError("CONDITIONAL_CELL_PRECEDENCE contains a duplicate")
+    if CONDITIONAL_CELL_PRECEDENCE[-1] != COND_STATUS_OK:
+        raise ValueError("OK must be LAST - every refusal outranks it")
+
+    tiers = {
+        CONDITIONAL_CLAIM_INSUFFICIENT, CONDITIONAL_CLAIM_DIRECTIONAL,
+        CONDITIONAL_CLAIM_INTERVAL, CONDITIONAL_CLAIM_POINT,
+    }
+    if set(CONDITIONAL_CLAIM_PRECEDENCE) != tiers:
+        raise ValueError("CONDITIONAL_CLAIM_PRECEDENCE must cover exactly the declared tiers")
+    if len(CONDITIONAL_CLAIM_PRECEDENCE) != len(tiers):
+        raise ValueError("CONDITIONAL_CLAIM_PRECEDENCE contains a duplicate")
+    if CONDITIONAL_CLAIM_PRECEDENCE[0] != CONDITIONAL_CLAIM_INSUFFICIENT:
+        raise ValueError(
+            "INSUFFICIENT must be FIRST - it is the fallback every cell starts from"
+        )
+    if CONDITIONAL_CLAIM_PRECEDENCE[-1] != CONDITIONAL_CLAIM_POINT:
+        raise ValueError("POINT must be LAST - it is the strongest claim")
+
+    # The floors must be strictly ordered POINT > DIRECTIONAL > INTERVAL. The
+    # middle term is the counter-intuitive one and is asserted deliberately:
+    # a DIRECTIONAL claim needs MORE evidence than an INTERVAL despite saying
+    # less, because a too-wide interval advertises its own weakness while a
+    # directional claim that failed to detect looks like one that found
+    # nothing. Re-sorting these by apparent wording strength would invert it.
+    if not (
+        CONDITIONAL_MIN_SAMPLES_POINT
+        > CONDITIONAL_MIN_SAMPLES_DIRECTIONAL
+        > CONDITIONAL_MIN_SAMPLES_INTERVAL
+        > CONDITIONAL_EMPTY_SLICE_N
+    ):
+        raise ValueError(
+            "sample floors must run POINT > DIRECTIONAL > INTERVAL > 0; "
+            "DIRECTIONAL above INTERVAL is intentional (see the comment above)"
+        )
+    if not 0.0 < CONDITIONAL_MAX_INTERVAL_WIDTH < 1.0:
+        raise ValueError("the max interval width must lie strictly inside (0, 1)")
+    if not CONDITIONAL_WIDTH_REQUIRES_FLOOR:
+        raise ValueError(
+            "a width cap must NOT be allowed to stand alone: a unanimous 5/5 "
+            "gives Wilson width 0.434, narrower than a 9-observation cell at "
+            "0.525, so width alone admits the thinnest samples"
+        )
+    if CONDITIONAL_INTERVAL_METHOD != "wilson_score":
+        raise ValueError(
+            "conditional rates use the Wilson score interval; "
+            "core.calibration.prediction_interval measures fold spread and "
+            "returns width 0.00 at every N here"
+        )
+    if CONDITIONAL_INTERVAL_Z <= 0.0:
+        raise ValueError("the interval z must be strictly positive")
+    if CONDITIONAL_CONDITION_REGIME not in CONDITIONAL_CONDITIONS:
+        raise ValueError("the regime condition must be registered in CONDITIONAL_CONDITIONS")
+
+
+_validate_conditional_forecast_config()
