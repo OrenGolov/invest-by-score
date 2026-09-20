@@ -1422,7 +1422,7 @@ stochastic estimator in the same-process check; re-sabotaging now fails with
 a precise message. Worth recording: the gate was wrong in a way that only an
 attempted break could reveal.
 
-### M5. Promotion gates and drift hooks### M5. Promotion gates and drift hooks
+### M5. Promotion gates and drift hooks
 
 - Promotion checklist automated in `scripts/promote.py`: OOS metrics beat
   incumbent on the pre-registered primary metric, no regression on veto-rate
@@ -2317,7 +2317,7 @@ finding a global point-estimate rule would have published.
   per-cell selection into one global floor, and removing the floor entirely.
   Suite 1621 pass, twenty-seven gates green.
 
-### E6 retrieval fix — analog similarity matched price level, not chart shape
+### E6 retrieval fix — analog similarity matched price level, not chart shape ✓ DONE
 
 Found while measuring F5's preconditions. `chart_similarity` compared `close`
 (scale 20.0) and `atr_14` (scale 2.0) across tickers trading at completely
