@@ -313,5 +313,55 @@ class TestDisclaimerAndReport(EventStudyTestCase):
         self.assertIn("association only", study_report([])["disclaimer"])
 
 
+class TimezoneAwareEventTimeTests(unittest.TestCase):
+    """A real news timestamp is tz-aware; a price index is not.
+
+    FOUND IN PRODUCTION, not by a fixture: the first live news event the
+    daily collector produced raised
+    `TypeError: Invalid comparison between dtype=datetime64[ms] and Timestamp`
+    inside `_entry_position`. Every synthetic fixture and the price-derived
+    backfill supply NAIVE timestamps, so nothing exercised this path until
+    NEWS_PROVIDER_API_KEY was set and real articles arrived.
+    """
+
+    def _frame(self, sessions: int = 260) -> pd.DataFrame:
+        index = pd.bdate_range("2025-01-02", periods=sessions)
+        closes = np.linspace(100.0, 160.0, sessions)
+        return pd.DataFrame(
+            {
+                "Open": closes, "High": closes * 1.01,
+                "Low": closes * 0.99, "Close": closes,
+                "Volume": np.full(sessions, 1_000_000.0),
+            },
+            index=index,
+        )
+
+    def test_a_utc_zulu_timestamp_does_not_raise(self):
+        frame = self._frame()
+        middle = frame.index[len(frame) // 2]
+        zulu = middle.strftime("%Y-%m-%dT21:33:00Z")
+        result = run_event_study("NVDA", zulu, frame, event_id="tz")
+        self.assertIsNotNone(result.status)
+
+    def test_aware_and_naive_forms_select_the_same_bar(self):
+        frame = self._frame()
+        middle = frame.index[len(frame) // 2]
+        aware = run_event_study(
+            "NVDA", middle.strftime("%Y-%m-%dT00:00:00Z"), frame, event_id="a"
+        )
+        naive = run_event_study(
+            "NVDA", middle.strftime("%Y-%m-%d %H:%M:%S"), frame, event_id="b"
+        )
+        self.assertEqual(aware.entry_bar, naive.entry_bar)
+
+    def test_an_offset_timestamp_is_accepted(self):
+        frame = self._frame()
+        middle = frame.index[len(frame) // 2]
+        result = run_event_study(
+            "NVDA", middle.strftime("%Y-%m-%dT16:00:00+03:00"), frame, event_id="o"
+        )
+        self.assertIsNotNone(result.status)
+
+
 if __name__ == "__main__":
     unittest.main()

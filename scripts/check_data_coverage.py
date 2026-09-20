@@ -54,6 +54,11 @@ from core.raw_store import RAW_STORE_DIR  # noqa: E402
 # presumed dead. Generous: a long weekend plus a holiday plus a slow Monday.
 MAX_REPORT_AGE_DAYS = 6
 
+# A source needs at least this many business days of its own history before
+# its coverage means anything. Below it, "missing" days are days that predate
+# the source rather than days it dropped.
+MIN_DAYS_BEFORE_JUDGING = 5
+
 
 def business_days_back(end: date, count: int) -> list[date]:
     """The `count` most recent business days ending at `end`, newest first."""
@@ -173,8 +178,23 @@ def main() -> int:
                     f"collected"
                 )
             continue
+        # A source that only just STARTED collecting has no history to be
+        # missing. `newsapi_news` appeared the day NEWS_PROVIDER_API_KEY was
+        # set, and judging its first day against a ten-day window reported
+        # "10 of 10 missing" for a source that had never worked better.
+        # Judge a source only from its own first record onward.
+        first = min(days)
+        judged = [day for day in window if day >= first]
+        if len(judged) < MIN_DAYS_BEFORE_JUDGING:
+            notes.append(
+                f"{source_id}: first record {first}, only {len(judged)} "
+                f"business day(s) of history — too new to judge "
+                f"(needs {MIN_DAYS_BEFORE_JUDGING})"
+            )
+            continue
+
         checked_any = True
-        missing = [day for day in window if day not in days]
+        missing = [day for day in judged if day not in days]
         if not collecting_here:
             if missing:
                 notes.append(

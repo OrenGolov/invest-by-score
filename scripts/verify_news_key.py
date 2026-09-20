@@ -7,12 +7,13 @@ failed collection run cannot separate on its own:
     2. does the provider accept the key?
     3. does a real ticker return real articles?
 
-Deliberately NOT a governance gate (no `check_*` CI wiring beyond being
-runnable): a missing key is a setup state, not a code defect, and failing CI
-for it would punish every clone.
+NAMED `verify_*`, NOT `check_*`: CI auto-discovers every `scripts/check_*.py`
+as a governance gate, and this one exits 1 whenever the key is absent. As a
+gate it would fail every clone that has not been set up, which is a setup
+state rather than a code defect.
 
-    python scripts/check_news_key.py
-    python scripts/check_news_key.py --ticker NVDA
+    python scripts/verify_news_key.py
+    python scripts/verify_news_key.py --ticker NVDA
 """
 
 from __future__ import annotations

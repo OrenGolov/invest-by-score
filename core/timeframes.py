@@ -76,11 +76,23 @@ class TimeframeError(ValueError):
     """Raised when a timeframe request is structurally invalid."""
 
 
-def _as_timestamp(value) -> pd.Timestamp:
+def as_naive_timestamp(value) -> pd.Timestamp:
+    """One canonical timestamp form for the whole system: tz-NAIVE.
+
+    Price bars arrive tz-naive while news timestamps arrive tz-aware UTC
+    ("2026-09-16T21:33:00Z"), and pandas refuses to compare the two. Every
+    caller that mixes the two sources normalises here rather than keeping a
+    private copy of this conversion (W5).
+    """
     stamp = pd.Timestamp(value)
     if stamp.tzinfo is not None:
         stamp = stamp.tz_convert(None) if stamp.tz is not None else stamp.tz_localize(None)
     return stamp
+
+
+# Retained so existing internal callers keep working; the public name above is
+# what new code should use.
+_as_timestamp = as_naive_timestamp
 
 
 def eligible_bars(

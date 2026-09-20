@@ -51,6 +51,8 @@ from typing import Any
 
 import pandas as pd
 
+from core.timeframes import as_naive_timestamp
+
 from core.config import (
     EVENT_STUDY_BASELINE_GAP_SESSIONS,
     EVENT_STUDY_BASELINE_SESSIONS,
@@ -274,7 +276,13 @@ def run_event_study(
             model=model, event_id=event_id, reason=str(exc),
         )
 
-    stamp = pd.Timestamp(event_time)
+    # Normalised to tz-NAIVE before any comparison. Price bars are tz-naive,
+    # while a real news timestamp arrives tz-aware UTC
+    # ("2026-09-16T21:33:00Z"), and pandas refuses to compare the two --
+    # `_entry_position` raised TypeError on the first live news event the
+    # collector produced. Synthetic fixtures and the price-derived backfill
+    # never exposed it, because both supply naive timestamps.
+    stamp = as_naive_timestamp(event_time)
     entry = _entry_position(frame, stamp)
     if entry is None:
         return EventStudyResult(

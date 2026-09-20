@@ -81,6 +81,7 @@ from core.event_memory import (  # noqa: E402
     remember,
 )
 from core.event_study import run_event_study  # noqa: E402
+from core.timeframes import as_naive_timestamp  # noqa: E402
 
 LOGGER = logging.getLogger("build_event_memory")
 
@@ -353,7 +354,14 @@ def forward(tickers, as_of: str, dry_run: bool, store: Path | None) -> dict:
             considered += 1
             when = str(getattr(event, "effective_time", "")
                        or getattr(event, "published_time", ""))
-            position = frame.index.searchsorted(pd.Timestamp(when), side="right") - 1
+            # Normalised through C1's canonical converter, not a local copy:
+            # price bars are tz-NAIVE while news timestamps arrive tz-aware
+            # UTC ("2026-09-16T21:33:00Z"), and comparing the two raises.
+            # The backfill never hit this because its timestamps came from
+            # the price index itself.
+            position = frame.index.searchsorted(
+                as_naive_timestamp(when), side="right"
+            ) - 1
             if position < 0:
                 skipped["no_bar"] = skipped.get("no_bar", 0) + 1
                 continue
