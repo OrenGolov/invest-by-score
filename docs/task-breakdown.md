@@ -2563,6 +2563,116 @@ stays at 0.70 and the store grows instead.
   filter, letting the backfill write OBSERVED, and shrinking the trailing
   buffer below the longest recorded horizon.
 
+### Daily data collection — the capture step continuous learning depends on ✓ DONE
+
+Not a roadmap task. Checked before building: Sprint X2 is alerting (it reads
+stores rather than filling them), and `docs/sprints/sprint-3.md` lists
+"continuous learning from forecast outcomes" as a requirement to carry
+forward, with no implementing task anywhere. This was a genuine capability
+gap, so it was built immediately.
+
+**The gap, measured.** Nothing collected on a schedule. The W6 ledger accrued
+only when somebody happened to run a command:
+
+```
+alpha_vantage_overview: 13 of 15 business days captured, MISSING 2026-09-02, 09-04
+yahoo_finance_chart   : 12 of 15 business days captured, MISSING 09-02, 09-04, 09-10
+```
+
+**Why that matters, and for which data.** Most inputs lose nothing by waiting:
+
+```
+price bars         REBUILDABLE   15y of daily history, re-fetchable
+hourly bars        REBUILDABLE   MEASURED 2y available — the C7 docstring's
+                                 "roughly one month" is outdated for this provider
+macro series       REBUILDABLE   FRED/ALFRED serve vintages
+regime labels      REBUILDABLE   computed from bars
+inferred memories  REBUILDABLE   the backfill regenerates them
+
+NEWS ARTICLES      PERISHABLE    NEWS_LOOKBACK_DAYS = 7, then GONE
+sentiment          PERISHABLE    derived from news; dies with it
+observed memories  PERISHABLE    need the news that produced them
+fundamentals       PARTLY        values re-fetchable; the VINTAGE is not
+```
+
+So the argument for scheduling is **irreversibility, not convenience**. A day
+of news missed is a day that can never be learned from — and it is exactly
+what F5's `observed` memories require, which is why F5 currently retrieves
+only `inferred` analogs.
+
+**`scripts/daily_collect.py` triggers; it does not duplicate.** Every provider
+fetch already appends to the W6 ledger on its way past
+(`append_raw_records` lives inside `fetch_price_history`,
+`fetch_fundamental_snapshot`, `build_news_snapshot`, `build_macro_snapshot`).
+The collector's only job is to make those calls happen every business day.
+Writing records itself would be a second ledger path, which W5 forbids — and
+the gate enforces that by parsing the collector's AST, because the module
+docstring NAMES `append_raw_records` to explain that it does not call it, and
+a substring check cannot tell an explanation from a call.
+
+**Fail-soft per source, fail-loud in aggregate.** A dead macro provider must
+not cost the day's news, so each source reports its own status. The exit code
+reflects whether anything PERISHABLE was lost — not whether everything
+succeeded — because that is the distinction a scheduler can act on.
+
+Three status subtleties, each fixed after seeing the output rather than
+predicted:
+
+- a **dry run** reports SKIPPED, never FAILED, and never claims a lost day;
+- **events blocked by missing news** reports SKIPPED, not FAILED: news already
+  reports that lost day, and double-counting it would hide which stage broke;
+- an unattempted source is SKIPPED, distinct from one that tried and failed.
+
+**`scripts/check_data_coverage.py` makes a silent outage loud.** A scheduled
+task that stops firing produces no error — it produces nothing, which looks
+exactly like a quiet week. The gate fails on a ledger gap beyond the
+allowance, on a collection report that has gone stale (a dead scheduler leaves
+a tidy history), and on a report whose rows cannot be dated.
+
+It is deliberately TOLERANT of the gaps already in the ledger and of a missing
+`NEWSAPI_KEY`: it fails on a collector that stopped running, not on a provider
+that was never configured. Those have different fixes, and conflating them
+would make the gate noise.
+
+**Scheduled and verified running.** `scripts/install_daily_task.ps1` registers
+a Mon–Fri 22:00 task (after the US close), idempotently. Verified live:
+`State: Ready`, `NextRunTime: 2026-09-21 22:00`, `DaysOfWeek: 62` (Mon–Fri).
+`StartWhenAvailable` is set because a laptop shut at 22:00 is the likeliest
+way for this to stop silently, and that setting turns a missed run into a late
+run rather than a lost day.
+
+**`scripts/` became a real package.** MEASURED: as a namespace package it
+resolved to a path that also contained `site-packages/win32/scripts`, so a
+module added there could shadow one of ours. An explicit `__init__.py` binds
+the name to this directory alone.
+
+**The gate must not fail an innocent clone — fixed after testing it.** The W6
+ledger is TRACKED, so a clone made months from now carries records ending on
+the day they were committed; judging that against today's calendar reported
+"10 of 10 days missing" and failed CI on a machine that never collects. The
+gitignored collection report is the discriminator: its presence means THIS
+machine runs the collector. A second hole surfaced in the same test — a
+ledger stale beyond the entire window was classified "source appears retired"
+and skipped, so a collector dead for nine months passed silently. It now
+fails, loudly, but only where a report proves collection was expected.
+
+**Measured runtime:** a full 77-ticker run over all five sources takes
+**1m10s**, well inside the task's 2-hour limit.
+
+- Acceptance: 31 tests in `tests/test_daily_collect.py` (including three
+  clone-safety cases run against a temporary repo copy); gate
+  `scripts/check_data_coverage.py`, verified to FAIL under six reinjected
+  faults — news reclassified as non-perishable, an allowance wide enough to
+  swallow the window, the collector writing the ledger directly, a declared
+  source with no collector, a 40-day-stale report, and a report with no
+  readable timestamp. A simulated dead scheduler (5 ledger days removed) fails
+  the gate naming the exact missing dates. Suite 1741 pass, 30 gates green.
+
+**Still blocked on one thing outside the code:** `NEWSAPI_KEY` is not set, so
+every run reports news as a lost day and exits 1. Until it is set, no
+`observed` event memory can exist and F5 works only from inferred analogs.
+The collector is correct to fail loudly about that rather than report success.
+
 ### F6–F8 — pending
 
 F6 forecast decomposition, F7 forecast confidence, F8 the versioned

@@ -2960,3 +2960,94 @@ def _validate_event_forecast_config() -> None:
 
 
 _validate_event_forecast_config()
+
+
+# ---------------------------------------------------------------------------
+# Daily collection - the capture step continuous learning depends on
+# ---------------------------------------------------------------------------
+# The system learns from what it recorded, and nothing recorded on a schedule.
+# MEASURED over three weeks of the W6 ledger: 2-3 of 15 business days are
+# MISSING, because collection happened only when somebody ran a command.
+#
+# Most inputs lose nothing by waiting - price bars, macro series, regime
+# labels and inferred event memories are all rebuildable on demand. MEASURED,
+# hourly bars reach 2 YEARS back, not the ~1 month the C7 docstring assumed.
+#
+# NEWS IS DIFFERENT. NEWS_LOOKBACK_DAYS is 7: a day of articles not captured
+# within a week is gone permanently, and with it that day's sentiment and any
+# OBSERVED event memory it would have produced. F5 currently retrieves only
+# INFERRED analogs (precision 0.65) precisely because no observed ones exist.
+#
+# So the argument for scheduling is IRREVERSIBILITY, not convenience.
+COLLECT_VERSION = "daily-collect-v1"
+
+# The sources one run exercises, in order. Each already appends to the W6
+# ledger inside its own fetch, so this list names TRIGGERS, not writers --
+# a second ledger path would be the split-brain W5 forbids.
+COLLECT_SOURCES: tuple[str, ...] = (
+    "prices", "fundamentals", "macro", "news", "events",
+)
+
+# The sources whose data cannot be recovered later. A run that loses one of
+# these FAILS, while a run that loses a rebuildable source does not: the exit
+# code has to mean "something irreplaceable was lost", or a scheduler cannot
+# act on it.
+COLLECT_PERISHABLE_SOURCES: tuple[str, ...] = ("news", "events")
+
+# Seconds between provider calls. Providers rate-limit, and a run that gets
+# throttled halfway captures half a day.
+COLLECT_THROTTLE_SECONDS = 0.2
+
+# A ceiling per run so one invocation cannot hang for hours on a large
+# universe. 200 comfortably covers the current 77-ticker portfolio.
+COLLECT_MAX_TICKERS_PER_RUN = 200
+
+# One JSON line per run. This is what makes a SILENT outage visible: a
+# scheduled task that stops firing leaves no error anywhere, but it also
+# leaves no line here, and the coverage gate reads exactly that.
+COLLECT_REPORT_PATH = "data/collection_report.jsonl"
+
+# How many business days back the coverage gate checks. Long enough to catch
+# a scheduler that died last week, short enough that the historical gaps
+# already in the ledger do not fail every future run.
+COLLECT_COVERAGE_WINDOW_BUSINESS_DAYS = 10
+
+# Business days that may be missing inside that window before the gate fails.
+# NOT zero: a provider outage or a market holiday this table does not know
+# about should not break the build. Two is one bad day plus one surprise.
+COLLECT_COVERAGE_MAX_MISSING = 2
+
+
+def _validate_collect_config() -> None:
+    """Import-time guard for the collection contract."""
+    if len(set(COLLECT_SOURCES)) != len(COLLECT_SOURCES):
+        raise ValueError("COLLECT_SOURCES contains a duplicate")
+    if not COLLECT_SOURCES:
+        raise ValueError("a collector with no sources collects nothing")
+    unknown = set(COLLECT_PERISHABLE_SOURCES) - set(COLLECT_SOURCES)
+    if unknown:
+        raise ValueError(
+            f"perishable sources must be collected sources: {sorted(unknown)}"
+        )
+    if "news" not in COLLECT_PERISHABLE_SOURCES:
+        raise ValueError(
+            "news MUST stay perishable: NEWS_LOOKBACK_DAYS is "
+            f"{NEWS_LOOKBACK_DAYS}, so an uncaptured day is gone permanently "
+            "and no OBSERVED event memory for it can ever exist"
+        )
+    if COLLECT_THROTTLE_SECONDS < 0:
+        raise ValueError("the throttle must not be negative")
+    if COLLECT_MAX_TICKERS_PER_RUN < 1:
+        raise ValueError("a run must cover at least one ticker")
+    if COLLECT_COVERAGE_WINDOW_BUSINESS_DAYS < 1:
+        raise ValueError("the coverage window must span at least one day")
+    if COLLECT_COVERAGE_MAX_MISSING < 0:
+        raise ValueError("the missing-day allowance must not be negative")
+    if COLLECT_COVERAGE_MAX_MISSING >= COLLECT_COVERAGE_WINDOW_BUSINESS_DAYS:
+        raise ValueError(
+            "the allowance must be smaller than the window, or a scheduler "
+            "that never runs at all would still pass the coverage gate"
+        )
+
+
+_validate_collect_config()

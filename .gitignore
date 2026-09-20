@@ -23,6 +23,13 @@ data/paper_orders.jsonl
 # tracked observed-only file or a backup that is not git.
 data/event_memory.jsonl
 
+# Collection run artefacts. The report is an operational log of WHEN the
+# collector ran, not evidence for any score, and collect.log is raw stdout.
+# The coverage gate reads the report locally; committing it would mean every
+# machine's schedule history colliding in one file.
+data/collection_report.jsonl
+data/collect.log
+
 # NOT ignored (tracked on purpose): data/raw/ is the W6 append-only
 # provenance ledger and data/feature_registry.jsonl is the M1 registry.
 # "delete derived cache -> rebuild from raw -> reproduce the same result"
