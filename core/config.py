@@ -3232,3 +3232,246 @@ def _validate_decomposition_config() -> None:
 
 
 _validate_decomposition_config()
+
+
+# ---------------------------------------------------------------------------
+# Sprint F7 - Forecast confidence
+# ---------------------------------------------------------------------------
+# "Accounts for sample size, calibration, model agreement, feature
+# completeness, source quality, regime similarity, event similarity, model
+# drift, uncertainty. Confidence is not the same thing as P(up)."
+#
+# CONFIDENCE IS NOT P(up), and it is not a rhetorical caveat - it is MEASURED:
+#
+#     case                        P(up)      N      interval   width
+#     coin flip, huge sample      0.500   1000   [0.47,0.53]   0.062
+#     near-certain, tiny sample   1.000      2   [0.34,1.00]   0.658
+#
+# P(up)=0.500 from 1,000 observations is a HIGH-confidence statement.
+# P(up)=1.000 from two is a NEAR-ZERO-confidence one. They are orthogonal, and
+# a dashboard that renders P(up) as a confidence bar inverts the meaning
+# exactly when it matters most.
+#
+# THIS IS NOT core.score_engine._compute_confidence (W5). That produces a
+# weighted sum over six factors for the SCORE. F7 is confidence in the
+# FORECAST: different object, different inputs, and - measured below - a
+# different aggregation. Both exist; neither may be read as the other, so
+# every payload names the object it describes.
+#
+# THE AGGREGATION IS A LIMITING FACTOR, NOT AN AVERAGE. MEASURED, applying the
+# score's weighted-sum approach to forecast factors:
+#
+#     case                          weighted sum   MIN factor
+#     everything strong                    0.950        0.950
+#     N=2 fatal, rest strong               0.717        0.020
+#     all-inferred sources                 0.807        0.000
+#     uniformly mediocre                   0.550        0.550
+#
+# A forecast built on TWO observations scores 0.717 - HIGHER than a uniformly
+# mediocre one at 0.550. That is exactly backwards: N=2 is the F4 stress cell,
+# the least trustworthy state in the system, and averaging hides it behind
+# five strong factors.
+#
+# Pure MIN is too blunt in the other direction: "good N, weak everything else"
+# scores 0.300, identical to a single weak factor, ignoring the other five.
+# So the weakest factor CAPS the confidence, and the weighted sum may only
+# lower it further. That also matches how the system already reasons - F3, F4
+# and F5 each refuse on the single most fundamental obstacle rather than
+# averaging obstacles together.
+FORECAST_CONFIDENCE_VERSION = "forecast-confidence-v1"
+FORECAST_CONFIDENCE_CONTRACT_VERSION = "forecast-confidence-contract-v1"
+
+# The nine factors the sprint names, in reading order.
+FCONF_SAMPLE_SIZE = "sample_size"
+FCONF_CALIBRATION = "calibration"
+FCONF_MODEL_AGREEMENT = "model_agreement"
+FCONF_FEATURE_COMPLETENESS = "feature_completeness"
+FCONF_SOURCE_QUALITY = "source_quality"
+FCONF_REGIME_SIMILARITY = "regime_similarity"
+FCONF_EVENT_SIMILARITY = "event_similarity"
+FCONF_MODEL_DRIFT = "model_drift"
+FCONF_UNCERTAINTY = "uncertainty"
+
+FORECAST_CONFIDENCE_FACTORS: tuple[str, ...] = (
+    FCONF_SAMPLE_SIZE,
+    FCONF_CALIBRATION,
+    FCONF_MODEL_AGREEMENT,
+    FCONF_FEATURE_COMPLETENESS,
+    FCONF_SOURCE_QUALITY,
+    FCONF_REGIME_SIMILARITY,
+    FCONF_EVENT_SIMILARITY,
+    FCONF_MODEL_DRIFT,
+    FCONF_UNCERTAINTY,
+)
+
+# Which factors can be MEASURED today. MEASURED:
+#   sample_size          YES  F4/F5 samples, scored through select_claim
+#   feature_completeness YES  chart_state fields present vs expected
+#   source_quality       YES  E6 provenance; inferred precision is 0.65
+#   regime_similarity    YES  F5 already computes the agreement share
+#   event_similarity     YES  E6 chart_similarity is retrievable per analog
+#   uncertainty          YES  Wilson interval width
+#   calibration          NO   no fitted M6 map exists
+#   model_agreement      NO   NO_MODEL: one baseline, nothing to agree with
+#   model_drift          NO   nothing is deployed, so nothing can drift
+#
+# The three absent ones all depend on a TRAINED MODEL that does not exist.
+# Scoring them 1.0 ("nothing wrong") or 0.0 ("everything wrong") would both be
+# false; UNMEASURABLE is a third state and is reported as such.
+FORECAST_CONFIDENCE_MEASURABLE: tuple[str, ...] = (
+    FCONF_SAMPLE_SIZE,
+    FCONF_FEATURE_COMPLETENESS,
+    FCONF_SOURCE_QUALITY,
+    FCONF_REGIME_SIMILARITY,
+    FCONF_EVENT_SIMILARITY,
+    FCONF_UNCERTAINTY,
+)
+
+# Weights over the MEASURABLE factors only. These do NOT produce the
+# confidence on their own - they only lower the cap set by the weakest factor.
+# sample_size carries the most because it is the factor that was measured to
+# be fatal when ignored.
+FORECAST_CONFIDENCE_WEIGHTS: dict[str, float] = {
+    FCONF_SAMPLE_SIZE: 0.30,
+    FCONF_UNCERTAINTY: 0.20,
+    FCONF_SOURCE_QUALITY: 0.15,
+    FCONF_EVENT_SIMILARITY: 0.15,
+    FCONF_REGIME_SIMILARITY: 0.10,
+    FCONF_FEATURE_COMPLETENESS: 0.10,
+}
+
+# Factor states. UNMEASURABLE is deliberately distinct from a measured zero,
+# for the same reason F6's NOT_WIRED is: a number claims a measurement that
+# never happened.
+FCONF_STATUS_MEASURED = "MEASURED"
+FCONF_STATUS_UNMEASURABLE = "UNMEASURABLE"
+FCONF_STATUS_UNAVAILABLE = "UNAVAILABLE"   # measurable in principle, absent here
+
+FORECAST_CONFIDENCE_STATUSES: tuple[str, ...] = (
+    FCONF_STATUS_MEASURED,
+    FCONF_STATUS_UNMEASURABLE,
+    FCONF_STATUS_UNAVAILABLE,
+)
+
+# The aggregation. Changing this to an average is the single edit that
+# reintroduces the measured defect above, so the validator refuses it.
+FORECAST_CONFIDENCE_AGGREGATION = "limiting_factor"
+
+FORECAST_CONFIDENCE_AGGREGATION_EVIDENCE = (
+    "MEASURED: a weighted sum rates an N=2 forecast at 0.717, HIGHER than a "
+    "uniformly mediocre one at 0.550. N=2 is the F4 stress cell - the least "
+    "trustworthy state in the system - so averaging inverts the ranking "
+    "exactly where it matters. Pure MIN is too blunt in the other direction "
+    "(good N with everything else weak scores 0.300, ignoring five factors), "
+    "so the weakest factor CAPS the confidence and the weighted sum may only "
+    "lower it."
+)
+
+# Confidence bands, for reading. Boundaries are NOT round guesses: they are
+# the points where the sample-size factor crosses F4's measured claim tiers,
+# so a band change means a claim-tier change rather than a cosmetic one.
+FCONF_BAND_NONE = "NONE"        # nothing here supports a claim
+FCONF_BAND_LOW = "LOW"
+FCONF_BAND_MODERATE = "MODERATE"
+FCONF_BAND_HIGH = "HIGH"
+
+FORECAST_CONFIDENCE_BANDS: tuple[tuple[str, float], ...] = (
+    (FCONF_BAND_NONE, 0.0),
+    (FCONF_BAND_LOW, 0.25),
+    (FCONF_BAND_MODERATE, 0.50),
+    (FCONF_BAND_HIGH, 0.75),
+)
+
+# A confidence value is never published without the factor that bound it.
+# A bare scalar is what lets a reader treat it as P(up).
+FORECAST_CONFIDENCE_REQUIRE_BINDING_FACTOR = True
+
+# Stated on every payload.
+FORECAST_CONFIDENCE_DISCLAIMER = (
+    "confidence describes HOW RELIABLE this forecast is, not how bullish. It "
+    "is not P(up): a probability of 0.50 from 1,000 observations is a "
+    "high-confidence statement, and a probability of 1.00 from 2 observations "
+    "is a near-zero-confidence one."
+)
+
+
+def _validate_forecast_confidence_config() -> None:
+    """Import-time guard for the F7 contract."""
+    if len(set(FORECAST_CONFIDENCE_FACTORS)) != len(FORECAST_CONFIDENCE_FACTORS):
+        raise ValueError("FORECAST_CONFIDENCE_FACTORS contains a duplicate")
+    if len(FORECAST_CONFIDENCE_FACTORS) != 9:
+        raise ValueError(
+            "the sprint names nine factors; dropping one would silently narrow "
+            "what the confidence claims to account for"
+        )
+    unknown = set(FORECAST_CONFIDENCE_MEASURABLE) - set(FORECAST_CONFIDENCE_FACTORS)
+    if unknown:
+        raise ValueError(f"measurable factors must be declared ones: {sorted(unknown)}")
+    if not FORECAST_CONFIDENCE_MEASURABLE:
+        raise ValueError(
+            "no factor is measurable - a confidence built from nothing is not "
+            "a confidence"
+        )
+    if set(FORECAST_CONFIDENCE_WEIGHTS) != set(FORECAST_CONFIDENCE_MEASURABLE):
+        raise ValueError(
+            "weights must cover exactly the MEASURABLE factors: an unmeasurable "
+            "factor with a weight would contribute a number to a measurement "
+            "that never happened"
+        )
+    total = float(sum(FORECAST_CONFIDENCE_WEIGHTS.values()))
+    if abs(total - 1.0) > 1e-9:
+        raise ValueError(
+            f"FORECAST_CONFIDENCE_WEIGHTS must sum to 1.0, got {total!r}"
+        )
+    for name, weight in FORECAST_CONFIDENCE_WEIGHTS.items():
+        if weight <= 0.0:
+            raise ValueError(
+                f"weight for {name!r} must be positive - a zero weight is a "
+                f"factor that is declared but cannot matter"
+            )
+    if FORECAST_CONFIDENCE_WEIGHTS[FCONF_SAMPLE_SIZE] < max(
+        FORECAST_CONFIDENCE_WEIGHTS.values()
+    ):
+        raise ValueError(
+            "sample_size must carry the largest weight: it is the factor "
+            "MEASURED to be fatal when averaged away (N=2 scoring 0.717)"
+        )
+
+    if len(set(FORECAST_CONFIDENCE_STATUSES)) != len(FORECAST_CONFIDENCE_STATUSES):
+        raise ValueError("FORECAST_CONFIDENCE_STATUSES contains a duplicate")
+    if FCONF_STATUS_UNMEASURABLE not in FORECAST_CONFIDENCE_STATUSES:
+        raise ValueError(
+            "UNMEASURABLE must stay distinct from a measured zero: calibration, "
+            "model agreement and drift all need a trained model that does not "
+            "exist, and scoring them 0.0 or 1.0 would both be false"
+        )
+
+    if FORECAST_CONFIDENCE_AGGREGATION != "limiting_factor":
+        raise ValueError(
+            "confidence must aggregate by LIMITING FACTOR. "
+            + FORECAST_CONFIDENCE_AGGREGATION_EVIDENCE
+        )
+    if "MEASURED" not in FORECAST_CONFIDENCE_AGGREGATION_EVIDENCE:
+        raise ValueError(
+            "the aggregation evidence must carry its measurement, or a reader "
+            "cannot tell a finding from a preference"
+        )
+    if not FORECAST_CONFIDENCE_REQUIRE_BINDING_FACTOR:
+        raise ValueError(
+            "a confidence value must always travel with the factor that bound "
+            "it; a bare scalar is what lets a reader treat it as P(up)"
+        )
+
+    bands = [value for _name, value in FORECAST_CONFIDENCE_BANDS]
+    if bands != sorted(bands):
+        raise ValueError("FORECAST_CONFIDENCE_BANDS must ascend")
+    if bands[0] != 0.0:
+        raise ValueError("the lowest band must start at 0.0 so every value lands")
+    if "not P(up)" not in FORECAST_CONFIDENCE_DISCLAIMER:
+        raise ValueError(
+            "the disclaimer must keep saying confidence is not P(up) - that "
+            "conflation is the specific failure this sprint exists to prevent"
+        )
+
+
+_validate_forecast_confidence_config()

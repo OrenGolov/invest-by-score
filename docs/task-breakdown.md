@@ -2761,7 +2761,77 @@ both paths: 45-of-45 reports NO_EFFECT, and 45-of-65 reports NARROWED.
   gate (nothing exercised them), so the gate now calls `_component` with
   smuggled detail on purpose. Suite 1785 pass, 31 gates green.
 
-### F7–F8 — pending
+### F7. Forecast confidence ✓ DONE
+
+Accounts for sample size, calibration, model agreement, feature completeness,
+source quality, regime similarity, event similarity, model drift and
+uncertainty. `core/forecast_confidence.py` plus the F7 block in
+`core/config.py`.
+
+**Confidence is not P(up), and that is MEASURED rather than asserted:**
+
+```
+case                        P(up)      N      interval   width
+coin flip, huge sample      0.500   1000   [0.47,0.53]   0.062
+near-certain, tiny sample   1.000      2   [0.34,1.00]   0.658
+```
+
+`P(up)=0.500` from a thousand observations is a HIGH-confidence statement;
+`P(up)=1.000` from two is a NEAR-ZERO-confidence one. They are orthogonal, so
+a dashboard rendering the probability as a confidence bar inverts the meaning
+exactly where it matters. Verified behaviourally: 1.00-from-2 scores **0.000**
+against 0.50-from-160 at **0.865**, and identical evidence with P(up)=0.05 vs
+0.95 yields identical confidence.
+
+**A weighted sum is the wrong shape, and that was the deciding measurement.**
+`score_engine._compute_confidence` averages six factors for the SCORE. Applied
+to forecast factors:
+
+```
+case                          weighted sum   MIN factor
+everything strong                    0.950        0.950
+N=2 fatal, rest strong               0.717        0.020
+uniformly mediocre                   0.550        0.550
+```
+
+**A forecast built on TWO observations scores 0.717 — higher than a uniformly
+mediocre one at 0.550.** N=2 is the F4 stress cell, the least trustworthy
+state in the system, and averaging buries it behind five strong factors.
+
+**The first fix was also wrong, and the gate caught it.** `min(cap, weighted)`
+made the cap dominate absolutely: one weak factor among two strong ones scored
+**identically** to three weak factors (both 0.300), leaving five of six
+factors decorative. Measured across four candidate shapes, only
+`cap x (0.5 + 0.5 x weighted)` satisfies all three requirements at once —
+weakness registers (0.196 < 0.248), the cap still dominates a fatal factor
+(N=2 -> 0.052), and a strong forecast is not penalised (0.926).
+
+**Three factors are UNMEASURABLE, not zero.** Calibration, model agreement and
+model drift all need a trained model, and `build_joint_forecast` reports
+NO_MODEL. Scoring them 1.0 ("nothing wrong") or 0.0 ("everything wrong") would
+both be false, so they carry no value, no weight, and their own per-factor
+reason. `_factor` discards any value passed to a non-MEASURED row.
+
+**A confidence never travels as a bare scalar.** The binding factor comes with
+it, because a lone number is what invites being read as a probability. On real
+data the design earns its keep immediately: an F5 forecast scored **0.194,
+bound by event_similarity**, where a weighted sum would have published 0.530 —
+the analogs barely cleared the 0.70 retrieval bar, and averaging would have
+hidden that behind perfect feature completeness and regime agreement.
+
+- Acceptance: 38 tests in `tests/test_forecast_confidence.py`; gate
+  `scripts/check_forecast_confidence.py`, verified to FAIL under eleven
+  reinjected invariants — aggregating by weighted sum, by pure MIN, declaring
+  a different aggregation, giving unmeasurable factors a value, marking every
+  factor measurable, dropping a factor, stripping the not-P(up) disclaimer,
+  dropping the binding factor, renaming the assessed object, flattening the
+  sample-size curve, and demoting sample_size from its top weight. Suite 1823
+  pass, 32 gates green.
+
+### F8 — pending
+
+F8, the versioned `ForecastSnapshot` API contract, closes Sprint F.
+
 
 F7 forecast confidence, F8 the versioned `ForecastSnapshot` API contract.
 
