@@ -3475,3 +3475,200 @@ def _validate_forecast_confidence_config() -> None:
 
 
 _validate_forecast_confidence_config()
+
+
+# ---------------------------------------------------------------------------
+# Sprint F8 - The versioned ForecastSnapshot API contract
+# ---------------------------------------------------------------------------
+# One object that carries everything F1-F7 produced, versioned so a consumer
+# can depend on its shape and a stored snapshot can be replayed.
+#
+# MEASURED, a forecast is deterministic - two runs of the same request produce
+# the identical digest (6deb5e9815782497 both times). That is what makes
+# versioning worth doing: a snapshot is an identity that can be compared and
+# replayed, not merely a record that was stored.
+#
+# THREE OF THE SIXTEEN REQUESTED FIELDS HAVE NO HONEST PRODUCER TODAY:
+#
+#   model_versions      NO_MODEL - no trained forecasting model is registered
+#   expected_return     F3 emits zero values for the same reason
+#   model_contributions a NAMING CONFLICT with a measurement F6 already made
+#
+# A field with no producer is ABSENT WITH A REASON, never null and never zero.
+# `expected_return: None` would coalesce to 0.0 under the dashboard's
+# `Number(x ?? 0)` idiom and render as "flat" - the identical hazard F3, F4, F5
+# and F6 each guard against, arriving through the API surface instead.
+#
+# THE model_contributions CONFLICT. F6 MEASURED that contributions cannot be
+# reported: over 4,000 observations with a realistic regime/chart correlation,
+# regime alone +0.064, chart alone +0.067, sum +0.131, ACTUAL joint effect
+# +0.060. The parts overlap and double-count by more than 2x, and F6's
+# validator bars CONTRIBUTION from its vocabulary. So this field carries F6's
+# decomposition UNCHANGED and the contract states that the name is not to be
+# read literally. Renaming F6's output to match the field would undo a
+# measurement; leaving the field out would break the requested contract.
+FORECAST_SNAPSHOT_VERSION = "forecast-snapshot-v1"
+FORECAST_SNAPSHOT_CONTRACT_VERSION = "forecast-snapshot-contract-v1"
+
+# The declared field order. This IS the contract: a consumer may rely on every
+# name being present, and on absence being explicit rather than missing.
+SNAPSHOT_FIELDS: tuple[str, ...] = (
+    "ticker",
+    "as_of",
+    "forecast_version",
+    "model_versions",
+    "horizon",
+    "expected_return",
+    "probability_up",
+    "prediction_interval",
+    "confidence",
+    "regime",
+    "event_context",
+    "feature_digest",
+    "evidence",
+    "model_contributions",
+    "warnings",
+)
+
+# Fields that cannot be produced today, each with the reason. Declared as DATA
+# so a reader learns WHY a field is empty without reading code, and so wiring
+# one later is a deliberate edit here.
+SNAPSHOT_UNAVAILABLE_FIELDS: dict[str, str] = {
+    "model_versions": (
+        "no trained forecasting model is registered - build_joint_forecast "
+        "reports NO_MODEL, and the measured incumbent is a rule-based "
+        "baseline. An empty dict here would claim a model ran and declared "
+        "nothing; ABSENT says no model ran at all"
+    ),
+    "expected_return": (
+        "producing a return forecast needs a trained model, and none exists. "
+        "A value of 0.0 would render as 'flat' in any consumer that coalesces "
+        "nulls, which is a confident claim about a quantity nobody computed"
+    ),
+}
+
+# Per-field status. ABSENT is deliberately distinct from a present-but-empty
+# value, for the same reason F6's NOT_WIRED and F7's UNMEASURABLE are.
+SNAPSHOT_STATUS_PRESENT = "PRESENT"
+SNAPSHOT_STATUS_ABSENT = "ABSENT"        # no producer exists yet
+SNAPSHOT_STATUS_REFUSED = "REFUSED"      # a producer exists and declined here
+
+SNAPSHOT_STATUSES: tuple[str, ...] = (
+    SNAPSHOT_STATUS_PRESENT,
+    SNAPSHOT_STATUS_ABSENT,
+    SNAPSHOT_STATUS_REFUSED,
+)
+
+# Fields whose absence makes the whole snapshot meaningless. A snapshot
+# missing one of these is not a degraded forecast, it is not a forecast.
+SNAPSHOT_REQUIRED_FIELDS: tuple[str, ...] = (
+    "ticker", "as_of", "forecast_version", "horizon",
+)
+
+# The sub-objects that carry their own contract version, so a reader can tell
+# which sprint produced which part of the snapshot and replay against it.
+SNAPSHOT_VERSIONED_PARTS: tuple[str, ...] = (
+    "forecast_version", "confidence", "event_context", "model_contributions",
+)
+
+# `model_contributions` is F6's decomposition verbatim. Stated as data so the
+# reason the name is not literal travels with the contract.
+SNAPSHOT_CONTRIBUTIONS_NOTE = (
+    "this field carries the F6 forecast decomposition UNCHANGED. Despite the "
+    "field name, the components are NOT contributions and do NOT sum to the "
+    "forecast: MEASURED, regime alone +0.064 and chart alone +0.067 sum to "
+    "+0.131 against an ACTUAL joint effect of +0.060, because the filters "
+    "overlap. The decomposition reports what evidence entered, not what "
+    "caused the outcome."
+)
+
+# Warnings a snapshot always surfaces rather than leaving in a sub-object.
+# A consumer that renders only the headline must still see these.
+SNAPSHOT_WARNING_NO_MODEL = "no_trained_model"
+SNAPSHOT_WARNING_ABSENT_FIELDS = "fields_absent"
+SNAPSHOT_WARNING_LOW_CONFIDENCE = "low_confidence"
+SNAPSHOT_WARNING_INFERRED_EVIDENCE = "inferred_evidence"
+SNAPSHOT_WARNING_THIN_SAMPLE = "thin_sample"
+
+SNAPSHOT_WARNINGS: tuple[str, ...] = (
+    SNAPSHOT_WARNING_NO_MODEL,
+    SNAPSHOT_WARNING_ABSENT_FIELDS,
+    SNAPSHOT_WARNING_LOW_CONFIDENCE,
+    SNAPSHOT_WARNING_INFERRED_EVIDENCE,
+    SNAPSHOT_WARNING_THIN_SAMPLE,
+)
+
+# Below this confidence the snapshot carries a low_confidence warning. Set to
+# F7's MODERATE band floor so the warning means "below moderate", a boundary
+# that already has a measured meaning rather than a new invented one.
+SNAPSHOT_LOW_CONFIDENCE_THRESHOLD = 0.50
+
+# Below this observed share the snapshot warns that its evidence was dated by
+# inference. Matches EVENT_FORECAST_MIN_OBSERVED_SHARE so one number governs.
+SNAPSHOT_MIN_OBSERVED_SHARE = 0.50
+
+
+def _validate_forecast_snapshot_config() -> None:
+    """Import-time guard for the F8 contract."""
+    if len(set(SNAPSHOT_FIELDS)) != len(SNAPSHOT_FIELDS):
+        raise ValueError("SNAPSHOT_FIELDS contains a duplicate")
+    if len(SNAPSHOT_FIELDS) != 15:
+        raise ValueError(
+            f"the contract declares 15 fields, got {len(SNAPSHOT_FIELDS)} - "
+            f"adding or dropping one changes what consumers may rely on"
+        )
+    unknown = set(SNAPSHOT_UNAVAILABLE_FIELDS) - set(SNAPSHOT_FIELDS)
+    if unknown:
+        raise ValueError(
+            f"unavailable fields must be declared contract fields: {sorted(unknown)}"
+        )
+    for name, reason in SNAPSHOT_UNAVAILABLE_FIELDS.items():
+        if not reason:
+            raise ValueError(
+                f"{name!r} is declared unavailable with no reason - a consumer "
+                f"cannot tell a gap from an oversight"
+            )
+    missing_required = set(SNAPSHOT_REQUIRED_FIELDS) - set(SNAPSHOT_FIELDS)
+    if missing_required:
+        raise ValueError(f"required fields must be declared: {sorted(missing_required)}")
+    overlap = set(SNAPSHOT_REQUIRED_FIELDS) & set(SNAPSHOT_UNAVAILABLE_FIELDS)
+    if overlap:
+        raise ValueError(
+            f"a field cannot be both REQUIRED and permanently unavailable: "
+            f"{sorted(overlap)}"
+        )
+    missing_parts = set(SNAPSHOT_VERSIONED_PARTS) - set(SNAPSHOT_FIELDS)
+    if missing_parts:
+        raise ValueError(f"versioned parts must be fields: {sorted(missing_parts)}")
+
+    if len(set(SNAPSHOT_STATUSES)) != len(SNAPSHOT_STATUSES):
+        raise ValueError("SNAPSHOT_STATUSES contains a duplicate")
+    if SNAPSHOT_STATUS_ABSENT not in SNAPSHOT_STATUSES:
+        raise ValueError(
+            "ABSENT must stay distinct from a present-but-empty value: "
+            "expected_return = 0.0 would render as 'flat' in a consumer that "
+            "coalesces nulls, which is a confident claim about a quantity "
+            "nobody computed"
+        )
+    if len(set(SNAPSHOT_WARNINGS)) != len(SNAPSHOT_WARNINGS):
+        raise ValueError("SNAPSHOT_WARNINGS contains a duplicate")
+    if SNAPSHOT_WARNING_NO_MODEL not in SNAPSHOT_WARNINGS:
+        raise ValueError(
+            "the no-model warning must stay declared while NO_MODEL is the "
+            "system's actual state"
+        )
+    if not 0.0 < SNAPSHOT_LOW_CONFIDENCE_THRESHOLD < 1.0:
+        raise ValueError("the low-confidence threshold must lie inside (0, 1)")
+    if not 0.0 <= SNAPSHOT_MIN_OBSERVED_SHARE <= 1.0:
+        raise ValueError("the observed-share threshold must lie in [0, 1]")
+
+    for phrase in ("NOT contributions", "do NOT sum", "MEASURED"):
+        if phrase not in SNAPSHOT_CONTRIBUTIONS_NOTE:
+            raise ValueError(
+                f"the contributions note must keep saying {phrase!r}: the "
+                f"field name invites exactly the additive reading F6 measured "
+                f"to be wrong"
+            )
+
+
+_validate_forecast_snapshot_config()

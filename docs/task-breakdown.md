@@ -2828,9 +2828,72 @@ hidden that behind perfect feature completeness and regime agreement.
   sample-size curve, and demoting sample_size from its top weight. Suite 1823
   pass, 32 gates green.
 
-### F8 — pending
+### F8. Forecast API contract ✓ DONE
 
-F8, the versioned `ForecastSnapshot` API contract, closes Sprint F.
+The versioned `ForecastSnapshot`: `core/forecast_snapshot.py` plus the F8
+block in `core/config.py`. Fifteen declared fields, every one always present
+as a key, with absence explicit rather than missing.
+
+**A snapshot is an identity, not just a record.** MEASURED: a forecast is
+deterministic — two runs of the same request digest identically
+(`6deb5e9815782497` both times). `snapshot_digest` makes that usable, so "did
+this forecast change?" is answerable rather than assumed, and the gate proves
+the digest is both stable and content-sensitive.
+
+**Three requested fields have no honest producer, and the contract says so
+per field:**
+
+| field | why |
+|---|---|
+| `model_versions` | NO_MODEL — nothing registered. An empty dict would claim a model ran and declared nothing |
+| `expected_return` | needs a trained model; F3 emits zero values |
+| `model_contributions` | a naming conflict with a measurement F6 already made |
+
+**ABSENT is not zero**, the same hazard every forecast sprint has guarded:
+`expected_return: None` would coalesce to 0.0 under the dashboard's
+`Number(x ?? 0)` idiom and render as "flat" — a confident claim about a
+quantity nobody computed. An absent field carries a STATUS and a REASON,
+never a placeholder, and `_field` discards any value passed to a non-PRESENT
+row.
+
+**The `model_contributions` conflict, resolved without undoing a
+measurement.** F6 MEASURED that contributions cannot be reported: regime
+alone +0.064, chart alone +0.067, sum +0.131, against an ACTUAL joint effect
+of +0.060 — the filters overlap and double-count by more than 2x, and F6's
+validator bars the word outright. Renaming F6's output to fit the field would
+undo that measurement; omitting the field would break the requested contract.
+So the field carries F6's decomposition **unchanged**, declares itself
+non-additive, and states that its name is not to be read literally.
+
+**Composition, not restatement (W5).** F4's interval, F5's event context,
+F6's decomposition, F7's confidence, M1's `feature_surface_digest`, N4's
+regime. The gate verifies `feature_digest` by recomputing M1's value
+independently and comparing — a hex-shaped constant passes every structural
+check, so the value itself is checked.
+
+**Warnings are surfaced at the top level**, because a consumer that renders
+only the headline must still see that there is no trained model, that the
+evidence was inferred, or that the sample was thin. On real data a snapshot
+carried `no_trained_model, fields_absent, low_confidence, inferred_evidence`.
+
+**Two blind spots in my own gate, found by attacking it.** The contributions
+note was checked against the built row, whose reason IS that constant —
+comparing a value to itself, so both moved together; it now checks the
+constant directly. And a faked `feature_digest` (64 hex zeros) passed every
+structural test, so the gate now recomputes M1's digest and compares.
+
+- Acceptance: 43 tests in `tests/test_forecast_snapshot.py`; gate
+  `scripts/check_forecast_snapshot.py`, verified to FAIL under ten reinjected
+  invariants — placeholder values on absent fields, removing the PRESENT-only
+  guard, dropping a contract field, declaring `model_versions` available,
+  claiming the contributions are additive, a content-blind digest, silencing
+  the absent-field warning, faking the feature digest, and unenforced required
+  fields. Suite 1866 pass, 33 gates green.
+
+**Sprint F is complete.** F1 targets, F2 horizons, F3 joint forecast, F4
+conditional, F5 event-conditioned, F6 decomposition, F7 confidence, F8 the
+snapshot contract.
+
 
 
 F7 forecast confidence, F8 the versioned `ForecastSnapshot` API contract.
