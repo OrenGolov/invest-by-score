@@ -219,6 +219,30 @@ def load_ledger(path: str | Path | None = None) -> list[dict]:
     return rows
 
 
+def current_ledger(path: str | Path | None = None) -> list[dict]:
+    """The ledger collapsed to ONE row per forecast, latest state winning.
+
+    The store is append-only (W6): closing a forecast writes a NEW row rather
+    than rewriting the original, so "what did we believe at the time?" stays
+    answerable. That makes `load_ledger` return both the OPEN forecast and its
+    CLOSED successor, and a reader that counts raw rows double-counts every
+    re-run — MEASURED, three passes over 12 forecasts produced 36 rows and a
+    scoreboard claiming 8 scored from 4 actual forecasts.
+
+    Supersede-on-read, the same rule the raw store already applies.
+    """
+    latest: dict[str, dict] = {}
+    for row in load_ledger(path):
+        key = str(row.get("forecast_id") or "")
+        if not key:
+            continue
+        current = latest.get(key)
+        # CLOSED supersedes OPEN; otherwise the later row wins.
+        if current is None or current.get("state") != CLOSURE_CLOSED:
+            latest[key] = row
+    return list(latest.values())
+
+
 def ledger_row_problems(row: dict) -> list[str]:
     """Validate a ledger row before it is written."""
     problems: list[str] = []

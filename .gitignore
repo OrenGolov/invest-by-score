@@ -30,6 +30,15 @@ data/event_memory.jsonl
 data/collection_report.jsonl
 data/collect.log
 
+# The forecast ledger and its rotation cursor. The ledger is a local record of
+# what THIS machine forecast and how those forecasts scored; committing it
+# would mean every machine's scoreboard colliding in one file, and it grows
+# ~24 MB/year at full portfolio coverage. It is rebuildable in the sense that
+# re-running scripts/run_forecasts.py re-derives the same rows from the same
+# memories — but the SCOREBOARD it accumulates is this machine's history.
+data/forecast_ledger.jsonl
+data/collect_cursor.json
+
 # The NEWS ledger is the one W6 exception, and it is deliberate.
 #
 # MEASURED: news writes ~208 KB per ticker per day, so the 77-ticker universe

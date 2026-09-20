@@ -3038,6 +3038,25 @@ NEWS_PROVIDER_DAILY_LIMIT = 100
 
 COLLECT_NEWS_SKIP_SECTORLESS = True
 
+# Sector-less tickers that ARE worth their call anyway, by explicit decision.
+#
+# SOXX (semiconductors) and CIBR (cyber security) are NARROW THEMATIC funds:
+# their news is about one industry, so a headline is closer to a sector event
+# than to broad market commentary. The portfolio also holds many of their
+# constituents, so what moves them tends to move real holdings.
+#
+# This is an operator's judgement, not a measurement, and it is recorded as
+# such. VOO stays skipped because it tracks the whole S&P 500 — its "news" is
+# the market itself, which is what E5 attribution already calls confounded.
+# NASA stays skipped because the repo carries no metadata saying what it is:
+# skipping an unknown costs one call a day, while tracking one on a guess
+# feeds the store memories nobody can interpret.
+#
+# Their memories remain honestly labelled: E5 will mark a fund reaction
+# CONFOUNDED if that is what it measures, and F5 reports the observed share,
+# so tracking them adds evidence without weakening any claim built on it.
+COLLECT_NEWS_TRACK_ANYWAY: tuple[str, ...] = ("SOXX", "CIBR")
+
 # Tickers per news run. MEASURED against the 100/day ceiling: 40 covers all 73
 # sector-mapped holdings in two runs and leaves 60 calls spare for retries and
 # ad-hoc work -- the margin whose absence produced today's 429.
@@ -3095,6 +3114,13 @@ def _validate_collect_config() -> None:
         )
     if not COLLECT_NEWS_CURSOR_PATH.startswith("data/"):
         raise ValueError("the rotation cursor belongs under data/")
+    if len(set(COLLECT_NEWS_TRACK_ANYWAY)) != len(COLLECT_NEWS_TRACK_ANYWAY):
+        raise ValueError("COLLECT_NEWS_TRACK_ANYWAY contains a duplicate")
+    if not COLLECT_NEWS_SKIP_SECTORLESS and COLLECT_NEWS_TRACK_ANYWAY:
+        raise ValueError(
+            "COLLECT_NEWS_TRACK_ANYWAY names exceptions to a skip that is "
+            "disabled — one of the two settings is not doing what its name says"
+        )
     if COLLECT_COVERAGE_MAX_MISSING >= COLLECT_COVERAGE_WINDOW_BUSINESS_DAYS:
         raise ValueError(
             "the allowance must be smaller than the window, or a scheduler "

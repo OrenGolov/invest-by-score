@@ -3075,6 +3075,60 @@ cannot be tested through it.
   maturity locally, and calibrating on any sample size. Suite 1961 pass,
   35 gates green.
 
+### L1b. Wiring the loop ✓ DONE
+
+L1 built the ledger and the closure machinery; MEASURED, **nothing wrote to
+it** — `record_forecast` had no caller, and no production path built a
+forecast at all. The whole F3–F8 engine was exercised only by gates and
+tests. `scripts/run_forecasts.py` closes that gap: record, close, report.
+
+**Refusals ARE recorded, and that reverses my first instinct.** MEASURED over
+40 real probes, 75% of forecasts refuse (30 INSUFFICIENT, 10 INTERVAL), and
+recording only the 25% that make a claim looked like sensible economy. It is
+not: the report would then read `scored_share = 100%` while thirty refusals
+went unseen — precisely the gaming L1 exists to expose, arriving by the back
+door. Not refusing to SCORE, but refusing to RECORD. The ledger's job is the
+denominator. A refusal row costs ~325 bytes; the full portfolio over 252
+sessions is ~24 MB/year.
+
+**A real double-counting bug, found by running it twice.** The ledger is
+append-only (W6), so closing a forecast writes a NEW row rather than
+rewriting the original — that is what keeps "what did we believe at the
+time?" answerable. But the reader counted raw rows, so three passes over 12
+forecasts produced **36 rows and a scoreboard claiming 8 scored from 4**.
+Fixed with `current_ledger`, supersede-on-read — the same rule the raw store
+already applies. CLOSED supersedes OPEN regardless of file order, because a
+re-record after a close appends an OPEN row LAST and a naive "last row wins"
+reader would resurrect it.
+
+**Verified end to end**: 12 forecasts recorded over 3 tickers x 4 horizons,
+all 12 matured and closed, scoreboard `4 scored / 8 refused / coverage 33% /
+reliable=False`. A second run records and closes nothing. The 33% coverage
+correctly refuses to call that error figure trustworthy.
+
+- Acceptance: 5 new tests (48 in `tests/test_outcome_closure.py`); the L1 gate
+  gained a supersede-on-read guard, verified to FAIL when the collapse is
+  removed and when it degrades to "last row wins".
+
+### SOXX and CIBR: news tracking, by request ✓ DONE
+
+`COLLECT_NEWS_TRACK_ANYWAY` names sector-less tickers worth their call anyway.
+SOXX (semiconductors) and CIBR (cyber security) are NARROW THEMATIC funds:
+their news concerns one industry, so a headline is closer to a sector event
+than to market commentary, and the portfolio holds many of their
+constituents. This is an operator's judgement, recorded as such rather than
+dressed as a measurement.
+
+VOO stays skipped — it tracks the whole S&P 500, so its "news" is the market
+itself, which E5 attribution already calls confounded. NASA stays skipped
+because the repo carries no metadata saying what it is; skipping an unknown
+costs one call a day, while tracking one on a guess feeds the store memories
+nobody can interpret. **Worth resolving: NASA has a ticker and nothing else
+in `data/universe.jsonl`.**
+
+Eligible pool 73 → 75; still 2 runs to cover all at a batch of 40, 60 calls
+spare against the 100/day ceiling.
+
 ### L2–L? — pending
 
 ---

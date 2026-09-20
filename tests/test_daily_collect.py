@@ -22,6 +22,7 @@ from unittest.mock import patch
 import scripts.daily_collect as daily_collect
 from core.config import (
     COLLECT_COVERAGE_MAX_MISSING,
+    COLLECT_NEWS_TRACK_ANYWAY,
     COLLECT_NEWS_BATCH_SIZE,
     NEWS_PROVIDER_DAILY_LIMIT,
     COLLECT_COVERAGE_WINDOW_BUSINESS_DAYS,
@@ -45,6 +46,12 @@ from scripts.daily_collect import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def PORTFOLIO_TICKERS_FIXTURE():
+    from fetch_data import PORTFOLIO_TICKERS
+
+    return PORTFOLIO_TICKERS
 
 
 class PerishabilityTests(unittest.TestCase):
@@ -323,24 +330,42 @@ class QuotaAwareNewsTests(unittest.TestCase):
     def test_the_batch_stays_inside_the_daily_ceiling(self):
         self.assertLessEqual(COLLECT_NEWS_BATCH_SIZE, NEWS_PROVIDER_DAILY_LIMIT)
 
-    def test_sector_less_tickers_are_skipped(self):
+    def test_sector_less_tickers_are_skipped_unless_allow_listed(self):
         from core.market_context import sector_for
         from fetch_data import PORTFOLIO_TICKERS
 
         batch, skipped, _start = news_batch(list(PORTFOLIO_TICKERS))
+        tracked = {t.upper() for t in COLLECT_NEWS_TRACK_ANYWAY}
         funds = [t for t in PORTFOLIO_TICKERS if sector_for(t) is None]
         self.assertTrue(funds, "fixture expects the portfolio to hold funds")
         for fund in funds:
-            self.assertIn(fund, skipped, fund)
-            self.assertNotIn(fund, batch, fund)
+            if fund.upper() in tracked:
+                self.assertNotIn(fund, skipped, fund)
+            else:
+                self.assertIn(fund, skipped, fund)
+                self.assertNotIn(fund, batch, fund)
 
-    def test_the_named_etfs_are_excluded(self):
-        from fetch_data import PORTFOLIO_TICKERS
+    def test_the_broad_index_fund_stays_excluded(self):
+        # VOO tracks the whole S&P 500: its "news" IS the market, which E5
+        # attribution already calls confounded.
+        _batch, skipped, _start = news_batch(list(PORTFOLIO_TICKERS_FIXTURE()))
+        self.assertIn("VOO", skipped)
 
-        batch, skipped, _start = news_batch(list(PORTFOLIO_TICKERS))
-        for etf in ("VOO", "SOXX", "CIBR"):
-            self.assertIn(etf, skipped, etf)
-            self.assertNotIn(etf, batch, etf)
+    def test_the_allow_listed_thematic_funds_are_tracked(self):
+        # SOXX and CIBR track ONE industry each, so a headline is closer to a
+        # sector event than to broad commentary, and the portfolio holds many
+        # of their constituents.
+        _batch, skipped, _start = news_batch(list(PORTFOLIO_TICKERS_FIXTURE()))
+        for etf in COLLECT_NEWS_TRACK_ANYWAY:
+            self.assertNotIn(etf, skipped, etf)
+
+    def test_the_allow_list_only_names_sector_less_tickers(self):
+        # An allow-list entry that already HAS a sector would be a no-op
+        # pretending to be a decision.
+        from core.market_context import sector_for
+
+        for ticker in COLLECT_NEWS_TRACK_ANYWAY:
+            self.assertIsNone(sector_for(ticker), ticker)
 
     def test_a_short_list_is_not_batched(self):
         batch, _skipped, start = news_batch(["AAPL", "MSFT"])

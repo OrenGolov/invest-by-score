@@ -70,6 +70,7 @@ from core.config import (  # noqa: E402
     COLLECT_NEWS_BATCH_SIZE,
     COLLECT_NEWS_CURSOR_PATH,
     COLLECT_NEWS_SKIP_SECTORLESS,
+    COLLECT_NEWS_TRACK_ANYWAY,
     COLLECT_PERISHABLE_SOURCES,
     COLLECT_REPORT_PATH,
     COLLECT_SOURCES,
@@ -139,8 +140,16 @@ def news_batch(tickers) -> tuple[list[str], list[str], int]:
     skipped: list[str] = []
     eligible = list(tickers)
     if COLLECT_NEWS_SKIP_SECTORLESS:
-        skipped = [t for t in eligible if sector_for(t) is None]
-        eligible = [t for t in eligible if sector_for(t) is not None]
+        # ...except the narrow thematic funds named in the allow-list. SOXX
+        # and CIBR track one industry each, so their news is closer to a
+        # sector event than to market commentary, and the portfolio holds
+        # many of their constituents.
+        tracked = {t.upper() for t in COLLECT_NEWS_TRACK_ANYWAY}
+        skipped = [
+            t for t in eligible
+            if sector_for(t) is None and t.upper() not in tracked
+        ]
+        eligible = [t for t in eligible if t not in set(skipped)]
 
     eligible.sort()
     if not eligible or len(eligible) <= COLLECT_NEWS_BATCH_SIZE:

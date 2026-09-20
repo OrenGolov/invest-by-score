@@ -61,6 +61,7 @@ from core.outcome_closure import (  # noqa: E402
     close_forecast,
     closure_problems,
     closure_report,
+    current_ledger,
     evaluate_calibration,
     ledger_row_problems,
     load_ledger,
@@ -302,6 +303,49 @@ def main() -> int:
         failures.append("an unknown claim tier was accepted into the ledger")
     except OutcomeClosureError:
         pass
+
+    # ---------------------------------------------------------------- 8b
+    # SUPERSEDE-ON-READ. The ledger is append-only, so closing a forecast
+    # writes a NEW row rather than rewriting the original — that is what keeps
+    # "what did we believe at the time?" answerable. A reader that counts raw
+    # rows therefore double-counts every re-run: MEASURED, three passes over
+    # 12 forecasts produced 36 rows and a scoreboard claiming 8 scored from 4.
+    with tempfile.TemporaryDirectory() as folder:
+        ledger = Path(folder) / "supersede.jsonl"
+        opened = _row("POINT", value=0.62)
+        record_forecast(opened, ledger)
+        closed_row = close_forecast(opened, {
+            "horizons": {"20d": {"forward_return": 0.02}},
+            "matured_horizons": ["20d"], "pending_horizons": [],
+        })
+        with ledger.open("a", encoding="utf-8") as handle:
+            import json as _json
+
+            line = _json.dumps(closed_row, sort_keys=True, default=str)
+            handle.write(line + chr(10))
+            handle.write(line + chr(10))
+            # An OPEN row appended AFTER the closure. A "last row wins" reader
+            # would resurrect it and score the forecast a second time, so the
+            # collapse must prefer CLOSED regardless of file order — which is
+            # the real case whenever a re-record follows a close.
+            handle.write(
+                _json.dumps(opened, sort_keys=True, default=str) + chr(10)
+            )
+
+        if len(load_ledger(ledger)) < 3:
+            failures.append("the supersede fixture did not append its rows")
+        collapsed = current_ledger(ledger)
+        if len(collapsed) != 1:
+            failures.append(
+                f"current_ledger returned {len(collapsed)} rows for ONE "
+                f"forecast — a reader that does not collapse double-counts "
+                f"every re-run, and the scoreboard inflates with it"
+            )
+        elif collapsed[0].get("state") != CLOSURE_CLOSED:
+            failures.append(
+                "the collapsed view kept the OPEN row over its CLOSED "
+                "successor — a closed forecast would be scored again"
+            )
 
     # ---------------------------------------------------------------- 9
     thin = evaluate_calibration(

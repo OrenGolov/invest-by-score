@@ -7,6 +7,7 @@ it came from.
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -36,6 +37,7 @@ from core.outcome_closure import (
     closure_problems,
     closure_report,
     closure_state,
+    current_ledger,
     evaluate_calibration,
     forecast_id,
     ledger_row_problems,
@@ -398,6 +400,62 @@ class ReportTests(unittest.TestCase):
         report = closure_report([refused_row()])
         self.assertIsNone(report["mean_brier"])
         self.assertEqual(closure_problems(report), [])
+
+
+class SupersedeOnReadTests(unittest.TestCase):
+    """The ledger is append-only; the READER collapses to the latest state.
+
+    Closing a forecast writes a NEW row rather than rewriting the original —
+    that is what keeps "what did we believe at the time?" answerable. A reader
+    counting raw rows double-counts every re-run: MEASURED, three passes over
+    12 forecasts produced 36 rows and a scoreboard claiming 8 scored from 4.
+    """
+
+    def _ledger(self, folder):
+        ledger = Path(folder) / "l.jsonl"
+        opened = row("POINT", value=0.62)
+        record_forecast(opened, ledger)
+        closed = close_forecast(opened, MATURED_LABELS)
+        with ledger.open("a", encoding="utf-8") as handle:
+            line = json.dumps(closed, sort_keys=True, default=str)
+            handle.write(line + chr(10))
+            handle.write(line + chr(10))
+        return ledger, opened, closed
+
+    def test_the_raw_ledger_keeps_every_row(self):
+        with tempfile.TemporaryDirectory() as folder:
+            ledger, _opened, _closed = self._ledger(folder)
+            self.assertEqual(len(load_ledger(ledger)), 3)
+
+    def test_the_collapsed_view_holds_one_row_per_forecast(self):
+        with tempfile.TemporaryDirectory() as folder:
+            ledger, _opened, _closed = self._ledger(folder)
+            self.assertEqual(len(current_ledger(ledger)), 1)
+
+    def test_closed_supersedes_open_whatever_the_file_order(self):
+        # A re-record after a close appends an OPEN row LAST; a naive
+        # "last row wins" reader would resurrect it and score twice.
+        with tempfile.TemporaryDirectory() as folder:
+            ledger, opened, _closed = self._ledger(folder)
+            with ledger.open("a", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps(opened, sort_keys=True, default=str) + chr(10)
+                )
+            collapsed = current_ledger(ledger)
+            self.assertEqual(len(collapsed), 1)
+            self.assertEqual(collapsed[0]["state"], CLOSURE_CLOSED)
+
+    def test_an_empty_ledger_collapses_to_nothing(self):
+        with tempfile.TemporaryDirectory() as folder:
+            self.assertEqual(current_ledger(Path(folder) / "absent.jsonl"), [])
+
+    def test_rows_without_an_id_are_ignored(self):
+        with tempfile.TemporaryDirectory() as folder:
+            ledger = Path(folder) / "l.jsonl"
+            ledger.write_text(
+                json.dumps({"ticker": "NVDA"}) + chr(10), encoding="utf-8"
+            )
+            self.assertEqual(current_ledger(ledger), [])
 
 
 if __name__ == "__main__":
