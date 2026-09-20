@@ -84,6 +84,7 @@ def record_run(tickers, as_of: str, dry_run: bool, path: Path | None) -> dict:
     from core.event_memory import find_analogs, load_memory_objects
     from core.forecast_confidence import assess_event_forecast
     from core.forecast_event import build_event_forecast
+    from core.forecast_snapshot import forecast_versions
 
     memories = load_memory_objects()
     if not memories:
@@ -147,17 +148,27 @@ def record_run(tickers, as_of: str, dry_run: bool, path: Path | None) -> dict:
             confidence = assess_event_forecast(forecast, similarities=similarities)
 
             claim = forecast.get("claim") or "INSUFFICIENT"
+            stages = forecast.get("stages") or {}
+            matches = stages.get("matches") or {}
             row = build_ledger_row(
                 ticker, as_of, horizon, TARGET,
                 claim=claim,
                 # The shape rule: a value only where the claim carried one.
                 value=forecast.get("value") if claim == "POINT" else None,
                 interval=forecast.get("interval"),
-                direction=(forecast.get("stages") or {})
-                .get("regime", {})
-                .get("direction"),
+                direction=(stages.get("regime") or {}).get("direction"),
                 samples=int(forecast.get("samples") or 0),
                 confidence=confidence.get("confidence"),
+                forecast_version=forecast_versions(),
+                # L2's POINT-IN-TIME dimensions, captured HERE because they
+                # cannot be recovered later. MEASURED, 7 of 8 retrieval probes
+                # returned a different analog count as the store grew, and a
+                # recomputed regime depends on whichever classifier version
+                # runs at closing time.
+                regime=(state or {}).get("market_regime"),
+                event_type=event["event_type"],
+                observed_share=matches.get("observed_share"),
+                volatility=(state or {}).get("volatility"),
             )
             if claim == "INSUFFICIENT":
                 refused += 1
@@ -236,12 +247,50 @@ def main() -> int:
     parser.add_argument("--close-only", action="store_true")
     parser.add_argument("--report", action="store_true",
                         help="print the scoreboard and exit")
+    parser.add_argument("--performance", default="",
+                        help="print the L2 breakdown for one dimension and exit")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--ledger", default="")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.WARNING, format="%(message)s")
     path = Path(args.ledger) if args.ledger else None
+
+    if args.performance:
+        from core.config import PERFORMANCE_DIMENSIONS  # noqa: PLC0415
+        from core.performance_ledger import (
+            breakdown,
+            render_breakdown,
+        )
+
+        if args.performance not in PERFORMANCE_DIMENSIONS:
+            print(f"unknown dimension {args.performance!r}")
+            print(f"known: {', '.join(PERFORMANCE_DIMENSIONS)}")
+            return 2
+        closed = [
+            r for r in current_ledger(path) if r.get("state") == CLOSURE_CLOSED
+        ]
+        table = breakdown(closed, args.performance)
+        print(f"performance by {args.performance} [{table['forecasts']} closed]")
+        print(f"  {'level':<20} {'n':>5} {'scored':>7} {'brier':>8} {'cover':>7}")
+        for row in render_breakdown(table):
+            brier = f"{row['mean_brier']:.4f}" if row["mean_brier"] is not None else "-"
+            cover = (
+                f"{row['coverage_rate']:.0%}"
+                if row["coverage_rate"] is not None
+                else "-"
+            )
+            print(
+                f"  {row['level']:<20} {row['forecasts']:>5} {row['scored']:>7} "
+                f"{brier:>8} {cover:>7}"
+                + ("" if row["sufficient"] else "   (thin)")
+            )
+        if table["thin_levels"]:
+            print(
+                f"  {len(table['thin_levels'])} level(s) below the "
+                f"{table['min_cell']}-forecast floor publish no metric."
+            )
+        return 0
 
     if args.report:
         rows = current_ledger(path)

@@ -4077,3 +4077,187 @@ def _validate_closure_config() -> None:
 
 
 _validate_closure_config()
+
+
+# ---------------------------------------------------------------------------
+# Sprint L2 - Forecast performance ledger
+# ---------------------------------------------------------------------------
+# Performance measured by ticker, sector, regime, horizon, event type, source,
+# model, confidence bucket and volatility regime.
+#
+# ONLY TWO OF THE NINE EXIST ON A LEDGER ROW TODAY (ticker, horizon); two more
+# are derivable (sector from the ticker, a confidence bucket from the value);
+# and FOUR are missing entirely: regime, event type, source and volatility
+# regime.
+#
+# THE MISSING FOUR ARE POINT-IN-TIME FACTS AND CANNOT BE RECOVERED LATER.
+# regime and volatility regime can be recomputed from bars, but the forecast
+# was MADE under a specific classifier reading - recomputing later risks a
+# different answer if the classifier version moved, silently re-attributing
+# past performance. Event type depends on the event set at as_of, and news is
+# gone after NEWS_LOOKBACK_DAYS. Source - the observed/inferred mix of the
+# analogs - depends on a retrieval against a store that grows.
+#
+# MEASURED, comparing retrieval against half the store versus the full store
+# across 8 probes: 7 of 8 returned a DIFFERENT analog count (14->19, 14->20,
+# 16->24, 0->1, 3->4, 9->16, 0->1). So "what evidence did this forecast rest
+# on?" is answerable only if it was written down when the forecast was made.
+# L2 captures these AT RECORD TIME.
+#
+# THE DECIDING MEASUREMENT: nine dimensions cut the data to nothing.
+#
+#   ticker 77 | sector 11 | regime 5 | horizon 4 | event_type 10
+#   source 2  | model 1   | confidence_bucket 4  | volatility_regime 3
+#
+#   full cross-product : 4,065,600 cells
+#   forecasts per year :        77,616
+#   average per cell   :        0.0191
+#
+# A full cross-tab is EMPTY ALMOST EVERYWHERE. So a breakdown is MARGINAL -
+# one dimension at a time - and every cell faces the same F4 floors the
+# forecasts themselves face. A performance number from 3 forecasts is the F4
+# stress cell wearing an analytics hat.
+PERFORMANCE_LEDGER_VERSION = "performance-ledger-v1"
+PERFORMANCE_CONTRACT_VERSION = "performance-contract-v1"
+
+# The nine dimensions, in reading order.
+PERF_TICKER = "ticker"
+PERF_SECTOR = "sector"
+PERF_REGIME = "regime"
+PERF_HORIZON = "horizon"
+PERF_EVENT_TYPE = "event_type"
+PERF_SOURCE = "source"
+PERF_MODEL = "model"
+PERF_CONFIDENCE_BUCKET = "confidence_bucket"
+PERF_VOLATILITY_REGIME = "volatility_regime"
+
+PERFORMANCE_DIMENSIONS: tuple[str, ...] = (
+    PERF_TICKER,
+    PERF_SECTOR,
+    PERF_REGIME,
+    PERF_HORIZON,
+    PERF_EVENT_TYPE,
+    PERF_SOURCE,
+    PERF_MODEL,
+    PERF_CONFIDENCE_BUCKET,
+    PERF_VOLATILITY_REGIME,
+)
+
+# Dimensions that MUST be written onto the ledger row when the forecast is
+# made, because they cannot be reconstructed afterwards. Declared as data so a
+# future reader can see which facts are perishable and why.
+PERFORMANCE_CAPTURED_AT_RECORD: tuple[str, ...] = (
+    PERF_REGIME,
+    PERF_EVENT_TYPE,
+    PERF_SOURCE,
+    PERF_VOLATILITY_REGIME,
+)
+
+# Dimensions derived from what the row already carries. Deriving is safe here
+# because the inputs are immutable: a ticker's sector mapping and a recorded
+# confidence value do not change retroactively.
+PERFORMANCE_DERIVED: tuple[str, ...] = (PERF_SECTOR, PERF_CONFIDENCE_BUCKET)
+
+# Breakdowns are MARGINAL: one dimension at a time. A full cross-product is
+# 4,065,600 cells against 77,616 forecasts a year. Setting this True would
+# produce a table that is empty almost everywhere while looking thorough.
+PERFORMANCE_CROSS_TABULATE = False
+
+PERFORMANCE_SPARSITY_EVIDENCE = (
+    "MEASURED: the nine dimensions cross-multiply to 4,065,600 cells against "
+    "77,616 forecasts a year - 0.0191 per cell. F4's floors are 8 for an "
+    "interval and 40 for a point estimate, so a full cross-tab is empty "
+    "almost everywhere while appearing thorough."
+)
+
+# Confidence buckets, from F7's reading bands. Reused rather than re-cut, so a
+# bucket boundary means the same thing in the forecast and in its post-mortem.
+PERFORMANCE_CONFIDENCE_BUCKETS: tuple[tuple[str, float], ...] = (
+    ("NONE", 0.0),
+    ("LOW", 0.25),
+    ("MODERATE", 0.50),
+    ("HIGH", 0.75),
+)
+
+# Volatility bands for the volatility-regime dimension, on annualized vol.
+# Boundaries drawn from the E6 similarity scale's working range rather than
+# invented: 0.15 and 0.35 separate calm, normal and turbulent.
+PERFORMANCE_VOLATILITY_BANDS: tuple[tuple[str, float], ...] = (
+    ("CALM", 0.0),
+    ("NORMAL", 0.15),
+    ("TURBULENT", 0.35),
+)
+
+# A cell below this many SCORED forecasts reports its count and refuses a
+# metric. Aligned with F4's INTERVAL floor so one sample-size policy governs
+# the forecast and its evaluation alike.
+PERFORMANCE_MIN_CELL = 8
+
+# Every breakdown carries L1's coverage rule. Refusing remains the cheapest
+# way to look accurate, and a per-cell error is no more readable without its
+# refusal count than a global one is.
+PERFORMANCE_REPORT_COVERAGE = True
+
+
+def _validate_performance_config() -> None:
+    """Import-time guard for the L2 contract."""
+    if len(set(PERFORMANCE_DIMENSIONS)) != len(PERFORMANCE_DIMENSIONS):
+        raise ValueError("PERFORMANCE_DIMENSIONS contains a duplicate")
+    if len(PERFORMANCE_DIMENSIONS) != 9:
+        raise ValueError(
+            "the sprint names nine dimensions; dropping one silently narrows "
+            "what performance is measured across"
+        )
+    for group, label in (
+        (PERFORMANCE_CAPTURED_AT_RECORD, "PERFORMANCE_CAPTURED_AT_RECORD"),
+        (PERFORMANCE_DERIVED, "PERFORMANCE_DERIVED"),
+    ):
+        unknown = set(group) - set(PERFORMANCE_DIMENSIONS)
+        if unknown:
+            raise ValueError(f"{label} names undeclared dimensions: {sorted(unknown)}")
+    overlap = set(PERFORMANCE_CAPTURED_AT_RECORD) & set(PERFORMANCE_DERIVED)
+    if overlap:
+        raise ValueError(
+            f"a dimension cannot be both captured and derived: {sorted(overlap)}"
+        )
+    for name in (PERF_REGIME, PERF_EVENT_TYPE, PERF_SOURCE, PERF_VOLATILITY_REGIME):
+        if name not in PERFORMANCE_CAPTURED_AT_RECORD:
+            raise ValueError(
+                f"{name!r} must be captured at record time: it is a "
+                f"point-in-time fact, and MEASURED, 7 of 8 retrieval probes "
+                f"returned a different analog set as the store grew"
+            )
+
+    if PERFORMANCE_CROSS_TABULATE:
+        raise ValueError(
+            "breakdowns must stay MARGINAL. " + PERFORMANCE_SPARSITY_EVIDENCE
+        )
+    if "MEASURED" not in PERFORMANCE_SPARSITY_EVIDENCE:
+        raise ValueError(
+            "the sparsity evidence must carry its measurement, or a reader "
+            "cannot tell a finding from a preference"
+        )
+
+    for bands, label in (
+        (PERFORMANCE_CONFIDENCE_BUCKETS, "PERFORMANCE_CONFIDENCE_BUCKETS"),
+        (PERFORMANCE_VOLATILITY_BANDS, "PERFORMANCE_VOLATILITY_BANDS"),
+    ):
+        values = [value for _name, value in bands]
+        if values != sorted(values):
+            raise ValueError(f"{label} must ascend")
+        if values[0] != 0.0:
+            raise ValueError(f"{label} must start at 0.0 so every value lands")
+        if len({name for name, _ in bands}) != len(bands):
+            raise ValueError(f"{label} contains a duplicate name")
+
+    if PERFORMANCE_MIN_CELL < 2:
+        raise ValueError("a cell needs more than one observation to mean anything")
+    if not PERFORMANCE_REPORT_COVERAGE:
+        raise ValueError(
+            "coverage must travel with every per-cell error, for the same "
+            "reason it travels with the global one: refusing is the cheapest "
+            "way to look accurate"
+        )
+
+
+_validate_performance_config()

@@ -118,6 +118,10 @@ def build_ledger_row(
     confidence: float | None = None,
     forecast_version: dict | None = None,
     snapshot_digest: str | None = None,
+    regime: str | None = None,
+    event_type: str | None = None,
+    observed_share: float | None = None,
+    volatility: float | None = None,
 ) -> dict:
     """One forecast, recorded at the moment it was made.
 
@@ -146,6 +150,14 @@ def build_ledger_row(
         "samples": int(samples),
         "confidence": confidence,
         "state": CLOSURE_OPEN,
+        # L2's POINT-IN-TIME dimensions, captured here because they cannot be
+        # recovered later. MEASURED, 7 of 8 retrieval probes returned a
+        # different analog set as the store grew, and a recomputed regime
+        # depends on whichever classifier version runs at closing time.
+        "regime": regime,
+        "event_type": event_type,
+        "observed_share": observed_share,
+        "volatility": volatility,
         "ledger_version": FORECAST_LEDGER_VERSION,
         "forecast_version": forecast_version or {},
         "snapshot_digest": snapshot_digest,
@@ -382,17 +394,29 @@ def score_forecast(row: dict, outcome: dict) -> dict:
                 "method": method, "scored": False,
                 "reason": "an INTERVAL forecast with no bounds cannot be scored",
             }
-        # An interval claimed a RANGE, so the honest question is whether the
-        # outcome fell inside it — not how far a point estimate missed by.
-        covered = float(low) <= actual <= float(high)
+        # COVERAGE IS A GROUP PROPERTY, and treating it per forecast was an
+        # error caught by running L2 over real data: an interval on P(up)
+        # claims the RATE at which such setups rise lies in [lo, hi], while a
+        # single outcome is 0 or 1. A binary outcome can NEVER fall inside a
+        # probability range, so per-forecast coverage was False 42 times out
+        # of 42 — uninformative by construction rather than merely wrong.
+        #
+        # So this row records what the group needs (the interval and the
+        # realised outcome) and scores the forecast by the BRIER OF ITS
+        # MIDPOINT, which is the usable point reading the interval implies.
+        # `cell_coverage` in L2 then asks the question that IS answerable:
+        # did the realised RATE across the cell land inside the interval?
+        midpoint = (float(low) + float(high)) / 2.0
         return {
             "method": method,
             "scored": True,
             "actual": actual,
             "lower": float(low),
             "upper": float(high),
-            "covered": covered,
+            "midpoint": round(midpoint, 6),
+            "brier": round((midpoint - actual) ** 2, 6),
             "width": round(float(high) - float(low), 6),
+            "coverage_is_group_property": True,
             "reason": "",
         }
 

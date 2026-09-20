@@ -96,12 +96,29 @@ def main() -> int:
         _row("INTERVAL", interval={"lower": 0.3, "upper": 0.8}), _UP
     )
     if interval.get("method") != SCORE_METHOD_COVERAGE:
+        failures.append("an INTERVAL claim was not scored by the coverage method")
+    # COVERAGE IS A GROUP PROPERTY. An interval on P(up) claims the RATE at
+    # which such setups rise; a single binary outcome can never fall inside a
+    # probability range. MEASURED over real data, per-forecast coverage was
+    # False 42 times out of 42 — uninformative by construction. The row now
+    # records what the group needs and scores the midpoint.
+    if "covered" in interval:
         failures.append(
-            "an INTERVAL claim was not scored by COVERAGE — Brier on a range "
-            "is undefined, and coverage is the quantity the interval claimed"
+            "an INTERVAL row still carries a per-forecast 'covered' flag — "
+            "MEASURED, that was False 42/42 because a binary outcome cannot "
+            "land inside a probability range; coverage belongs to the cell"
         )
-    if "brier" in interval:
-        failures.append("an INTERVAL claim produced a Brier score")
+    if not interval.get("coverage_is_group_property"):
+        failures.append(
+            "an INTERVAL row does not declare that coverage is a group property"
+        )
+    for field in ("midpoint", "brier", "lower", "upper", "actual"):
+        if interval.get(field) is None:
+            failures.append(
+                f"an INTERVAL row carries no {field!r} — the cell needs it to "
+                f"compute coverage, and the midpoint Brier is the usable "
+                f"point reading the interval implies"
+            )
 
     directional = score_forecast(_row("DIRECTIONAL", direction="HIGHER"), _UP)
     if directional.get("method") != SCORE_METHOD_DIRECTION:

@@ -104,21 +104,27 @@ class ScoringPerTierTests(unittest.TestCase):
         self.assertEqual(result["method"], SCORE_METHOD_BRIER)
         self.assertAlmostEqual(result["brier"], 0.81, places=9)
 
-    def test_an_interval_claim_is_scored_by_coverage(self):
-        # Brier on a range is undefined; coverage is what the interval claimed.
+    def test_an_interval_records_what_the_group_needs(self):
+        # COVERAGE IS A GROUP PROPERTY. An interval on P(up) claims the RATE
+        # at which such setups rise; a single binary outcome can never fall
+        # inside a probability range. MEASURED over real data, per-forecast
+        # coverage was False 42/42 — uninformative by construction.
         result = score_forecast(
             row("INTERVAL", interval={"lower": 0.3, "upper": 0.8}), UP
         )
         self.assertEqual(result["method"], SCORE_METHOD_COVERAGE)
-        self.assertNotIn("brier", result)
-        self.assertIn("covered", result)
+        self.assertNotIn("covered", result)
+        self.assertTrue(result["coverage_is_group_property"])
+        for field in ("lower", "upper", "actual", "midpoint"):
+            self.assertIsNotNone(result[field], field)
 
-    def test_coverage_records_a_miss(self):
+    def test_an_interval_is_scored_by_its_midpoint(self):
+        # The usable point reading the interval implies.
         result = score_forecast(
-            row("INTERVAL", interval={"lower": 0.3, "upper": 0.8}), DOWN
+            row("INTERVAL", interval={"lower": 0.3, "upper": 0.9}), DOWN
         )
-        self.assertTrue(result["scored"])
-        self.assertFalse(result["covered"])
+        self.assertAlmostEqual(result["midpoint"], 0.6, places=6)
+        self.assertAlmostEqual(result["brier"], 0.36, places=6)
 
     def test_a_directional_claim_is_scored_by_hit(self):
         hit = score_forecast(row("DIRECTIONAL", direction="HIGHER"), UP)

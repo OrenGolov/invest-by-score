@@ -3129,6 +3129,80 @@ in `data/universe.jsonl`.**
 Eligible pool 73 → 75; still 2 runs to cover all at a batch of 40, 60 calls
 spare against the 100/day ceiling.
 
+### L2. Forecast performance ledger ✓ DONE
+
+Performance by ticker, sector, regime, horizon, event type, source, model,
+confidence bucket and volatility regime. `core/performance_ledger.py` plus the
+L2 block in `core/config.py`.
+
+**Only two of the nine dimensions existed on a ledger row** (ticker,
+horizon). Sector and the confidence bucket are safely derivable — their
+inputs are immutable. Four were missing entirely, and they are POINT-IN-TIME
+facts that cannot be recovered later:
+
+- **regime** and **volatility regime** can be recomputed from bars, but the
+  forecast was MADE under a specific classifier reading; recomputing later
+  risks a different answer if the classifier moved, silently re-attributing
+  past performance to a regime nobody forecast under;
+- **event type** depends on the event set at `as_of`, and news is gone after
+  `NEWS_LOOKBACK_DAYS`;
+- **source** depends on a retrieval against a store that grows. MEASURED
+  across 8 probes, comparing retrieval against half the store versus the full
+  store, **7 of 8 returned a different analog count** (14→19, 14→20, 16→24,
+  0→1, 3→4, 9→16, 0→1).
+
+So the ledger row gained all four, captured at RECORD time, and the runner
+now writes them.
+
+**THE DECIDING MEASUREMENT: nine dimensions cut the data to nothing.**
+
+```
+ticker 77 | sector 11 | regime 5 | horizon 4 | event_type 10
+source 2  | model 1   | confidence_bucket 4  | volatility_regime 3
+
+full cross-product : 4,065,600 cells
+forecasts per year :        77,616
+average per cell   :        0.0191
+```
+
+A cross-tab would be empty almost everywhere while looking thorough, so
+breakdowns are **marginal** — one dimension at a time — and every cell faces
+F4's INTERVAL floor of 8. Verified: a 3-forecast ticker with the WORST record
+in the table (Brier 0.90) publishes nothing, because three observations
+cannot rank a ticker.
+
+**A REAL DESIGN ERROR IN L1, CAUGHT BY RUNNING L2 OVER REAL DATA.** Interval
+coverage read **0% across all 42 scored forecasts** — not a display bug but
+structural: an interval on P(up) claims the RATE at which such setups rise,
+while a single outcome is 0 or 1. A binary outcome can NEVER fall inside a
+probability range, so per-forecast coverage was False by construction and
+measured nothing.
+
+Coverage is a GROUP property. An interval row now records what the cell needs
+(bounds plus the realised outcome) and is scored by the Brier of its midpoint
+— the usable point reading the interval implies — while the cell asks the
+answerable question: did the realised RATE across the cell land inside? The
+corrected view differentiates immediately:
+
+```
+performance by horizon [144 closed]
+  level       n  scored    brier   cover
+  1d         36       6        -       -   (thin)
+  20d        36      12   0.2299    100%
+  5d         36      12   0.2494    100%
+  60d        36      12   0.2402      0%
+```
+
+20d and 5d intervals contained the realised rate; 60d did not. The broken
+version could never have surfaced that.
+
+- Acceptance: 35 tests in `tests/test_performance_ledger.py`; gate
+  `scripts/check_performance_ledger.py`, verified to FAIL under nine
+  reinjected invariants — thin cells publishing metrics, the floor dropped to
+  1, cross-tabulation enabled, a recomputed regime, `unknown` replaced by a
+  plausible default, `source` dropped from the captured set, a dimension
+  dropped, metrics published as None, and per-cell refusal counts removed.
+
 ### Sprint L open items — to close before the sprint ends
 
 1. **Live runs must use TODAY's chart state.** `scripts/run_forecasts.py`
