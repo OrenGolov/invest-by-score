@@ -2668,10 +2668,23 @@ fails, loudly, but only where a report proves collection was expected.
   readable timestamp. A simulated dead scheduler (5 ledger days removed) fails
   the gate naming the exact missing dates. Suite 1741 pass, 30 gates green.
 
-**Still blocked on one thing outside the code:** `NEWSAPI_KEY` is not set, so
-every run reports news as a lost day and exits 1. Until it is set, no
-`observed` event memory can exist and F5 works only from inferred analogs.
-The collector is correct to fail loudly about that rather than report success.
+**The key is set, and OBSERVED memories now exist.** The first live news run
+immediately exposed a pre-existing bug no fixture had reached: `event_study`
+compared tz-aware news timestamps (`2026-09-16T21:33:00Z`) against a tz-naive
+price index and raised. Fixed by normalising through C1's converter, now
+public as `core.timeframes.as_naive_timestamp`. The store holds **130 observed
+memories** beside 1,954 inferred ones, across 9 real N1 event types. They
+carry the 1d horizon only — the events are days old and longer windows have
+not closed, so they fill in as time passes.
+
+**The news ledger is the one deliberate W6 exception.** MEASURED: news writes
+~208 KB per ticker per day, so the 77-ticker universe produces ~15.7 MB/day,
+~345 MB/month, **~3.9 GB/year**. Git never forgets, so committing that is
+irreversible. `data/raw/newsapi_news/` is therefore gitignored, and the
+consequence is stated rather than hidden: a fresh clone can still replay every
+price-, fundamentals- and macro-derived score from raw records, but NOT a
+news-derived sentiment or an observed event memory. Those raw articles live
+only on the collecting machine, which needs a backup that is not git.
 
 ### F6–F8 — pending
 

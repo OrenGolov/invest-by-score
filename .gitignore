@@ -30,7 +30,21 @@ data/event_memory.jsonl
 data/collection_report.jsonl
 data/collect.log
 
-# NOT ignored (tracked on purpose): data/raw/ is the W6 append-only
-# provenance ledger and data/feature_registry.jsonl is the M1 registry.
-# "delete derived cache -> rebuild from raw -> reproduce the same result"
-# is only executable by a fresh clone if these travel with the repo.
+# The NEWS ledger is the one W6 exception, and it is deliberate.
+#
+# MEASURED: news writes ~208 KB per ticker per day, so the 77-ticker universe
+# produces ~15.7 MB/day, ~345 MB/month, ~3.9 GB/year. Git never forgets, so
+# committing that is irreversible even if the files are deleted later, and
+# GitHub soft-warns at 1 GB. The repo would be unusable within months.
+#
+# CONSEQUENCE, stated plainly: a fresh clone can still replay every PRICE-,
+# FUNDAMENTALS- and MACRO-derived score from raw records, which is what the
+# W6 acceptance proof covers. It CANNOT replay a news-derived sentiment or an
+# OBSERVED event memory, because those raw articles live only on the machine
+# that collected them. That machine needs a backup that is not git.
+data/raw/newsapi_news/
+
+# NOT ignored (tracked on purpose): the rest of data/raw/ is the W6
+# append-only provenance ledger and data/feature_registry.jsonl is the M1
+# registry. "delete derived cache -> rebuild from raw -> reproduce the same
+# result" is only executable by a fresh clone if these travel with the repo.
