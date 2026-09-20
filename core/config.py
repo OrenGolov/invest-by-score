@@ -3051,3 +3051,184 @@ def _validate_collect_config() -> None:
 
 
 _validate_collect_config()
+
+
+# ---------------------------------------------------------------------------
+# Sprint F6 - Forecast decomposition
+# ---------------------------------------------------------------------------
+# "Break the forecast into Technical / Fundamental / News-Event / Macro /
+# Regime / Sentiment / Historical-analog contributions - interpretable,
+# without implying false causal certainty."
+#
+# THE WORD "CONTRIBUTION" IS THE TRAP, and it was measured rather than argued.
+# F5's value is a base rate over analogs retrieved by chart similarity,
+# filtered by event type, within a regime. Those filters are NOT independent:
+# one historical day can satisfy all three. Simulated over 4,000 observations
+# with a realistic regime/chart correlation:
+#
+#     all sessions           P(up) 0.546
+#     bullish regime         P(up) 0.611   "contribution" +0.064
+#     uptrend chart          P(up) 0.614   "contribution" +0.067
+#     bullish AND uptrend    P(up) 0.606   SUM +0.131, ACTUAL +0.060
+#
+# The parts overlap and double-count by more than 2x. An additive
+# decomposition would be arithmetically WRONG, and calling the parts
+# "contributions" would imply each factor independently caused its share.
+#
+# So F6 reports WHAT EVIDENCE ENTERED and HOW MUCH IT NARROWED THE CLAIM,
+# never "this component contributed +0.064".
+#
+# NOT A SECOND ENSEMBLE BREAKDOWN (W5). W1 already decomposes the SCORE across
+# these same seven agent names, and score_engine renders per-term values for
+# the dashboard. F6 decomposes the FORECAST, which is a different object
+# produced by different machinery, and it says so in its own output.
+#
+# THERE ARE NO COEFFICIENTS TO ATTRIBUTE. MEASURED: build_joint_forecast
+# returns NO_MODEL - "no trained forecasting model is registered". So F6
+# cannot be feature attribution, SHAP, or a weight table. What produces a
+# forecast value today is F4 (a regime-conditioned base rate) and F5 (an
+# analog base rate), both EMPIRICAL SLICES of history.
+FORECAST_DECOMPOSITION_VERSION = "forecast-decomposition-v1"
+DECOMPOSITION_CONTRACT_VERSION = "decomposition-contract-v1"
+
+# The seven components, in reading order. Named to match the sprint brief so
+# a reader can map the output onto the request.
+DECOMP_TECHNICAL = "technical"
+DECOMP_FUNDAMENTAL = "fundamental"
+DECOMP_NEWS_EVENT = "news_event"
+DECOMP_MACRO = "macro"
+DECOMP_REGIME = "regime"
+DECOMP_SENTIMENT = "sentiment"
+DECOMP_HISTORICAL_ANALOG = "historical_analog"
+
+DECOMPOSITION_COMPONENTS: tuple[str, ...] = (
+    DECOMP_TECHNICAL,
+    DECOMP_FUNDAMENTAL,
+    DECOMP_NEWS_EVENT,
+    DECOMP_MACRO,
+    DECOMP_REGIME,
+    DECOMP_SENTIMENT,
+    DECOMP_HISTORICAL_ANALOG,
+)
+
+# Which components can supply FORECAST evidence today. MEASURED:
+#   technical         YES  the chart state IS F5's retrieval key
+#   news_event        YES  F5 over 2,084 memories (130 observed)
+#   regime            YES  F4 conditions on it; F5 reports agreement
+#   historical_analog YES  F4 slices and F5 analogs produce the value
+#   fundamental       NO   captured daily, but no forecast consumes it
+#   macro             NO   snapshot UNAVAILABLE (no FRED key), unconsumed
+#   sentiment         NO   ensemble weight 0.0, typed placeholder, no provider
+#
+# Declared as DATA so the distinction is auditable, and so wiring one later is
+# a deliberate edit here rather than a silent behaviour change.
+DECOMPOSITION_WIRED_COMPONENTS: tuple[str, ...] = (
+    DECOMP_TECHNICAL,
+    DECOMP_NEWS_EVENT,
+    DECOMP_REGIME,
+    DECOMP_HISTORICAL_ANALOG,
+)
+
+# Component states. NOT_WIRED is deliberately distinct from a measured zero:
+# reporting an unwired component as 0.0 would say it was measured and found
+# irrelevant, when it was never measured at all.
+DECOMP_STATUS_PRESENT = "PRESENT"        # supplied evidence to this forecast
+DECOMP_STATUS_ABSENT = "ABSENT"          # wired, but had nothing to say here
+DECOMP_STATUS_NOT_WIRED = "NOT_WIRED"    # no forecast path consumes it yet
+
+DECOMPOSITION_STATUSES: tuple[str, ...] = (
+    DECOMP_STATUS_PRESENT,
+    DECOMP_STATUS_ABSENT,
+    DECOMP_STATUS_NOT_WIRED,
+)
+
+# What a component is allowed to report about its effect. There is no
+# "contribution" member, and that absence is the point.
+DECOMP_EFFECT_NARROWED = "NARROWED"          # it cut the analog set / slice
+DECOMP_EFFECT_NO_EFFECT = "NO_EFFECT"        # it matched everything available
+DECOMP_EFFECT_UNMEASURED = "UNMEASURED"      # present, but its effect is not isolable
+
+DECOMPOSITION_EFFECTS: tuple[str, ...] = (
+    DECOMP_EFFECT_NARROWED,
+    DECOMP_EFFECT_NO_EFFECT,
+    DECOMP_EFFECT_UNMEASURED,
+)
+
+# Marginal slice rates are reported per component, each with its OWN sample
+# size and interval, and explicitly flagged non-additive. Setting this True
+# would be the single edit that turns F6 back into a false causal story.
+DECOMPOSITION_ADDITIVE = False
+
+# The overlap measurement above, kept as data so the reason additive
+# decomposition is refused travels with the code.
+DECOMPOSITION_OVERLAP_EVIDENCE = (
+    "MEASURED over 4,000 observations with a realistic regime/chart "
+    "correlation: regime alone +0.064, chart alone +0.067, sum +0.131, "
+    "ACTUAL joint effect +0.060. The parts overlap and double-count by more "
+    "than 2x, so contributions cannot be added and must not be presented as "
+    "though they could."
+)
+
+# Every decomposition carries this. E6 and F5 already carry the same sentence
+# shape; a decomposition is the surface where a reader is MOST likely to read
+# causation into association, so it is stated at the top level, not a footnote.
+DECOMPOSITION_DISCLAIMER = (
+    "historical association under comparable conditions - these components "
+    "describe WHAT EVIDENCE ENTERED the forecast, not what caused the "
+    "outcome. The effects are marginal slice rates, they overlap, and they "
+    "do not sum to the forecast."
+)
+
+
+def _validate_decomposition_config() -> None:
+    """Import-time guard for the F6 contract."""
+    if len(set(DECOMPOSITION_COMPONENTS)) != len(DECOMPOSITION_COMPONENTS):
+        raise ValueError("DECOMPOSITION_COMPONENTS contains a duplicate")
+    if len(DECOMPOSITION_COMPONENTS) != 7:
+        raise ValueError(
+            "the sprint names seven components; dropping one would silently "
+            "narrow what the decomposition claims to cover"
+        )
+    unknown = set(DECOMPOSITION_WIRED_COMPONENTS) - set(DECOMPOSITION_COMPONENTS)
+    if unknown:
+        raise ValueError(f"wired components must be declared ones: {sorted(unknown)}")
+    if not DECOMPOSITION_WIRED_COMPONENTS:
+        raise ValueError(
+            "no component is wired - a decomposition of nothing is not a "
+            "decomposition"
+        )
+    if len(set(DECOMPOSITION_STATUSES)) != len(DECOMPOSITION_STATUSES):
+        raise ValueError("DECOMPOSITION_STATUSES contains a duplicate")
+    if DECOMP_STATUS_NOT_WIRED not in DECOMPOSITION_STATUSES:
+        raise ValueError(
+            "NOT_WIRED must stay distinct from a measured zero: reporting an "
+            "unwired component as 0.0 claims it was measured and found "
+            "irrelevant, which is a different fact"
+        )
+    if len(set(DECOMPOSITION_EFFECTS)) != len(DECOMPOSITION_EFFECTS):
+        raise ValueError("DECOMPOSITION_EFFECTS contains a duplicate")
+    for forbidden in ("CONTRIBUTION", "CONTRIBUTED", "CAUSED"):
+        if forbidden in DECOMPOSITION_EFFECTS:
+            raise ValueError(
+                f"{forbidden!r} is not an effect this system can report: the "
+                f"components overlap and do not sum to the forecast"
+            )
+    if DECOMPOSITION_ADDITIVE:
+        raise ValueError(
+            "the decomposition must NOT be additive. " + DECOMPOSITION_OVERLAP_EVIDENCE
+        )
+    if "MEASURED" not in DECOMPOSITION_OVERLAP_EVIDENCE:
+        raise ValueError(
+            "the overlap evidence must carry its measurement, or a future "
+            "reader cannot tell a finding from an assertion"
+        )
+    for phrase in ("not what caused", "do not sum"):
+        if phrase not in DECOMPOSITION_DISCLAIMER:
+            raise ValueError(
+                f"the disclaimer must keep saying {phrase!r}: a decomposition "
+                f"is where a reader is most likely to read causation into "
+                f"association"
+            )
+
+
+_validate_decomposition_config()

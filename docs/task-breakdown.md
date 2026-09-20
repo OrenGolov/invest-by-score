@@ -2686,7 +2686,85 @@ price-, fundamentals- and macro-derived score from raw records, but NOT a
 news-derived sentiment or an observed event memory. Those raw articles live
 only on the collecting machine, which needs a backup that is not git.
 
-### F6–F8 — pending
+### F6. Forecast decomposition ✓ DONE
+
+Break the forecast into Technical / Fundamental / News-Event / Macro / Regime
+/ Sentiment / Historical-analog components. `core/forecast_decomposition.py`
+plus the F6 block in `core/config.py`.
+
+**"Contribution" is the trap, and it was measured rather than argued.** The
+obvious implementation gives each component a number that sums to the
+forecast. F5's value is a base rate over analogs retrieved by chart
+similarity, filtered by event type, within a regime — and those filters are
+not independent, because one historical day can satisfy all three. Over 4,000
+observations with a realistic regime/chart correlation:
+
+```
+all sessions          P(up) 0.546
+bullish regime        P(up) 0.611    "contribution" +0.064
+uptrend chart         P(up) 0.614    "contribution" +0.067
+bullish AND uptrend   P(up) 0.606    SUM +0.131, ACTUAL +0.060
+```
+
+The parts overlap and **double-count by more than 2x**. An additive
+decomposition would be arithmetically wrong, and calling the parts
+"contributions" would imply each factor independently *caused* its share.
+`DECOMPOSITION_ADDITIVE` is False, the import-time validator refuses to let it
+become True, and `CONTRIBUTION`/`CAUSED` are barred from the effect vocabulary.
+
+**There are no coefficients to attribute.** MEASURED: `build_joint_forecast`
+returns NO_MODEL — "no trained forecasting model is registered". So F6 is not
+feature attribution, not SHAP, not a weight table. What produces a forecast
+value today is F4 (a regime-conditioned base rate) and F5 (an analog base
+rate), both empirical slices of history, so F6 reports **which filters
+produced the slice** and how much each narrowed it.
+
+**NOT_WIRED is not a measured zero.** Only 4 of the 7 named components can
+supply forecast evidence today:
+
+| component | live | why |
+|---|---|---|
+| technical | YES | the chart state IS F5's retrieval key |
+| news_event | YES | F5 over 2,084 memories (130 observed) |
+| regime | YES | F4 conditions on it; F5 reports agreement |
+| historical_analog | YES | F4 slices and F5 analogs produce the value |
+| fundamental | NO | captured daily, but no forecast consumes it |
+| macro | NO | snapshot UNAVAILABLE (no FRED key), unconsumed |
+| sentiment | NO | ensemble weight 0.0, no verified provider |
+
+Reporting the absent three as `0.0` would say they were measured and found
+irrelevant. They were never measured — a different fact, and the one a
+decomposition must not blur. `_component` discards any detail passed to a
+non-PRESENT row, so an unmeasured component cannot be made to look measured.
+
+**Not a second ensemble breakdown (W5).** W1 already decomposes the SCORE
+across these same seven agent names. F6 decomposes the FORECAST, and every
+output carries `decomposed_object: "forecast"` so the two can never be
+confused.
+
+**Claim strength is F4's.** A component's marginal slice is just a smaller
+sample, so `select_claim` decides what it supports — a 2-observation slice
+publishes no rate and no interval.
+
+**A test of mine was wrong, and the code was right.** I asserted the chart
+filter would report NARROWED; it correctly reported NO_EFFECT, because every
+fixture memory matched and the filter excluded nothing. The test now covers
+both paths: 45-of-45 reports NO_EFFECT, and 45-of-65 reports NARROWED.
+
+- Acceptance: 41 tests in `tests/test_forecast_decomposition.py`; gate
+  `scripts/check_forecast_decomposition.py`, verified to FAIL under all ten
+  reinjected invariants — including making the decomposition additive,
+  removing the guard that strips detail from non-PRESENT rows, adding
+  CONTRIBUTION to the effect vocabulary, marking every component wired,
+  dropping a component, stripping the causal disclaimer, and letting a thin
+  slice publish a rate. Two of those guards were initially UNREACHABLE by the
+  gate (nothing exercised them), so the gate now calls `_component` with
+  smuggled detail on purpose. Suite 1785 pass, 31 gates green.
+
+### F7–F8 — pending
+
+F7 forecast confidence, F8 the versioned `ForecastSnapshot` API contract.
+
 
 F6 forecast decomposition, F7 forecast confidence, F8 the versioned
 `ForecastSnapshot` API contract.
