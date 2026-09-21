@@ -22,6 +22,16 @@ made and scored only once its window has elapsed, so the two never run
 against the same row in one pass. `--record` and `--close` can be run
 independently.
 
+**A live run uses TODAY'S chart, and refuses rather than guessing.** The
+chart state is the retrieval key for analogs, so anchoring it to whenever a
+ticker last produced a memory does not make the forecast slightly stale — it
+looks up a different history. MEASURED, that path was a median 144 days behind
+(max 535) and retrieved analog sets overlapping the live ones by a Jaccard of
+0.205, calling VOO and CIBR bearish while both were bullish. States are now
+built from bars ending at `as_of` by the canonical builder in
+`core.chart_features`; a ticker whose bars cannot support one is refused with
+its reason, never fallen back to memory.
+
 **Idempotent throughout.** Re-recording a forecast is a no-op (deduplicated by
 `forecast_id`), and a CLOSED row is terminal. Running this twice in a day
 changes nothing, which is what lets it be scheduled without care.
@@ -50,6 +60,8 @@ from core.config import (  # noqa: E402
     CLOSURE_CLOSED,
     CLOSURE_OPEN,
     EVENT_FORECAST_HORIZONS,
+    LIVE_CHART_MAX_STALENESS_DAYS,
+    LIVE_CHART_MIN_HISTORY,
 )
 from core.outcome_closure import (  # noqa: E402
     LEDGER_PATH,
@@ -79,6 +91,77 @@ def _tickers(explicit: str) -> list[str]:
     return sorted({str(t).upper() for t in PORTFOLIO_TICKERS if str(t).strip()})
 
 
+def live_chart_states(
+    tickers, as_of: str, period: str = "3y"
+) -> tuple[dict[str, dict], dict[str, str]]:
+    """Today's chart state per ticker, built from bars ending at `as_of`.
+
+    Returns `(states, refusals)`, where a refusal carries the REASON the state
+    could not be built. Nothing falls back to the most recent memory's state:
+    that fallback is precisely the stale-anchor bug this function replaces, and
+    it would restore it while reporting success.
+
+    Point-in-time by construction. The frame is truncated to bars at or before
+    `as_of` BEFORE the state is built, so a run replayed for a past date sees
+    only what was available then — without it, `--as-of` would silently read
+    today's bars and every backfilled forecast would be look-ahead.
+    """
+    import pandas as pd
+
+    from core.chart_features import ChartFeatureError, chart_state
+    from fetch_data import fetch_price_history
+
+    cutoff = pd.Timestamp(as_of)
+    states: dict[str, dict] = {}
+    refusals: dict[str, str] = {}
+
+    for ticker in tickers:
+        try:
+            frame = fetch_price_history(ticker, period=period, interval="1d")
+        except Exception as exc:  # noqa: BLE001 - a fetch failure is a refusal
+            refusals[ticker] = f"price history unavailable ({exc})"
+            continue
+        if frame is None or frame.empty:
+            refusals[ticker] = "price history unavailable (empty frame)"
+            continue
+
+        index = pd.to_datetime(frame.index)
+        if getattr(index, "tz", None) is not None:
+            index = index.tz_localize(None)
+        frame = frame.copy()
+        frame.index = index
+        frame = frame.loc[frame.index <= cutoff]
+        if frame.empty:
+            refusals[ticker] = f"no bars at or before {as_of}"
+            continue
+
+        last_bar = frame.index[-1]
+        staleness = (cutoff - last_bar).days
+        if staleness > LIVE_CHART_MAX_STALENESS_DAYS:
+            # A weekend or a holiday is fine; a month-old last bar means the
+            # feed stopped, and forecasting from it is the stale anchor again.
+            refusals[ticker] = (
+                f"last bar {last_bar.date()} is {staleness} days before "
+                f"{as_of} (limit {LIVE_CHART_MAX_STALENESS_DAYS})"
+            )
+            continue
+
+        try:
+            state = chart_state(frame)
+        except ChartFeatureError as exc:
+            refusals[ticker] = f"chart state refused ({exc})"
+            continue
+        if not state:
+            refusals[ticker] = (
+                f"only {len(frame)} bars at {as_of}; "
+                f"{LIVE_CHART_MIN_HISTORY} are required"
+            )
+            continue
+        states[ticker] = state
+
+    return states, refusals
+
+
 def record_run(tickers, as_of: str, dry_run: bool, path: Path | None) -> dict:
     """Build one forecast per (ticker, horizon) and append it to the ledger."""
     from core.event_memory import find_analogs, load_memory_objects
@@ -103,26 +186,29 @@ def record_run(tickers, as_of: str, dry_run: bool, path: Path | None) -> dict:
         else None
     )
 
-    # Retrieval needs a chart state per ticker. The most recent memory for a
-    # ticker carries one that is already PIT-correct for its own as_of; for a
-    # live run the caller would supply today's. Absent that, a ticker with no
-    # memory is skipped rather than forecast from nothing.
-    latest: dict[str, dict] = {}
-    for memory in memories:
-        key = str(memory.ticker).upper()
-        if key not in latest or memory.published_time > latest[key]["when"]:
-            latest[key] = {
-                "when": memory.published_time,
-                "chart_state": memory.chart_state,
-            }
+    # RETRIEVAL NEEDS TODAY'S CHART STATE, NOT THE LAST ONE ON RECORD. This
+    # used to read the most recent MEMORY's chart state, which is correct for a
+    # backfill (the memory IS the point being forecast from) and wrong for a
+    # live run. MEASURED across the 73 tickers holding a memory, that state was
+    # a median 144 days old (max 535), and because the chart state is the
+    # RETRIEVAL KEY the staleness did not shift the forecast slightly - the
+    # stale and live keys retrieved analog sets overlapping by a mean Jaccard
+    # of 0.205, and the stale key called VOO and CIBR BEARISH while both were
+    # bullish.
+    #
+    # So the state is built from bars ending at as_of, by the same canonical
+    # builder the backfill uses. A ticker whose bars cannot support one is
+    # REFUSED, never fallen back to memory: the fallback is the bug.
+    states, chart_refusals = live_chart_states(tickers, as_of)
 
     recorded = refused = attempted = 0
-    no_chart: list[str] = []
+    no_chart: list[str] = sorted(chart_refusals)
 
     for ticker in tickers:
-        state = (latest.get(ticker) or {}).get("chart_state")
+        state = states.get(ticker)
         if not state:
-            no_chart.append(ticker)
+            if ticker not in chart_refusals:
+                no_chart.append(ticker)
             continue
 
         similarities = [
@@ -182,7 +268,8 @@ def record_run(tickers, as_of: str, dry_run: bool, path: Path | None) -> dict:
         "recorded": recorded,
         "refused": refused,
         "attempted": attempted,
-        "no_chart_state": sorted(no_chart),
+        "no_chart_state": sorted(set(no_chart)),
+        "chart_refusals": chart_refusals,
         "base_rate": base_rate,
         "reason": "",
     }
@@ -331,10 +418,16 @@ def main() -> int:
             if recorded["no_chart_state"]:
                 names = recorded["no_chart_state"]
                 print(
-                    f"      {len(names)} ticker(s) had no chart state and were "
-                    f"skipped: {', '.join(names[:6])}"
+                    f"      {len(names)} ticker(s) had no live chart state and "
+                    f"were skipped: {', '.join(names[:6])}"
                     + (" ..." if len(names) > 6 else "")
                 )
+                # The REASON matters operationally: a short history is a
+                # permanent property of a young listing, while a stale last bar
+                # means the feed stopped and someone has to look.
+                reasons = recorded.get("chart_refusals") or {}
+                for ticker in sorted(reasons)[:6]:
+                    print(f"        {ticker}: {reasons[ticker]}")
             print(
                 "      refusals ARE recorded: the ledger is the denominator, "
                 "and dropping them is how a scoreboard gets gamed."

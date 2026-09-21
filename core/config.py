@@ -4416,3 +4416,92 @@ def _validate_error_memory_config() -> None:
 
 
 _validate_error_memory_config()
+
+
+# ---------------------------------------------------------------------------
+# Sprint L - Live chart state (the blocker before scheduling)
+# ---------------------------------------------------------------------------
+# `scripts/run_forecasts.py` derived each ticker's chart state from that
+# ticker's MOST RECENT EVENT MEMORY. That is correct for a backfill, where the
+# memory IS the point in time being forecast from. For a LIVE daily run it is
+# wrong: the forecast gets anchored to whenever that ticker last happened to
+# produce a memory.
+#
+# MEASURED across the 73 tickers carrying a memory, against 2026-09-21:
+#
+#     staleness   min 3 days, median 144, mean 166, max 535
+#
+# So the median live forecast would have been conditioned on a chart roughly
+# five months old, and VOO's on one from 2025-04-04.
+#
+# THE DECIDING MEASUREMENT IS NOT THE AGE, IT IS WHAT THE AGE RETRIEVES. The
+# chart state is the retrieval key for analogs, so a stale key does not shift
+# the forecast slightly - it looks up a different history:
+#
+#   tkr    memory as_of   close then   close now   regime then  regime now
+#   VOO    2025-04-04         465.52      701.78   bearish      bullish
+#   CIBR   2025-04-07          57.71       99.87   bearish      bullish
+#   CAT    2025-10-29         585.49      808.99   bullish      bullish
+#   AAPL   2026-09-18         337.00      336.13   bullish      bullish
+#
+# The retrieved analog SETS overlap by a mean Jaccard of 0.205 - four fifths of
+# the evidence differs - and the stale key called the regime BEARISH for VOO
+# and CIBR while both are in fact bullish. VOO retrieved 22 analogs from its
+# April-2025 chart and 6 from today's. A forecast built that way is not a
+# stale-but-reasonable forecast; it answers a question about a different market.
+#
+# So a live run MUST build today's state from today's bars. The builder is
+# canonical in `core.chart_features` (W5): the backfill calls it at a historical
+# position, the live run calls it at the last bar, and there is exactly one
+# implementation of what a chart state IS.
+LIVE_CHART_STATE_VERSION = "live-chart-state-v1"
+
+# Bars required before a chart state can be built at all. The state carries a
+# 200-session moving average, so below this the longest feature is computed
+# from a window that does not exist and `price_vs_ma_200` silently becomes a
+# mean over whatever happens to be present.
+LIVE_CHART_MIN_HISTORY = 210
+
+# How stale a chart state may be, in calendar days, before a LIVE run refuses
+# to forecast from it. One week: long enough to survive a holiday week or a
+# fetch outage, short enough that the retrieval key still describes the chart
+# the forecast is about. MEASURED, the memory-derived path exceeded this for 71
+# of 73 tickers.
+LIVE_CHART_MAX_STALENESS_DAYS = 7
+
+# A live run REFUSES rather than falling back to the stale memory state. A
+# fallback is the failure this block exists to prevent: it would restore
+# exactly the behaviour above while reporting success, and the refusal is
+# recorded in the ledger where L1 can count it.
+LIVE_CHART_FALLBACK_TO_MEMORY = False
+
+
+def _validate_live_chart_config() -> None:
+    """Import-time guard for the live chart-state contract."""
+    if LIVE_CHART_MIN_HISTORY < 210:
+        raise ValueError(
+            f"a chart state needs at least 210 bars, not "
+            f"{LIVE_CHART_MIN_HISTORY}: it carries a 200-session moving "
+            f"average, and a shorter window turns price_vs_ma_200 into a mean "
+            f"over whatever bars happen to exist"
+        )
+    if LIVE_CHART_MAX_STALENESS_DAYS < 1:
+        raise ValueError("the staleness bound must allow at least one day")
+    if LIVE_CHART_MAX_STALENESS_DAYS > 30:
+        raise ValueError(
+            f"a staleness bound of {LIVE_CHART_MAX_STALENESS_DAYS} days is not "
+            f"a live run. MEASURED, chart states a median 144 days old "
+            f"retrieved analog sets overlapping the live ones by a Jaccard of "
+            f"0.205, and called the regime bearish for VOO and CIBR while both "
+            f"were bullish"
+        )
+    if LIVE_CHART_FALLBACK_TO_MEMORY:
+        raise ValueError(
+            "a live run must not fall back to the most recent memory's chart "
+            "state: that is the stale-anchor bug itself, and falling back "
+            "would reinstate it while reporting success. Refuse instead - the "
+            "refusal is recorded and counted"
+        )
+
+
+_validate_live_chart_config()

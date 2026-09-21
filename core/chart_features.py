@@ -60,6 +60,7 @@ from core.config import (
     CHART_VOL_LONG_WINDOW,
     CHART_VOL_SHORT_WINDOW,
     CHART_VOL_STABLE,
+    LIVE_CHART_MIN_HISTORY,
 )
 
 LOGGER = logging.getLogger("core.chart_features")
@@ -346,4 +347,71 @@ def compute_chart_features(
         "calculation_version": CHART_FEATURE_VERSION,
         "pipeline_version": CHART_PIPELINE_VERSION,
         "source_id": CHART_FEATURE_SOURCE_ID,
+    }
+
+
+def chart_state(frame: pd.DataFrame, position: int | None = None) -> dict | None:
+    """The E6 chart state as it stood at `position` (default: the last bar).
+
+    THE CANONICAL BUILDER (W5). The backfill in `scripts/build_event_memory.py`
+    calls this at a historical position; a live run calls it at the last bar.
+    One implementation means a live forecast and a remembered analog describe
+    the chart the same way — if they diverged, every similarity score would
+    compare two different definitions of the same thing.
+
+    Strictly point-in-time: the window ENDS at `position`, so no later bar can
+    reach the returned state. Returns None below `LIVE_CHART_MIN_HISTORY`
+    rather than a short-window approximation, because `price_vs_ma_200`
+    computed over 40 bars is not a 200-day mean and nothing downstream could
+    tell the difference.
+    """
+    usable = _usable(frame)
+    if position is None:
+        position = len(usable) - 1
+    if position < 0 or position >= len(usable):
+        raise ChartFeatureError(
+            f"position {position} is outside a frame of {len(usable)} bars"
+        )
+
+    window = usable.iloc[:position + 1]
+    if len(window) < LIVE_CHART_MIN_HISTORY:
+        return None
+    close = window["Close"]
+    last = float(close.iloc[-1])
+
+    delta = close.diff()
+    gains = delta.clip(lower=0).rolling(14).mean().iloc[-1]
+    losses = (-delta.clip(upper=0)).rolling(14).mean().iloc[-1]
+    rsi = 100.0 - 100.0 / (1.0 + gains / losses) if losses and losses > 0 else 50.0
+
+    high, low, prior = window["High"], window["Low"], close.shift()
+    true_range = pd.concat(
+        [high - low, (high - prior).abs(), (low - prior).abs()], axis=1
+    ).max(axis=1)
+
+    ma_50 = float(close.tail(50).mean())
+    ma_200 = float(close.tail(200).mean())
+    vs_200 = last / ma_200 - 1.0
+
+    return {
+        "close": last,
+        "rsi": float(rsi),
+        "volatility": float(close.pct_change().tail(20).std() * (252 ** 0.5)),
+        "volume_ratio_20d": float(
+            window["Volume"].iloc[-1] / max(float(window["Volume"].tail(20).mean()), 1.0)
+        ),
+        "atr_14": float(true_range.tail(14).mean()),
+        "trend_slope_60d": float((last / float(close.iloc[-60]) - 1.0) / 60.0),
+        "trend_vs_20d_mean": float(last / float(close.tail(20).mean()) - 1.0),
+        # The ungoverned display heuristic is deliberately NOT used here. This
+        # is a coarse trend label for retrieval only; the governed five-state
+        # regime lives in core.regime_agent and is never duplicated.
+        "market_regime": (
+            "bullish" if vs_200 > 0.02 else "bearish" if vs_200 < -0.02 else "range"
+        ),
+        "change_5d": float(last / float(close.iloc[-6]) - 1.0),
+        "change_20d": float(last / float(close.iloc[-21]) - 1.0),
+        "change_60d": float(last / float(close.iloc[-61]) - 1.0),
+        "price_vs_ma_50": float(last / ma_50 - 1.0),
+        "price_vs_ma_200": float(vs_200),
     }

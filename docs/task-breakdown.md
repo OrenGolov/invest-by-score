@@ -3278,13 +3278,73 @@ no bias** — it is most often a statement about sample size.
   NEGLIGIBLE collapsed into SYSTEMATIC, findings stripped of direction or of
   their comparison count, and detection power overstated or removed.
 
+### L-blocker. Live chart state ✓ DONE
+
+`scripts/run_forecasts.py` derived each ticker's chart state from that
+ticker's most recent EVENT MEMORY. That is correct for a backfill — there the
+memory *is* the point in time being forecast from — and wrong for a live run,
+where the forecast gets anchored to whenever that ticker last happened to
+produce a memory.
+
+**MEASURED across the 73 tickers holding a memory, against 2026-09-21:**
+
+```
+staleness   min 3 days   median 144   mean 166   max 535
+```
+
+**THE STALENESS IS NOT THE HARM — WHAT IT RETRIEVES IS.** The chart state is
+the *retrieval key* for analogs, so a stale key does not return a slightly
+stale forecast; it looks up a different history:
+
+```
+tkr    memory as_of   close then   close now   regime then   regime now
+VOO    2025-04-04         465.52      701.78   bearish       bullish
+CIBR   2025-04-07          57.71       99.87   bearish       bullish
+CAT    2025-10-29         585.49      808.99   bullish       bullish
+AAPL   2026-09-18         337.00      336.13   bullish       bullish
+```
+
+The retrieved analog **sets** overlapped by a mean Jaccard of **0.205** — four
+fifths of the evidence differed — and the stale key called VOO and CIBR
+**bearish while both were in fact bullish**. VOO retrieved 22 analogs from its
+April-2025 chart and 6 from today's. That is not a stale-but-reasonable
+forecast; it answers a question about a different market.
+
+**One builder, not two (W5).** The calculation lived in
+`scripts/build_event_memory._chart_snapshot`. It is now canonical in
+`core.chart_features.chart_state(frame, position=None)`: the backfill calls it
+at a historical position, the live run at the last bar. Verified identical to
+the original on 15 real probes before the duplicate was deleted — had they
+diverged, every similarity score would compare two definitions of the same
+thing.
+
+**A live run REFUSES; it never falls back.** A fallback would reinstate the
+stale anchor while reporting success. Bars are truncated to `as_of` *before*
+the state is built, so a replayed date cannot read its own future — MEASURED
+with the truncation removed, a replay of 2025-11-03 returned AAPL at 336.13
+(today's close) instead of 270.37. Refusals carry their reason, because a
+short history is a permanent property of a young listing while a stale last
+bar means the feed stopped and someone has to look.
+
+**A REAL BLIND SPOT IN MY OWN GATE.** The no-fallback check searched the
+source for the string `memory.chart_state`. Reinjecting the fallback under any
+other variable name (`_m.chart_state`) walked straight past it — a guard that
+matches one *spelling* of a bug does not guard against the bug. Replaced with
+a behavioural probe: the price feed is killed and the run must produce
+nothing. A second pass showed that probe only covered `live_chart_states`,
+while the attack sat downstream in `record_run`; both are now starved and both
+must forecast zero.
+
+- Acceptance: 16 tests in `tests/test_live_chart_state.py`; gate
+  `scripts/check_live_chart_state.py`, verified to FAIL under ten reinjected
+  invariants — the builder duplicated, the fallback restored under three
+  different spellings and call sites, the staleness bound widened, the bar
+  minimum lowered, `as_of` truncation removed, the position argument ignored,
+  and a refusal stripped of its reason.
+
 ### Sprint L open items — to close before the sprint ends
 
-1. **Live runs must use TODAY's chart state.** `scripts/run_forecasts.py`
-   currently derives each ticker's chart state from its most recent MEMORY,
-   which is correct for backfilling history and wrong for a live daily run:
-   every forecast would be anchored to a stale setup. Must be fixed before
-   this is scheduled alongside the collector.
+1. ~~**Live runs must use TODAY's chart state.**~~ ✓ FIXED — see below.
 2. **VOO news tracking is an open decision.** It is currently skipped as a
    broad-market fund whose news E5 would call confounded — but the S&P 500 is
    one of the most important series the system follows, and the operator has

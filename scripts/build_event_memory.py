@@ -73,6 +73,7 @@ from core.config import (  # noqa: E402
     MEMORY_PROVENANCE_INFERRED,
     MEMORY_PROVENANCE_OBSERVED,
 )
+from core.chart_features import chart_state
 from core.event_memory import (  # noqa: E402
     EVENT_MEMORY_STORE_PATH,
     EventMemoryError,
@@ -165,53 +166,14 @@ def cadence_candidates(frame: pd.DataFrame) -> list[int]:
 
 
 def _chart_snapshot(frame: pd.DataFrame, position: int) -> dict | None:
-    """The E6 chart state as it stood at `position`, from bars up to it only.
+    """The E6 chart state at `position`, from `core.chart_features` (W5).
 
-    Strictly point-in-time: the window ends at the event bar, so nothing after
-    it can reach the recorded state.
+    This used to carry its own copy of the calculation. It now delegates to the
+    canonical builder, which the LIVE run in `scripts/run_forecasts.py` also
+    calls — so a remembered analog and a live forecast describe a chart with
+    one definition rather than two that can drift apart.
     """
-    window = frame.iloc[:position + 1]
-    if len(window) < 210:
-        return None
-    close = window["Close"]
-    last = float(close.iloc[-1])
-
-    delta = close.diff()
-    gains = delta.clip(lower=0).rolling(14).mean().iloc[-1]
-    losses = (-delta.clip(upper=0)).rolling(14).mean().iloc[-1]
-    rsi = 100.0 - 100.0 / (1.0 + gains / losses) if losses and losses > 0 else 50.0
-
-    high, low, prior = window["High"], window["Low"], close.shift()
-    true_range = pd.concat(
-        [high - low, (high - prior).abs(), (low - prior).abs()], axis=1
-    ).max(axis=1)
-
-    ma_50 = float(close.tail(50).mean())
-    ma_200 = float(close.tail(200).mean())
-    vs_200 = last / ma_200 - 1.0
-
-    return {
-        "close": last,
-        "rsi": float(rsi),
-        "volatility": float(close.pct_change().tail(20).std() * (252 ** 0.5)),
-        "volume_ratio_20d": float(
-            window["Volume"].iloc[-1] / max(float(window["Volume"].tail(20).mean()), 1.0)
-        ),
-        "atr_14": float(true_range.tail(14).mean()),
-        "trend_slope_60d": float((last / float(close.iloc[-60]) - 1.0) / 60.0),
-        "trend_vs_20d_mean": float(last / float(close.tail(20).mean()) - 1.0),
-        # The ungoverned display heuristic is deliberately NOT used here. This
-        # is a coarse trend label for retrieval only; the governed five-state
-        # regime lives in core.regime_agent and is never duplicated.
-        "market_regime": (
-            "bullish" if vs_200 > 0.02 else "bearish" if vs_200 < -0.02 else "range"
-        ),
-        "change_5d": float(last / float(close.iloc[-6]) - 1.0),
-        "change_20d": float(last / float(close.iloc[-21]) - 1.0),
-        "change_60d": float(last / float(close.iloc[-61]) - 1.0),
-        "price_vs_ma_50": float(last / ma_50 - 1.0),
-        "price_vs_ma_200": float(vs_200),
-    }
+    return chart_state(frame, position)
 
 
 class _InferredEvent:
