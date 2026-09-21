@@ -3774,6 +3774,91 @@ must forecast zero.
 > from "is this ticker attractive?" to "does acting on this forecast improve
 > the current portfolio without violating risk constraints?"
 
+### R2. Correlation-aware sizing ✓ DONE
+
+`core/correlation_sizing.py` plus the R2 block in `core/config.py`.
+
+R1 established that weight is not exposure. R2 asks the next question: **how
+big should a position be, given what is already held?**
+
+**EQUAL-WEIGHT SIZING IGNORES CORRELATION, and the cost is large.** MEASURED
+on 498 aligned sessions, a 40% budget spent four ways beside 60% VOO:
+
+```
+4 correlated semis (NVDA/AMD/AVGO/SOXX)   vol 1.587%
+4 diverse names (NVDA/MSFT/JPM/XOM)       vol 1.054%
+```
+
+The **same total weight** carries **50.5% more risk**.
+
+**A NEGATIVE RESULT THAT SHAPES THE WHOLE TASK.** Reweighting *inside* a
+correlated basket barely helps:
+
+```
+rule                   NVDA    AMD   AVGO   SOXX       vol
+equal weight          0.100  0.100  0.100  0.100    1.587%
+inverse volatility    0.111  0.078  0.094  0.116    1.570%
+equal risk contrib    0.114  0.081  0.098  0.106    1.572%
+```
+
+All three land within 1%. The excess came from **composition**, not weights:
+
+```
+allocation of the 40% budget          vol    vs equal-weight semis
+4 semis, equal weight              1.587%                    +0.0%
+4 semis, inverse-vol weighted      1.568%                    -1.2%
+3 semis + 1 diversifier            1.429%                   -10.0%
+1 semi  + 3 diversifiers           1.054%                   -33.6%
+```
+
+Reweighting buys ~1%; changing what is held buys 10–34%. **Sizing cannot fix
+selection**, and a module implying otherwise would sell a false remedy — so
+the docstring, the config and the gate all say so.
+
+**SO SIZING IS DONE AGAINST THE WHOLE PORTFOLIO.** MEASURED against a held
+portfolio of 25% NVDA / 15% AMD / 30% MSFT / 30% VOO (vol 1.690%), a **fixed**
+10% purchase:
+
+```
+add 10% AVGO  ->  +3.07% portfolio vol
+add 10% SOXX  ->  +2.75%
+add 10% VOO   ->  -4.89%
+add 10% XOM   ->  -9.24%
+```
+
+The same nominal size means something different for every ticker. Sizing to a
+**risk budget** makes "position size" a comparable unit for the first time.
+
+**TWO INDEPENDENT BOUNDS, because one is not enough.** MEASURED, an
+uncorrelated name reached 50%+ inside a 5% volatility budget *because it
+reduces volatility* — the risk budget alone does not bound concentration, and
+R1 showed weight and risk are different scales. Every proposal reports **which
+bound applied**: "the portfolio cannot absorb more of this" and "policy stops
+here" are different answers.
+
+**THREE FAILED ATTEMPTS AT A REFUSAL SCENARIO, each a real correction.** To
+test that an unfittable position is REFUSED I first added a near-identical
+twin to a 100%-single-name portfolio — MEASURED, that *reduces* volatility
+(−0.10% at 5%) because idiosyncratic noise averages out. Then a more volatile
+but *uncorrelated* name — that diversifies too (−5.3%). A genuine refusal
+needs a candidate correlated with the holding **and** more volatile: a levered
+version of it. The code was right all three times; my scenario was wrong.
+
+**A REAL BLIND SPOT IN MY OWN GATE.** The ordering check compared `INDY_B`
+against `SEMI_B` — but the diversifier also sorts first *alphabetically*, so
+replacing the risk-ordering with `sorted(by name)` passed. Renamed to
+`ZZZ_DIVERSIFIER` and `AAA_SEMI` so the names disagree with the answer; the
+attack is now caught.
+
+- Acceptance: 27 tests in `tests/test_correlation_sizing.py`; gate
+  `scripts/check_correlation_sizing.py`, verified to FAIL under ten reinjected
+  invariants — the risk budget widened, the weight cap removed in config and
+  again in code, sizing declared non-advisory, the binding constraint
+  suppressed, the session floor lowered, correlation ignored so every ticker
+  gets one size, the minimum-fit check dropped, a trade funded from nowhere,
+  and candidates ordered alphabetically. An eleventh attack proved a no-op
+  (`(x) and 0 or (y)` still returns `y`) and is recorded as such.
+
 ### R1. Position exposure ✓ DONE
 
 `core/position_exposure.py` plus the R1 block in `core/config.py`.

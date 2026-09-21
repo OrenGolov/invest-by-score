@@ -5682,3 +5682,150 @@ def _validate_position_exposure_config() -> None:
 
 
 _validate_position_exposure_config()
+
+
+# ---------------------------------------------------------------------------
+# Sprint R2 - Correlation-aware sizing
+# ---------------------------------------------------------------------------
+# R1 established that weight is not exposure. R2 asks the next question: HOW
+# BIG should a position be, given what is already held?
+#
+# EQUAL-WEIGHT SIZING IGNORES CORRELATION, and the cost is large. MEASURED on
+# 498 date-aligned sessions, a 40% budget spent four ways beside 60% VOO:
+#
+#   4 correlated semis (NVDA/AMD/AVGO/SOXX)   vol 1.587%
+#   4 diverse names (NVDA/MSFT/JPM/XOM)       vol 1.054%
+#
+# The SAME total weight carries 50.5% more risk.
+#
+# A NEGATIVE RESULT THAT SHAPES THE WHOLE TASK: REWEIGHTING INSIDE A
+# CORRELATED BASKET BARELY HELPS. Three sizing rules on the same four semis:
+#
+#   rule                   NVDA    AMD   AVGO   SOXX       vol
+#   equal weight          0.100  0.100  0.100  0.100    1.587%
+#   inverse volatility    0.111  0.078  0.094  0.116    1.570%
+#   equal risk contrib    0.114  0.081  0.098  0.106    1.572%
+#
+# All three land within 1% of each other. The 50.5% excess came from the
+# basket's COMPOSITION, not its internal weights:
+#
+#   allocation of the 40% budget          vol      vs equal-weight semis
+#   4 semis, equal weight              1.587%                      +0.0%
+#   4 semis, inverse-vol weighted      1.568%                      -1.2%
+#   3 semis + 1 diversifier            1.429%                     -10.0%
+#   2 semis + 2 diversifiers           1.184%                     -25.4%
+#   1 semi  + 3 diversifiers           1.054%                     -33.6%
+#
+# Reweighting buys ~1%; changing what is held buys 10-34%. SIZING CANNOT FIX
+# SELECTION, and a sizing module that implied otherwise would be selling a
+# false remedy.
+#
+# SO CORRELATION-AWARE SIZING SIZES AGAINST THE WHOLE PORTFOLIO. MEASURED
+# against a held portfolio of 25% NVDA / 15% AMD / 30% MSFT / 30% VOO
+# (vol 1.690%), adding a FIXED 10%:
+#
+#   add 10% AVGO  -> +3.07% portfolio vol
+#   add 10% SOXX  -> +2.75%
+#   add 10% VOO   -> -4.89%
+#   add 10% XOM   -> -9.24%
+#
+# The same nominal size means something different for every ticker. Sizing to
+# a RISK BUDGET - the largest position keeping the volatility increase inside
+# a bound - makes "position size" a comparable unit for the first time.
+CORRELATION_SIZING_VERSION = "correlation-sizing-v1"
+
+# The default risk budget: how much a single new position may raise portfolio
+# volatility, as a RELATIVE increase. Relative, because an absolute bound
+# means something different for a 1% portfolio and a 3% one.
+SIZING_RISK_BUDGET = 0.05
+
+# The largest position the sizer will ever propose, whatever the risk budget
+# allows. MEASURED, an uncorrelated name (XOM) could take 50%+ of the
+# portfolio inside a 5% volatility budget because it REDUCES volatility - the
+# risk budget alone does not bound concentration, and R1 measured that weight
+# and risk are different scales. This is the weight scale's bound.
+SIZING_MAX_WEIGHT = 0.20
+
+# The smallest position worth proposing. Below this the trade is dominated by
+# costs and the portfolio effect is indistinguishable from noise.
+SIZING_MIN_WEIGHT = 0.005
+
+# Search bounds for the size solver, and its tolerance. The solver bisects on
+# volatility, which is monotone in position size ONLY over the range where the
+# position is diversifying or neutral; the cap above keeps the answer inside
+# the region where that holds.
+SIZING_SEARCH_TOLERANCE = 1e-4
+
+# Sessions of aligned history required before a correlation-aware size is
+# proposed. Inherited from R1: below this the covariance is sampling error
+# wearing a number's clothes.
+SIZING_MIN_SESSIONS = EXPOSURE_MIN_SESSIONS
+
+# Verdicts, weakest to strongest. The order IS the precedence.
+SIZING_NOT_EVALUATED = "NOT_EVALUATED"   # no covariance could be built
+SIZING_REFUSED = "REFUSED"               # even the minimum breaches the budget
+SIZING_CAPPED = "CAPPED"                 # the weight cap bound, not the risk
+SIZING_SIZED = "SIZED"                   # the risk budget bound
+
+SIZING_VERDICTS: tuple[str, ...] = (
+    SIZING_NOT_EVALUATED,
+    SIZING_REFUSED,
+    SIZING_CAPPED,
+    SIZING_SIZED,
+)
+
+# A size is a PROPOSAL, never an order. R2 answers "how big could this be
+# without breaching the risk budget", which is not the same as "buy this".
+SIZING_IS_ADVISORY = True
+
+# The sizer must report what BOUND it. A size that does not say whether the
+# risk budget or the weight cap was the binding constraint cannot be acted on
+# intelligently - one says "the portfolio cannot absorb more of this", the
+# other says "policy stops here".
+SIZING_REPORT_BINDING_CONSTRAINT = True
+
+
+def _validate_correlation_sizing_config() -> None:
+    """Import-time guard for the R2 contract."""
+    if not 0.0 < SIZING_RISK_BUDGET < 1.0:
+        raise ValueError("the risk budget is a relative increase inside (0, 1)")
+    if SIZING_RISK_BUDGET > 0.25:
+        raise ValueError(
+            f"a risk budget of {SIZING_RISK_BUDGET:.0%} lets one position move "
+            f"portfolio volatility by a quarter; MEASURED, a fixed 10% in the "
+            f"most correlated available name moved it 3.07%"
+        )
+    if not 0.0 < SIZING_MAX_WEIGHT <= 0.50:
+        raise ValueError("the weight cap must lie inside (0, 0.5]")
+    if not 0.0 < SIZING_MIN_WEIGHT < SIZING_MAX_WEIGHT:
+        raise ValueError("the minimum size must be positive and below the cap")
+    if SIZING_MIN_SESSIONS < 120:
+        raise ValueError(
+            "a correlation-aware size needs the same history a covariance "
+            "needs; below 120 sessions the estimate is sampling error"
+        )
+    if SIZING_VERDICTS[0] != SIZING_NOT_EVALUATED:
+        raise ValueError("NOT_EVALUATED must be the weakest verdict")
+    if SIZING_VERDICTS[-1] != SIZING_SIZED:
+        raise ValueError("SIZED must be the strongest verdict")
+    if SIZING_REFUSED == SIZING_NOT_EVALUATED:
+        raise ValueError(
+            "'no size fits the budget' and 'no size could be computed' are "
+            "different facts and must stay distinct"
+        )
+    if not SIZING_IS_ADVISORY:
+        raise ValueError(
+            "a size is a proposal, never an order: R2 answers how big a "
+            "position COULD be inside the risk budget, which is not the same "
+            "as a decision to buy it"
+        )
+    if not SIZING_REPORT_BINDING_CONSTRAINT:
+        raise ValueError(
+            "the sizer must say what bound it. 'The portfolio cannot absorb "
+            "more of this' and 'policy stops here' are different answers, and "
+            "MEASURED an uncorrelated name reached 50%+ on the risk budget "
+            "alone while a correlated one stopped at 14%"
+        )
+
+
+_validate_correlation_sizing_config()
