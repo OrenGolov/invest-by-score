@@ -4890,3 +4890,234 @@ def _validate_controlled_learning_config() -> None:
 
 
 _validate_controlled_learning_config()
+
+
+# ---------------------------------------------------------------------------
+# Sprint L6 - Concept drift detection
+# ---------------------------------------------------------------------------
+# "Feature distribution drift, relationship drift, calibration drift,
+# event-response drift."
+#
+# THE TASK NAMES FOUR THINGS, AND THEY REALLY ARE FOUR. MEASURED over 600
+# observations per scenario, each breaking exactly ONE thing, scored by the
+# feature-distribution detector alone:
+#
+#   scenario                 feature PSI   caught?
+#   1 feature drift               1.2197   YES
+#   2 relationship drift          0.0360   no
+#   3 calibration drift           0.0133   no
+#   4 event-response drift        0.0274   no
+#
+# Feature PSI catches ONE of the four. The other three are invisible to it
+# because THE FEATURES DID NOT MOVE - the world did. Verified each needs its
+# own detector:
+#
+#   relationship: corr(x,y) +0.368 -> -0.315 while the features are identical
+#   calibration : ranking intact (corr 0.448 -> 0.430) while the calibration
+#                 gap goes 0.000 -> +0.251, so a relationship detector is blind
+#   response    : mean event response +0.0404 -> +0.0001 with features,
+#                 relationship AND calibration all unchanged
+#
+# FOUR SEPARATE QUESTIONS. No single detector answers them, which is why this
+# block defines four and refuses to collapse them.
+#
+# M5's `score_drift_psi` IS NOT REUSABLE HERE, and that is a measurement, not
+# a preference. It bins on a fixed [0, 10] score scale and REFUSES anything
+# outside it. MEASURED on a feature living in [-0.3, 0.3] shifted by 3.2
+# standard deviations - an enormous, unmistakable drift:
+#
+#   PSI with fixed [0,10] bins : 0.0000   <- every value lands in one bin
+#   PSI with quantile bins     : 6.9450
+#
+# So L6 bins by the REFERENCE QUANTILES. The PSI formula is shared; only the
+# binning differs, and the binning is the whole difference between seeing a
+# 3.2-sigma shift and reporting zero.
+DRIFT_DETECTION_VERSION = "concept-drift-v1"
+
+# The four drift types, in the order the task names them. Declared as data so
+# a scan cannot silently cover three and report clean.
+DRIFT_FEATURE = "feature_distribution"
+DRIFT_RELATIONSHIP = "relationship"
+DRIFT_CALIBRATION = "calibration"
+DRIFT_RESPONSE = "event_response"
+
+DRIFT_TYPES: tuple[str, ...] = (
+    DRIFT_FEATURE,
+    DRIFT_RELATIONSHIP,
+    DRIFT_CALIBRATION,
+    DRIFT_RESPONSE,
+)
+
+# Quantile bins for the feature detector. Ten is the industry convention and
+# is what every PSI threshold in circulation was calibrated against; changing
+# it silently rescales the thresholds below.
+DRIFT_PSI_BINS = 10
+
+# PSI thresholds. Deliberately the same numbers M5 uses (PROMOTION_PSI_WARN /
+# PROMOTION_PSI_FAIL) because they are the same statistic - what L6 changes is
+# the BINNING and the WINDOW FLOOR, not the scale.
+DRIFT_PSI_WARN = 0.10
+DRIFT_PSI_ALERT = 0.25
+
+# THE WINDOW FLOOR IS LOAD-BEARING, AND THE CONVENTIONAL THRESHOLD IS UNSAFE
+# WITHOUT IT. PSI between two IDENTICAL distributions is not zero - it is a
+# random quantity that grows as the window shrinks. MEASURED with no drift
+# whatsoever:
+#
+#   window   mean PSI     p95     p99   share exceeding 0.25
+#       50     0.5251  1.1898  1.6852                  77.0%
+#      100     0.1954  0.3719  0.5123                  20.5%
+#      250     0.0736  0.1317  0.1681                   0.0%
+#      500     0.0355  0.0685  0.0799                   0.0%
+#     1000     0.0182  0.0335  0.0431                   0.0%
+#
+# At a window of 50 the conventional "PSI > 0.25 means significant shift" rule
+# fires on 77% of CLEAN comparisons.
+#
+# ACROSS THE 13-FEATURE chart_state SURFACE, a report flagging if ANY feature
+# exceeds the threshold:
+#
+#   window   thr 0.25   thr 0.10
+#      100      96.0%     100.0%
+#      250       0.7%      95.3%
+#      500       0.0%       4.7%
+#     1000       0.0%       0.0%
+#
+# A FIRST READING OF THE DETECTION SWEEP WAS WRONG and is recorded because the
+# correction is the point. Detection of a real 0.5-sd shift appeared to FALL
+# with window size (86.7% at 100, 51.0% at 1000), which would have argued for
+# a small window. It is an artefact: at small windows PSI is INFLATED BY
+# NOISE, so crossing 0.25 is not detection - it is the same noise that
+# produces 96% false alarms. The signal converges to its true value while the
+# noise shrinks:
+#
+#   window   mean PSI (0.5sd shift)   mean PSI (clean)   clean p95   separated?
+#      100                   0.4428             0.2104      0.3755          no
+#      250                   0.3260             0.0758      0.1387         YES
+#      500                   0.2732             0.0362      0.0681         YES
+#     1000                   0.2573             0.0177      0.0365         YES
+#
+# SEPARATION - signal clear of the clean p95 - is the honest measure, and it
+# first holds at 250.
+DRIFT_MIN_WINDOW = 250
+
+# Relationship drift: the correlation between a feature and the outcome. A
+# change of this size is reported. MEASURED, a sign flip moves it 0.683
+# (+0.368 -> -0.315); ordinary resampling noise at the window floor is well
+# under 0.15.
+DRIFT_CORRELATION_SHIFT = 0.15
+
+# Calibration drift: mean predicted probability minus mean observed rate. A
+# model whose RANKING is intact can still be badly miscalibrated - MEASURED,
+# inflating probabilities by 1.6x moved the gap 0.000 -> +0.251 while the
+# correlation barely moved (0.448 -> 0.430), so the relationship detector is
+# blind to it by construction.
+DRIFT_CALIBRATION_GAP = 0.10
+
+# Event-response drift: the mean absolute response to an event, compared as a
+# LOG2 FACTOR rather than a percentage change.
+#
+# A PERCENTAGE RATIO IS THE WRONG SCALE, and my own gate caught it. A decline
+# is bounded at -100% while an increase is unbounded, so a symmetric rule on
+# |ratio| is not symmetric at all. MEASURED under the first version, with WARN
+# at 50% and ALERT at twice that:
+#
+#   total collapse   -100.0%   ALERT      <- only an EXACT zero reaches it
+#   99% weaker        -99.1%   WARN       <- an event type that stopped
+#                                            moving price entirely
+#   3x stronger      +180.9%   ALERT
+#
+# An event that has stopped working could never raise an alert. A log ratio is
+# symmetric - halving is -1, doubling is +1 - so the bound becomes a FACTOR
+# that reads the same in both directions:
+#
+#   25% weaker   log2 -0.42   STABLE
+#   halved       log2 -1.00   WARN
+#   quartered    log2 -2.00   ALERT
+#   99% gone     log2 -6.64   ALERT
+#   doubled      log2 +1.00   WARN
+#   5x stronger  log2 +2.32   ALERT
+DRIFT_RESPONSE_LOG2_WARN = 1.0    # a factor of 2 in either direction
+DRIFT_RESPONSE_LOG2_ALERT = 2.0   # a factor of 4 in either direction
+
+# A drift verdict is never silently a pass. These mirror M5's three states
+# because the same rule applies: a detector that could not run has found
+# nothing, not found the system clean.
+DRIFT_STABLE = "STABLE"
+DRIFT_WARN = "WARN"
+DRIFT_ALERT = "ALERT"
+DRIFT_NOT_EVALUATED = "NOT_EVALUATED"
+
+DRIFT_VERDICTS: tuple[str, ...] = (
+    DRIFT_NOT_EVALUATED,
+    DRIFT_STABLE,
+    DRIFT_WARN,
+    DRIFT_ALERT,
+)
+
+# Drift is DETECTED and REPORTED, never acted on automatically. Retraining on
+# a drift alert without the L5 chain would be the uncontrolled self-modifying
+# system Sprint L exists to prevent.
+DRIFT_TRIGGERS_RETRAIN = False
+
+
+def _validate_drift_config() -> None:
+    """Import-time guard for the L6 contract."""
+    if len(set(DRIFT_TYPES)) != len(DRIFT_TYPES):
+        raise ValueError("DRIFT_TYPES contains a duplicate")
+    if len(DRIFT_TYPES) != 4:
+        raise ValueError(
+            f"the sprint names four drift types and {len(DRIFT_TYPES)} are "
+            f"declared. MEASURED, the feature detector catches ONE of the "
+            f"four: relationship, calibration and response drift are all "
+            f"invisible to it because the features do not move"
+        )
+    if DRIFT_FEATURE not in DRIFT_TYPES or DRIFT_RESPONSE not in DRIFT_TYPES:
+        raise ValueError("every named drift type must be declared")
+
+    if DRIFT_MIN_WINDOW < 250:
+        raise ValueError(
+            f"a window floor of {DRIFT_MIN_WINDOW} cannot support a PSI "
+            f"threshold. MEASURED with NO drift present, PSI exceeds 0.25 on "
+            f"77% of comparisons at window 50 and 20.5% at window 100, and a "
+            f"13-feature scan flags something on 96% of clean reports at 100"
+        )
+    if not 0.0 < DRIFT_PSI_WARN < DRIFT_PSI_ALERT:
+        raise ValueError("PSI thresholds must ascend and be positive")
+    if DRIFT_PSI_BINS < 5:
+        raise ValueError(
+            "fewer than five bins cannot resolve a distribution shift; ten is "
+            "the convention every circulating PSI threshold was set against"
+        )
+    if not 0.0 < DRIFT_CORRELATION_SHIFT < 2.0:
+        raise ValueError(
+            "a correlation shift bound must lie inside the possible range of "
+            "a correlation change"
+        )
+    if not 0.0 < DRIFT_CALIBRATION_GAP < 1.0:
+        raise ValueError("the calibration gap bound must lie inside (0, 1)")
+    if not 0.0 < DRIFT_RESPONSE_LOG2_WARN < DRIFT_RESPONSE_LOG2_ALERT:
+        raise ValueError("response log2 bounds must ascend and be positive")
+
+    if DRIFT_VERDICTS[0] != DRIFT_NOT_EVALUATED:
+        raise ValueError(
+            "NOT_EVALUATED must be the weakest verdict - a detector that "
+            "could not run has found nothing, not found the system clean"
+        )
+    if DRIFT_VERDICTS[-1] != DRIFT_ALERT:
+        raise ValueError("ALERT must be the strongest verdict")
+    if DRIFT_STABLE == DRIFT_NOT_EVALUATED:
+        raise ValueError(
+            "'stable' and 'could not be measured' are different facts and "
+            "must stay distinct"
+        )
+    if DRIFT_TRIGGERS_RETRAIN:
+        raise ValueError(
+            "drift must never trigger a retrain by itself: a model that "
+            "replaces itself on an alert is the uncontrolled self-modifying "
+            "system Sprint L exists to prevent. Drift is evidence FOR the L5 "
+            "chain, not a substitute for it"
+        )
+
+
+_validate_drift_config()

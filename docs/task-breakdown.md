@@ -3437,6 +3437,89 @@ and identical evidence, an incumbent crowned 8 months ago gives
   an `abs()` letting a future crowning buy tenure, and an M5 check
   reimplemented instead of delegated.
 
+### L6. Concept drift detection ✓ DONE
+
+"Feature distribution drift, relationship drift, calibration drift,
+event-response drift."
+`core/drift_detection.py` plus the L6 block in `core/config.py`.
+
+**THE TASK NAMES FOUR THINGS, AND THEY REALLY ARE FOUR.** MEASURED over four
+scenarios each breaking exactly one thing, scored by the feature-distribution
+detector alone:
+
+```
+scenario                 feature PSI   caught?
+1 feature drift               1.2197   YES
+2 relationship drift          0.0360   no
+3 calibration drift           0.0133   no
+4 event-response drift        0.0274   no
+```
+
+It catches **one of four**. The other three are invisible to it because *the
+features did not move — the world did*. Verified each needs its own detector:
+a sign flip moves the correlation +0.368 → −0.315 with identical features;
+inflating probabilities 1.6× moves the calibration gap 0.000 → +0.251 while
+the correlation barely moves (0.448 → 0.430); an event response collapsing
++0.0404 → +0.0001 leaves all three others unchanged.
+
+**M5's `score_drift_psi` is not reusable, and that is a measurement.** It bins
+on a fixed [0,10] score scale and refuses anything outside it. On a feature
+ranged [−0.3, 0.3] shifted by **3.2 standard deviations**:
+
+```
+PSI with fixed [0,10] bins : 0.0000   <- every value in one bin
+PSI with quantile bins     : 6.9450
+```
+
+The formula is shared; the binning is the whole difference between seeing an
+enormous drift and reporting zero.
+
+**THE WINDOW FLOOR IS LOAD-BEARING.** PSI between two *identical*
+distributions is not zero — it grows as the window shrinks:
+
+```
+window   mean PSI     p95   share exceeding 0.25
+    50     0.5251  1.1898                  77.0%
+   100     0.1954  0.3719                  20.5%
+   250     0.0736  0.1317                   0.0%
+```
+
+The conventional "PSI > 0.25 means significant shift" rule fires on **77% of
+clean comparisons at window 50**, and a 13-feature scan flags something on
+**96%** of clean reports at window 100.
+
+**A FIRST READING OF THE DETECTION SWEEP WAS WRONG.** Detection of a real
+0.5-sd shift appeared to *fall* with window size (86.7% at 100 → 51.0% at
+1000), which would have argued for a small window. It is an artefact: at small
+windows PSI is inflated by noise, so crossing 0.25 is not detection — it is
+the same noise producing 96% false alarms. Separation (signal clear of the
+clean p95) is the honest measure, and it first holds at **250**. Shipped
+window floor 250, measured 0/40 clean comparisons alerting.
+
+**A REAL ASYMMETRY BUG, caught by my own gate.** Event-response drift was
+compared as a percentage ratio. A decline is bounded at −100% while an
+increase is unbounded, so a symmetric rule on |ratio| is not symmetric at all:
+an event type that had **stopped moving price entirely** (−99.1%) read WARN,
+while only a mathematically exact zero reached ALERT. Replaced with a log2
+factor — halving is −1, doubling is +1 — so the bound reads the same in both
+directions. A vanished response is named explicitly rather than left to a
+floor.
+
+**Drift is reported, never acted on.** `DRIFT_TRIGGERS_RETRAIN = False`: a
+model that retrains itself on an alert is the uncontrolled self-modification
+Sprint L exists to prevent. Drift is evidence *for* the L5 chain, not a
+substitute for it.
+
+- Acceptance: 36 tests in `tests/test_drift_detection.py`; gate
+  `scripts/check_drift_detection.py`, verified to FAIL under eight reinjected
+  invariants — the window floor lowered to 50, drift wired to retrain, a
+  drift type dropped, STABLE collapsed into NOT_EVALUATED, fixed binning
+  restored, the calibration detector replaced by a ranking measure, the
+  asymmetric percentage rule restored, and a coverage break letting a
+  three-of-four scan report as complete. A ninth attack proved a no-op — the
+  coverage guarantee has two independent implementations — and is recorded as
+  such rather than counted.
+
 ### L-blocker. Live chart state ✓ DONE
 
 `scripts/run_forecasts.py` derived each ticker's chart state from that
