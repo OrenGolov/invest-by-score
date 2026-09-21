@@ -4261,3 +4261,158 @@ def _validate_performance_config() -> None:
 
 
 _validate_performance_config()
+
+
+# ---------------------------------------------------------------------------
+# Sprint L3 - Error memory
+# ---------------------------------------------------------------------------
+# "Store forecast, actual, error, context; identify systematic errors."
+#
+# THE FIRST CLAUSE IS ALREADY DONE. A closed L1 ledger row carries the
+# forecast (value, claim), the actual (forward_return, direction_up), the
+# error (brier, absolute_error) and the context (regime, event_type,
+# volatility, observed_share). L3 does not duplicate that store (W5); it reads
+# it. The real work is the second clause.
+#
+# A SYSTEMATIC ERROR IS A BIAS, NOT A LARGE ERROR. MEASURED over 200
+# forecasts:
+#
+#   case                          brier    bias      t
+#   noisy but unbiased           0.2466  -0.0459   -1.3
+#   systematically over-bullish  0.3300  +0.2850   +8.1
+#
+# Brier barely separates them; the SIGNED BIAS does. Systematic means a
+# direction that persists, not an error that is big.
+#
+# THE WORST CELL IN A TABLE IS NOT A SYSTEMATIC ERROR. L2 reports roughly 36
+# cells. MEASURED with NO real effect anywhere, every cell drawn from
+# identical skill: the true mean Brier is 0.2722 while the WORST cell per
+# report averages 0.3712 - it looks 36% worse than the truth, every time.
+# Pointing at it would manufacture a finding on every run.
+#
+# THE DECIDING MEASUREMENT: SCANNING MANY CELLS MANUFACTURES FINDINGS. With no
+# systematic error present anywhere:
+#
+#   t>1.96 (p<0.05)    2.77 false alarms/report, 94% of reports flag something
+#   t>2.58 (p<0.01)    1.15 false alarms/report, 68% flag something
+#   t>3.29 (p<0.001)   0.39 false alarms/report, 34% flag something
+#
+# At the conventional p<0.05 a PERFECTLY CLEAN system reports ~2.8 systematic
+# errors on 94% of runs, which trains an operator to ignore the alert.
+ERROR_MEMORY_VERSION = "error-memory-v1"
+ERROR_MEMORY_CONTRACT_VERSION = "error-memory-contract-v1"
+
+# The t-statistic a bias must clear to be called systematic. Strict BECAUSE
+# many cells are scanned - it is a multiple-comparison threshold, not a
+# statement about any single cell.
+ERROR_MEMORY_T_THRESHOLD = 3.29
+
+# Minimum scored forecasts in a cell before bias is even tested.
+#
+# THRESHOLD AND FLOOR WERE CHOSEN TOGETHER, and a first pass got this wrong.
+# MEASURED, detection of a real 0.25 bias:
+#
+#       n   t>1.96   t>2.58   t>3.29
+#      12      40%      19%       7%
+#      30      80%      56%      31%
+#     100     100%      99%      95%
+#
+# Detection FALLS as the threshold rises, so no threshold rescues a thin cell:
+# the sample floor buys detection, the threshold buys silence. At n=30 with
+# t>3.29 the pair gives 0.26 false alarms per report (78% of clean reports
+# silent) and 31% detection, rising to 95% by n=100 as the ledger fills.
+ERROR_MEMORY_MIN_SAMPLES = 30
+
+# Bias smaller than this is not worth reporting even when it clears the
+# t-test: with enough observations a trivial bias becomes "significant"
+# without becoming important. 0.05 on a probability is one twentieth of the
+# scale.
+ERROR_MEMORY_MIN_BIAS = 0.05
+
+# Detection power is REPORTED, not assumed. MEASURED at the shipped pair, a
+# real 0.25 bias is found ~31% of the time at n=30. So the absence of a
+# finding is NOT evidence of no bias, and every report says so.
+ERROR_MEMORY_REPORT_POWER = True
+
+ERROR_MEMORY_POWER_EVIDENCE = (
+    "MEASURED at t>3.29 with a floor of 30: a real 0.25 bias is detected 31% "
+    "of the time at n=30, 58% at n=50 and 95% at n=100. The absence of a "
+    "finding is therefore not evidence of no bias - it is most often a "
+    "statement about sample size."
+)
+
+# Findings, weakest first. The order IS the precedence: a cell reports the
+# strongest verdict its evidence supports.
+ERROR_VERDICT_NOT_ENOUGH_DATA = "NOT_ENOUGH_DATA"   # below the sample floor
+ERROR_VERDICT_NO_BIAS_DETECTED = "NO_BIAS_DETECTED"  # tested, nothing found
+ERROR_VERDICT_NEGLIGIBLE = "NEGLIGIBLE"              # significant but tiny
+ERROR_VERDICT_SYSTEMATIC = "SYSTEMATIC"              # persistent and material
+
+ERROR_MEMORY_VERDICTS: tuple[str, ...] = (
+    ERROR_VERDICT_NOT_ENOUGH_DATA,
+    ERROR_VERDICT_NO_BIAS_DETECTED,
+    ERROR_VERDICT_NEGLIGIBLE,
+    ERROR_VERDICT_SYSTEMATIC,
+)
+
+# The direction a systematic bias runs in. Named rather than signed, because
+# "+0.25" means nothing without knowing which way is which.
+ERROR_DIRECTION_OVERCONFIDENT = "OVER_PREDICTS"   # forecast above the outcome
+ERROR_DIRECTION_UNDERCONFIDENT = "UNDER_PREDICTS"  # forecast below the outcome
+
+# Every finding carries the number of cells that were scanned to produce it.
+# 36 cells at p<0.05 yields 2.8 false alarms per report; a reader cannot weigh
+# a finding without knowing how many chances it had to appear.
+ERROR_MEMORY_REPORT_COMPARISONS = True
+
+
+def _validate_error_memory_config() -> None:
+    """Import-time guard for the L3 contract."""
+    if len(set(ERROR_MEMORY_VERDICTS)) != len(ERROR_MEMORY_VERDICTS):
+        raise ValueError("ERROR_MEMORY_VERDICTS contains a duplicate")
+    if ERROR_MEMORY_VERDICTS[0] != ERROR_VERDICT_NOT_ENOUGH_DATA:
+        raise ValueError(
+            "NOT_ENOUGH_DATA must be the weakest verdict - it is where every "
+            "thin cell starts"
+        )
+    if ERROR_MEMORY_VERDICTS[-1] != ERROR_VERDICT_SYSTEMATIC:
+        raise ValueError("SYSTEMATIC must be the strongest verdict")
+    if ERROR_VERDICT_NOT_ENOUGH_DATA == ERROR_VERDICT_NO_BIAS_DETECTED:
+        raise ValueError(
+            "'we could not test' and 'we tested and found nothing' are "
+            "different facts and must stay distinct"
+        )
+
+    if ERROR_MEMORY_T_THRESHOLD < 2.58:
+        raise ValueError(
+            f"a t-threshold of {ERROR_MEMORY_T_THRESHOLD} is too loose for a "
+            f"scan of ~36 cells. MEASURED with no real effect anywhere: "
+            f"t>1.96 produces 2.77 false alarms per report and flags something "
+            f"on 94% of runs, which trains an operator to ignore the alert"
+        )
+    if ERROR_MEMORY_MIN_SAMPLES < 30:
+        raise ValueError(
+            f"a floor of {ERROR_MEMORY_MIN_SAMPLES} cannot support a bias "
+            f"test. MEASURED, detection of a real 0.25 bias at t>3.29 is 7% "
+            f"at n=12 and 31% at n=30 - below 30 the test is close to blind"
+        )
+    if not 0.0 < ERROR_MEMORY_MIN_BIAS < 1.0:
+        raise ValueError("the minimum reportable bias must lie inside (0, 1)")
+    if not ERROR_MEMORY_REPORT_POWER:
+        raise ValueError(
+            "detection power must be reported. " + ERROR_MEMORY_POWER_EVIDENCE
+        )
+    if "MEASURED" not in ERROR_MEMORY_POWER_EVIDENCE:
+        raise ValueError(
+            "the power evidence must carry its measurement, or a reader "
+            "cannot tell a finding from a preference"
+        )
+    if not ERROR_MEMORY_REPORT_COMPARISONS:
+        raise ValueError(
+            "the comparison count must travel with every finding: 36 cells at "
+            "p<0.05 yields 2.8 false alarms per report, and a reader cannot "
+            "weigh a finding without knowing how many chances it had"
+        )
+
+
+_validate_error_memory_config()

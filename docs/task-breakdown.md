@@ -3203,6 +3203,81 @@ version could never have surfaced that.
   plausible default, `source` dropped from the captured set, a dimension
   dropped, metrics published as None, and per-cell refusal counts removed.
 
+### L3. Error memory ✓ DONE
+
+"Store forecast, actual, error, context; identify systematic errors."
+`core/error_memory.py` plus the L3 block in `core/config.py`.
+
+**The first clause was already done.** A closed L1 ledger row carries the
+forecast, the actual, the error and the context. L3 READS that store rather
+than duplicating it (W5) — the gate checks the module never writes one. The
+real work is the second clause.
+
+**A systematic error is a BIAS, not a large error.** MEASURED over 200
+forecasts:
+
+```
+case                          brier    bias      t
+noisy but unbiased           0.2466  -0.0459   -1.3
+systematically over-bullish  0.3300  +0.2850   +8.1
+```
+
+Brier barely separates them; the signed bias does. Systematic means a
+direction that *persists*, not an error that is big.
+
+**The worst cell in a table is not a finding.** L2 reports ~36 cells.
+MEASURED with no real effect anywhere, the true mean Brier is 0.2722 while
+the worst cell per report averages **0.3712** — 36% worse than the truth,
+every single time.
+
+**THE DECIDING MEASUREMENT: scanning many cells manufactures findings.**
+
+```
+threshold              false alarms/report   reports flagging something
+t>1.96 (p<0.05)                       2.77                        94%
+t>2.58 (p<0.01)                       1.15                        68%
+t>3.29 (p<0.001)                      0.39                        34%
+```
+
+At the conventional p<0.05 a **perfectly clean system reports ~2.8 systematic
+errors on 94% of runs**, which trains an operator to ignore the alert.
+
+**Threshold and floor were chosen together, and a first pass got it wrong.**
+Detection of a real 0.25 bias FALLS as the threshold rises (40% → 7% at
+n=12), so no threshold rescues a thin cell: the floor buys detection, the
+threshold buys silence.
+
+```
+    n   t>1.96   t>2.58   t>3.29
+   12      40%      19%       7%
+   30      80%      56%      31%
+  100     100%      99%      95%
+```
+
+Shipped: **t>3.29 with a floor of 30** — 0.26 false alarms per report, 78% of
+clean reports silent, 31% detection rising to 95% at n=100. Verified: 11 of
+12 clean systems produce NO finding, while a 0.35 regime bias is caught,
+named and directed.
+
+**A REAL INVERSION IN MY OWN TEST, caught by the gate.** `bias_test` returned
+`t=0.0` whenever every error was identical — treating the *most* consistent
+bias possible as the *weakest* evidence, while one part per million of jitter
+produced t=34,000,000. Both readings were wrong for the same reason: a
+degenerate standard error is not a measurement of uncertainty. Zero variance
+now yields an infinite t, and the magnitude floor still downgrades a tiny
+constant bias to NEGLIGIBLE.
+
+**Power is reported, not assumed.** At n=30 a real bias is found 31% of the
+time, so every report states that **absence of a finding is not evidence of
+no bias** — it is most often a statement about sample size.
+
+- Acceptance: 32 tests in `tests/test_error_memory.py`; gate
+  `scripts/check_error_memory.py`, verified to FAIL under nine reinjected
+  invariants — the threshold loosened to p<0.05, the floor dropped to 5, the
+  zero-variance inversion restored, untested cells carrying a bias,
+  NEGLIGIBLE collapsed into SYSTEMATIC, findings stripped of direction or of
+  their comparison count, and detection power overstated or removed.
+
 ### Sprint L open items — to close before the sprint ends
 
 1. **Live runs must use TODAY's chart state.** `scripts/run_forecasts.py`
