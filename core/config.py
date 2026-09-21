@@ -5121,3 +5121,189 @@ def _validate_drift_config() -> None:
 
 
 _validate_drift_config()
+
+
+# ---------------------------------------------------------------------------
+# Sprint L7 - Regime-specific learning
+# ---------------------------------------------------------------------------
+# "Evaluate separate models per regime (bullish/bearish/range/risk-off/stress)
+# ONLY IF OOS evidence supports specialization."
+#
+# The last clause is the whole task. Splitting the training data five ways is
+# not free, and the default answer must be NO.
+#
+# THE DECIDING MEASUREMENT: SPECIALIZATION LOSES ON THIN DATA EVEN WHEN THE
+# SKILL GENUINELY DIFFERS BY REGIME. Brier on held-out data:
+#
+#   skill is the SAME in every regime        pooled   specialized   winner
+#      100 observations (20 per regime)     0.25114       0.26521   POOLED
+#     1000 observations (200 per regime)    0.24788       0.24906   POOLED
+#    10000 observations                     0.24753       0.24763   POOLED
+#
+#   skill GENUINELY DIFFERS by regime        pooled   specialized   winner
+#      100 observations (20 per regime)     0.24913       0.25808   POOLED
+#      300 observations (60 per regime)     0.24504       0.24371   SPECIALIZED
+#     1000 observations                     0.24559       0.24315   SPECIALIZED
+#    10000 observations                     0.24498       0.24175   SPECIALIZED
+#
+# When the skill does NOT differ, pooling wins at every sample size. When it
+# DOES differ, specialization still loses until ~300 observations. So the task
+# is right to make OOS evidence the condition, and the system must be able to
+# answer NO.
+#
+# THE RARE-REGIME PROBLEM. The five regimes are not equally common - stress is
+# roughly 5% of observations, so at n=1000 overall it holds ~52:
+#
+#   total n   bullish  bearish  range  risk_off  stress
+#      1000       378      163    295       112      52
+#     10000      3990     1457   3012      1025     516
+#
+# And a rate estimated from ~50 observations carries a typical error of 0.056,
+# COMPARABLE TO THE 0.08 DIFFERENCE BEING DETECTED - the estimate IS the
+# noise. A stress-specific model is therefore refused until the evidence
+# exists, no matter how much total data the system holds.
+REGIME_SPECIALIZATION_VERSION = "regime-specialization-v1"
+
+# The regimes a model MAY specialize on. Taken from the governed five-state
+# classifier (REGIME_LABELS) rather than redefined here - a second regime
+# vocabulary would be the split-brain W5 forbids.
+REGIME_SPECIALIZATION_LABELS: tuple[str, ...] = REGIME_LABELS
+
+# THE DEFAULT IS POOLED. Specialization is adopted per regime, on evidence,
+# and never assumed.
+REGIME_SPECIALIZATION_DEFAULT_POOLED = True
+
+# Minimum observations in a regime, in BOTH the training and the evaluation
+# window, before its specialization can even be considered. MEASURED, a rate
+# from 50 observations has a typical error of 0.056 while the effect being
+# detected is 0.08.
+REGIME_SPECIALIZATION_MIN_CELL = 60
+
+# The relative Brier improvement a specialized model must show over the pooled
+# one. A BARE WIN IS NOT EVIDENCE: MEASURED with NO real difference anywhere,
+# specialization still "wins OOS" on 14-23% of single comparisons.
+#
+#   rule                          false adopt        true adopt
+#   bare OOS win                    14 - 23%          30 - 100%
+#   win by >= 0.5% relative          0 -  1%          75 - 100%
+#   win by >= 2.0% relative                0%           0 - 10%
+#
+# 0.5% is the point where false adoption collapses while real specialization
+# is still found; 2% is past the knee and rejects everything.
+REGIME_SPECIALIZATION_MARGIN = 0.005
+
+# Folds the comparison is repeated over, and how many it must win. Single
+# comparisons are noisy even with a margin - MEASURED, a regime with NO real
+# difference still adopted on 17-30% of single-fold runs.
+#
+#   folds/need     real effect found     worst noise regime
+#      1 of 1          85 - 96%               19 - 26%
+#      3 of 5          68 - 95%                    15%
+#      4 of 5          36 - 68%                 2 -  4%
+#      5 of 5          10 - 33%                     0%
+#
+# 4 of 5 is the balance: noise falls to 2-4% while real specialization is
+# still adopted. Demanding all five rejects a real effect two thirds of the
+# time, which is not caution but blindness.
+REGIME_SPECIALIZATION_FOLDS = 5
+REGIME_SPECIALIZATION_FOLDS_REQUIRED = 4
+
+# Verdicts, weakest to strongest. The order IS the precedence.
+REGIME_SPEC_NOT_EVALUATED = "NOT_EVALUATED"   # no comparison was possible
+REGIME_SPEC_INSUFFICIENT = "INSUFFICIENT_DATA"  # below the cell floor
+REGIME_SPEC_POOLED = "POOLED"                 # tested, pooling is not beaten
+REGIME_SPEC_SPECIALIZED = "SPECIALIZED"       # earned its own model
+
+REGIME_SPECIALIZATION_VERDICTS: tuple[str, ...] = (
+    REGIME_SPEC_NOT_EVALUATED,
+    REGIME_SPEC_INSUFFICIENT,
+    REGIME_SPEC_POOLED,
+    REGIME_SPEC_SPECIALIZED,
+)
+
+# A regime that fails to earn specialization FALLS BACK to the pooled model,
+# it is never left unserved. The alternative - no model for stress because
+# stress is rare - would remove coverage exactly when it matters most.
+REGIME_SPECIALIZATION_FALLBACK_POOLED = True
+
+# Specialization is decided PER REGIME, not all-or-nothing. MEASURED, a common
+# regime with a real difference (bullish, 63% adoption at n=1000) should not
+# be held hostage to a rare one (stress, 1% at the same size).
+REGIME_SPECIALIZATION_PER_REGIME = True
+
+
+def _validate_regime_specialization_config() -> None:
+    """Import-time guard for the L7 contract."""
+    if set(REGIME_SPECIALIZATION_LABELS) != set(REGIME_LABELS):
+        raise ValueError(
+            "L7 must specialize on the GOVERNED regime labels, not a second "
+            "vocabulary of its own - that is the split-brain W5 forbids"
+        )
+    if len(REGIME_SPECIALIZATION_LABELS) != 5:
+        raise ValueError(
+            f"the sprint names five regimes and "
+            f"{len(REGIME_SPECIALIZATION_LABELS)} are declared"
+        )
+    if not REGIME_SPECIALIZATION_DEFAULT_POOLED:
+        raise ValueError(
+            "the default must be POOLED. MEASURED, when skill does NOT differ "
+            "by regime, pooling wins at every sample size, and even when it "
+            "DOES differ specialization loses until ~300 observations"
+        )
+    if REGIME_SPECIALIZATION_MIN_CELL < 60:
+        raise ValueError(
+            f"a cell floor of {REGIME_SPECIALIZATION_MIN_CELL} cannot support "
+            f"a per-regime rate. MEASURED, an estimate from 50 observations "
+            f"carries a typical error of 0.056 while the effect being detected "
+            f"is 0.08 - the estimate is the noise"
+        )
+    if REGIME_SPECIALIZATION_MARGIN <= 0.0:
+        raise ValueError(
+            "a bare OOS win is not evidence. MEASURED with no real difference "
+            "anywhere, specialization still wins 14-23% of single comparisons"
+        )
+    if REGIME_SPECIALIZATION_MARGIN > 0.02:
+        raise ValueError(
+            f"a margin of {REGIME_SPECIALIZATION_MARGIN} rejects real "
+            f"specialization. MEASURED at 2%, a genuine per-regime difference "
+            f"is adopted 0-10% of the time"
+        )
+    if REGIME_SPECIALIZATION_FOLDS < 3:
+        raise ValueError(
+            "fewer than three folds cannot show a result repeats; MEASURED, a "
+            "single fold adopts a noise regime on 17-30% of runs"
+        )
+    if not 1 <= REGIME_SPECIALIZATION_FOLDS_REQUIRED <= REGIME_SPECIALIZATION_FOLDS:
+        raise ValueError("the required folds must lie within the folds run")
+    if REGIME_SPECIALIZATION_FOLDS_REQUIRED * 2 <= REGIME_SPECIALIZATION_FOLDS:
+        raise ValueError(
+            f"requiring {REGIME_SPECIALIZATION_FOLDS_REQUIRED} of "
+            f"{REGIME_SPECIALIZATION_FOLDS} folds is a minority, which adopts "
+            f"on noise: a result that fails most of its own folds has not "
+            f"repeated"
+        )
+    if REGIME_SPECIALIZATION_VERDICTS[0] != REGIME_SPEC_NOT_EVALUATED:
+        raise ValueError("NOT_EVALUATED must be the weakest verdict")
+    if REGIME_SPECIALIZATION_VERDICTS[-1] != REGIME_SPEC_SPECIALIZED:
+        raise ValueError("SPECIALIZED must be the strongest verdict")
+    if REGIME_SPEC_INSUFFICIENT == REGIME_SPEC_POOLED:
+        raise ValueError(
+            "'too little data to test' and 'tested, pooling wins' are "
+            "different facts and must stay distinct"
+        )
+    if not REGIME_SPECIALIZATION_FALLBACK_POOLED:
+        raise ValueError(
+            "a regime that does not earn specialization must fall back to the "
+            "pooled model, never be left unserved: no model for stress "
+            "because stress is rare removes coverage exactly when it matters"
+        )
+    if not REGIME_SPECIALIZATION_PER_REGIME:
+        raise ValueError(
+            "specialization is decided PER REGIME. MEASURED, a common regime "
+            "with a real difference adopts at 63% while a rare one adopts at "
+            "1% on the same data - an all-or-nothing rule holds the first "
+            "hostage to the second"
+        )
+
+
+_validate_regime_specialization_config()

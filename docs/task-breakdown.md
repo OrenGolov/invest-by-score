@@ -3520,6 +3520,86 @@ substitute for it.
   coverage guarantee has two independent implementations — and is recorded as
   such rather than counted.
 
+### L7. Regime-specific learning ✓ DONE
+
+"Evaluate separate models per regime (bullish/bearish/range/risk-off/stress)
+**only if OOS evidence supports specialization**."
+`core/regime_specialization.py` plus the L7 block in `core/config.py`.
+
+**The last clause is the whole task.** Splitting the training data five ways is
+not free, and the default answer must be NO.
+
+**THE DECIDING MEASUREMENT: SPECIALIZATION LOSES ON THIN DATA EVEN WHEN THE
+SKILL GENUINELY DIFFERS.** Brier on held-out data:
+
+```
+skill is the SAME in every regime      pooled   specialized   winner
+   100 observations (20/regime)       0.25114       0.26521   POOLED
+  1000 observations                   0.24788       0.24906   POOLED
+ 10000 observations                   0.24753       0.24763   POOLED
+
+skill GENUINELY DIFFERS by regime      pooled   specialized   winner
+   100 observations (20/regime)       0.24913       0.25808   POOLED
+   300 observations (60/regime)       0.24504       0.24371   SPECIALIZED
+ 10000 observations                   0.24498       0.24175   SPECIALIZED
+```
+
+When skill does not differ, pooling wins at *every* sample size. When it does,
+specialization still loses until ~300 observations.
+
+**THE RARE-REGIME PROBLEM.** The regimes are not equally common — stress is
+~5% of observations, so at n=1000 overall it holds ~52. And a rate estimated
+from ~50 observations carries a typical error of **0.056**, comparable to the
+**0.08** difference being detected. The estimate *is* the noise. A stress
+model is refused until its own evidence exists, however much total data the
+system holds.
+
+**A BARE OOS WIN IS NOT EVIDENCE.** MEASURED with no real difference anywhere,
+specialization still "wins OOS" on **14–23%** of single comparisons. Adding a
+relative margin and a fold majority:
+
+```
+rule                        false adopt      true adopt
+bare OOS win                  14 - 23%        30 - 100%
+win by >= 0.5% relative         0 -  1%        75 - 100%
+win by >= 2.0% relative              0%         0 -  10%
+
+folds/need              real effect found   worst noise regime
+   1 of 1                    85 - 96%            19 - 26%
+   4 of 5                    36 - 68%             2 -  4%
+   5 of 5                    10 - 33%                  0%
+```
+
+Shipped **0.5% margin, 4 of 5 folds**: measured 0/200 noise adoptions while
+real specialization is still found. Demanding all five folds rejects a real
+effect two thirds of the time — that is blindness, not caution.
+
+**Decided per regime, never all-or-nothing.** MEASURED, a common regime with a
+real difference adopts at 63% while a rare one adopts at 1% on the same data;
+an all-or-nothing rule holds the first hostage to the second. And a regime
+that does not earn its own model **falls back to pooled**, never going
+unserved — no model for stress because stress is rare would remove coverage
+exactly when it matters most.
+
+**TWO BLIND SPOTS IN MY OWN GATE, both found by reinjection.** The noise check
+compared a pooled and a specialized prediction that were *identical*
+(0.55 vs 0.55), so the gain was exactly zero and no fold could ever be won
+whatever the rule was — it passed against a gate with the margin removed AND
+against one where a single fold sufficed. Replaced with a specialized model
+fitted on its own finite sample. Then the check still missed the margin
+attack at 40 trials: MEASURED, dropping the margin at 4-of-5 folds takes noise
+adoption from 0/400 to 23/400 (5.75%), which 40 trials miss most of the time.
+Raised to 200 trials, and both attacks are now caught.
+
+- Acceptance: 31 tests in `tests/test_regime_specialization.py`; gate
+  `scripts/check_regime_specialization.py`, verified to FAIL under twelve
+  reinjected invariants — the default flipped to specialized, the margin
+  removed in config and again in code, the margin raised past the knee, the
+  cell floor dropped in config and again in code, the fold majority reduced to
+  a minority in config and again in code, INSUFFICIENT collapsed into POOLED,
+  the pooled fallback removed, a regime left unserved, and a report covering
+  only the regimes it was handed.
+
 ### L-blocker. Live chart state ✓ DONE
 
 `scripts/run_forecasts.py` derived each ticker's chart state from that
