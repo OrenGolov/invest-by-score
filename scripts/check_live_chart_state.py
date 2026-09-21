@@ -146,10 +146,29 @@ def main() -> int:
         if real_fetch is not None:
             run_module.__dict__["fetch_price_history"] = real_fetch
 
-    check(
-        isinstance(starved_run, dict) and "chart_refusals" in starved_run,
-        "record_run stopped reporting which tickers were refused a live state",
-    )
+    # THE KEY EXISTS ONLY IF THE RUN REACHED THE CHART STAGE. `record_run`
+    # returns early when the event-memory store is empty, which is correct -
+    # it refuses to forecast from nothing - and that early return has no
+    # chart_refusals because no chart was attempted.
+    #
+    # A FIRST VERSION ASSERTED THE KEY UNCONDITIONALLY AND BROKE CI. The store
+    # `data/event_memory.jsonl` is gitignored (~2084 rows locally, absent on a
+    # fresh clone), so this gate passed on my machine and failed on every
+    # push. A gate that depends on untracked data is testing my working
+    # directory, not the repository.
+    reached_chart_stage = not str(starved_run.get("reason") or "").strip()
+    if reached_chart_stage:
+        check(
+            "chart_refusals" in starved_run,
+            "record_run stopped reporting which tickers were refused a live "
+            "state",
+        )
+    else:
+        check(
+            int(starved_run.get("attempted", 0)) == 0,
+            "record_run returned early without attempting a forecast but "
+            "still reported attempts",
+        )
     check(
         int(starved_run.get("attempted", 0)) == 0,
         f"with the price feed down, record_run still attempted "

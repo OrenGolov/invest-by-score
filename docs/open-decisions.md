@@ -118,7 +118,31 @@ own evidence — by sector, by correlation clustering, or by factor loading —
 and each choice is a measurement, not a preference. Widening R1's scope to
 guess at one would be the kind of unmeasured decision this project avoids.
 
-## 6. Collection cadence is manual — DECISION
+## 6. Verify against a CLEAN CLONE, not the working directory — CLOSED-AS-PROCESS
+
+**Raised:** 2026-09-21, after CI failed on nine consecutive pushes while every
+local run reported green.
+
+**Cause.** `data/event_memory.jsonl` is gitignored (2084 rows locally, absent
+on a fresh clone). One gate and one test asserted that `record_run` always
+reports `chart_refusals` — but `record_run` returns early when the memory
+store is empty, correctly refusing to forecast from nothing, and that early
+return reaches no chart stage. Both passed on my machine and failed on every
+push.
+
+**The deeper problem was my verification, not the code.** I ran
+`python -m unittest` while CI runs `pytest`, and I ran in a working directory
+carrying untracked data CI never sees. Neither difference was visible from
+inside the loop I was using.
+
+**Standing practice from here:**
+1. Verify with `python -m pytest tests/ -q`, the runner CI actually uses.
+2. Before reporting a sprint task green, run the gates and suite against a
+   fresh `git clone` of the branch, not the working tree.
+3. A gate or test that needs gitignored data must either tolerate its absence
+   or generate what it needs.
+
+## 7. Collection cadence is manual — DECISION
 
 **Raised:** Sprint L (2026-09). **Owner:** operator.
 
