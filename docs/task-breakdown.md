@@ -3600,6 +3600,92 @@ Raised to 200 trials, and both attacks are now caught.
   the pooled fallback removed, a regime left unserved, and a report covering
   only the regimes it was handed.
 
+### L8. Champion evolution ✓ DONE
+
+"Replacement requires credible OOS improvement, acceptable calibration, no
+unacceptable false-positive degradation, acceptable risk, regime robustness,
+reproducibility, governance approval. Historical forecasts remain immutable."
+`core/champion_evolution.py` plus the L8 block in `core/config.py`.
+
+**Seven conditions and an invariant.** Most have an owner, and L8 sequences
+rather than rebuilds them (W5) — it owns three, because three gaps were real:
+
+| condition | owner |
+|---|---|
+| credible OOS improvement | M5 comparison **+ L8 credibility** |
+| acceptable calibration | L6 `calibration_drift` |
+| no false-positive degradation | **L8 (new)** |
+| acceptable risk | **L8 (new)** |
+| regime robustness | L7 |
+| reproducibility | M8 |
+| governance approval | M5 |
+
+**GAP 1 — "CREDIBLE" WAS UNQUALIFIED.** M5 requires the candidate to beat the
+incumbent out of sample, but not by how much relative to noise. MEASURED, two
+models of **identical** skill:
+
+```
+    n     mean gap   p90 gap   p99 gap
+  250      -0.0014   +0.0560   +0.1040
+ 1000      -0.0004   +0.0280   +0.0500
+ 2000      -0.0003   +0.0195   +0.0365
+```
+
+At n=250 a challenger with **no real edge** beats the champion by 5.6 points on
+10% of comparisons and 10.4 points on 1%. So the improvement is compared
+against its own standard error and the bar **scales with the evidence** — a
+fixed percentage would be far too lax at small n and too strict at large n.
+Floor of 500, because detection of a real 3-point edge at the p<0.01 bar is
+only 6.3% at n=250.
+
+**GAP 2 — RISK WAS NEVER MEASURED AT PROMOTION.** MEASURED with the hit rate
+held **fixed** and only the *size* of losing moves changed:
+
+```
+model                              hit rate   mean ret    max DD
+champion                              0.580   +0.00160   -0.1244
+challenger: same acc, big losses      0.580   -0.00681   -3.4496
+challenger: better acc + big losses   0.620   -0.00520   -2.6626
+```
+
+The second has the **same hit rate and a 28× worse drawdown**; the third has a
+*better* hit rate and still loses money. An accuracy-only gate promotes both.
+L8 bounds drawdown and left tail as ratios of the incumbent's.
+
+**GAP 3 — FALSE POSITIVES ARE NOT THE VETO RATE.** M5's regression check
+watches how often the *policy* vetoes; L8 needs how often an **acted-on** call
+was wrong. MEASURED:
+
+```
+model                             overall acc   BUY false-positive rate
+champion                                0.594                     0.349
+challenger: same acc, worse BUYs        0.597                     0.551
+```
+
+The challenger matches the champion on overall accuracy while every acted-on
+call got worse — accuracy cannot see it.
+
+**Historical forecasts remain immutable** — the one clause that is an
+invariant, not a threshold. Checked by comparison, not assumed: a rewritten
+value, a forecast **re-attributed to a different model**, and a **deleted**
+row are all detected, because deletion rewrites the record as surely as an
+edit does. Appending new forecasts is allowed.
+
+**Two failures in my own tests, both percentile arithmetic.** I asserted that
+one bad day in 100 is the 5th percentile (it is the 6th worst that counts),
+then that 10 worsened days in 500 would move the tail (2% is inside it). The
+code was right both times; the assertions were wrong and were corrected rather
+than the behaviour.
+
+- Acceptance: 43 tests in `tests/test_champion_evolution.py`; gate
+  `scripts/check_champion_evolution.py`, verified to FAIL under thirteen
+  reinjected invariants — a condition dropped, the credibility bar removed in
+  config and again in code, the OOS floor lowered, the drawdown bound widened,
+  the risk condition neutered, the false-positive bound widened,
+  NOT_EVALUATED treated as passing, L8 claiming governance, a delegated
+  verdict overridden to PASS, history made mutable, and deletion or
+  re-attribution of a past forecast going undetected.
+
 ### L-blocker. Live chart state ✓ DONE
 
 `scripts/run_forecasts.py` derived each ticker's chart state from that

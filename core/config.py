@@ -5307,3 +5307,226 @@ def _validate_regime_specialization_config() -> None:
 
 
 _validate_regime_specialization_config()
+
+
+# ---------------------------------------------------------------------------
+# Sprint L8 - Champion evolution
+# ---------------------------------------------------------------------------
+# "Replacement requires credible OOS improvement, acceptable calibration, no
+# unacceptable false-positive degradation, acceptable risk, regime robustness,
+# reproducibility, governance approval. Historical forecasts remain
+# immutable."
+#
+# SEVEN CONDITIONS AND AN INVARIANT. Most have an owner already, and L8 must
+# SEQUENCE them rather than rebuild them (W5):
+#
+#   credible OOS improvement    M5 PROMO_CHECK_OOS          + L8 credibility
+#   acceptable calibration      L6 calibration_drift        delegated
+#   no FP degradation           NEW - M5 measures VETO rate, not precision
+#   acceptable risk             NEW - nothing measured risk at promotion
+#   regime robustness           L7 per-regime evaluation    delegated
+#   reproducibility             M8 REPRODUCIBILITY          delegated
+#   governance approval         M5 PROMO_CHECK_APPROVAL     delegated
+#   historical immutability     M5 PROMOTION_HISTORY_IMMUTABLE
+#
+# THREE GAPS WERE REAL.
+#
+# GAP 1: "CREDIBLE" WAS UNQUALIFIED. M5 requires the candidate to beat the
+# incumbent out of sample, but not by how much relative to noise. MEASURED,
+# two models of IDENTICAL skill (0.55):
+#
+#     n     mean gap   p90 gap   p99 gap
+#   100      -0.0009   +0.0900   +0.1700
+#   250      -0.0014   +0.0560   +0.1040
+#   500      +0.0006   +0.0420   +0.0720
+#  1000      -0.0004   +0.0280   +0.0500
+#  2000      -0.0003   +0.0195   +0.0365
+#
+# At n=250 a challenger with NO real edge beats the champion by 5.6 points on
+# 10% of comparisons and by 10.4 points on 1%. "It improved out of sample" is
+# therefore not credible evidence on its own - the improvement must be large
+# relative to what luck produces at that sample size.
+#
+# GAP 2: RISK WAS NEVER MEASURED AT PROMOTION. A model can improve accuracy
+# and destroy the account. MEASURED with the hit rate held FIXED and only the
+# SIZE of losing moves changed:
+#
+#   model                              hit rate   mean ret    max DD
+#   champion                              0.580   +0.00160   -0.1244
+#   challenger: same acc, big losses      0.580   -0.00681   -3.4496
+#   challenger: better acc + big losses   0.620   -0.00520   -2.6626
+#
+# The second has the SAME hit rate and a 28x worse drawdown; the third has a
+# BETTER hit rate and still loses money. An accuracy-only gate promotes both.
+#
+# GAP 3: FALSE POSITIVES ARE NOT THE VETO RATE. M5's regression check watches
+# how often the policy vetoes; L8 needs how often an ACTED-ON call was wrong.
+# MEASURED:
+#
+#   model                             overall acc   BUY false-positive rate
+#   champion                                0.594                     0.349
+#   challenger: same acc, worse BUYs        0.597                     0.551
+#   challenger: fewer but better BUYs       0.591                     0.204
+#
+# The second matches the champion on overall accuracy while every acted-on
+# call got worse. Overall accuracy cannot see it.
+CHAMPION_EVOLUTION_VERSION = "champion-evolution-v1"
+
+# The seven conditions, in the order the sprint names them. Declared as data so
+# a replacement cannot silently satisfy six and proceed.
+EVO_OOS = "credible_oos_improvement"
+EVO_CALIBRATION = "acceptable_calibration"
+EVO_FALSE_POSITIVE = "no_false_positive_degradation"
+EVO_RISK = "acceptable_risk"
+EVO_REGIME = "regime_robustness"
+EVO_REPRODUCIBILITY = "reproducibility"
+EVO_GOVERNANCE = "governance_approval"
+
+CHAMPION_EVOLUTION_CONDITIONS: tuple[str, ...] = (
+    EVO_OOS,
+    EVO_CALIBRATION,
+    EVO_FALSE_POSITIVE,
+    EVO_RISK,
+    EVO_REGIME,
+    EVO_REPRODUCIBILITY,
+    EVO_GOVERNANCE,
+)
+
+# EVERY condition is required. There is no "mostly acceptable" replacement:
+# the sprint lists them with "and", not "or".
+CHAMPION_EVOLUTION_REQUIRED: tuple[str, ...] = CHAMPION_EVOLUTION_CONDITIONS
+
+# Conditions L8 OWNS rather than delegates - the three real gaps.
+CHAMPION_EVOLUTION_OWNED: tuple[str, ...] = (
+    EVO_OOS,          # the CREDIBILITY test on top of M5's bare comparison
+    EVO_FALSE_POSITIVE,
+    EVO_RISK,
+)
+
+# CREDIBILITY. The OOS improvement must exceed this multiple of its own
+# standard error, so the bar scales with the evidence rather than being a
+# fixed number of points. 2.58 is the p<0.01 bar; MEASURED, the p99 of the
+# null gap is +0.1040 at n=250 and +0.0365 at n=2000, so a fixed percentage
+# bar would be far too lax at small n and far too strict at large n.
+CHAMPION_EVOLUTION_CREDIBILITY_SIGMA = 2.58
+
+# ...and a floor on the evidence itself. MEASURED, detection of a REAL 3-point
+# edge at the p<0.01 bar is 6.3% at n=250 and 16.7% at n=1000 - below this
+# there is no point running the test, because it cannot find anything.
+CHAMPION_EVOLUTION_MIN_OOS_SAMPLE = 500
+
+# RISK. Maximum tolerated worsening of the drawdown, as a fraction of the
+# incumbent's. MEASURED, a challenger with the SAME hit rate carried a 28x
+# worse drawdown, so the bound must be a multiple rather than an absolute.
+CHAMPION_EVOLUTION_MAX_DRAWDOWN_RATIO = 1.25
+
+# ...and of the left tail (5th percentile of returns). A model can hold its
+# drawdown while making its bad days much worse.
+CHAMPION_EVOLUTION_MAX_TAIL_RATIO = 1.25
+
+# FALSE POSITIVES. How much the acted-on false-positive rate may rise in
+# ABSOLUTE terms. MEASURED, a challenger matching the champion on overall
+# accuracy moved it 0.349 -> 0.551, a rise of 0.202.
+CHAMPION_EVOLUTION_MAX_FP_INCREASE = 0.05
+
+# Minimum acted-on calls before the false-positive comparison means anything.
+# A precision estimated from a handful of BUYs is noise.
+CHAMPION_EVOLUTION_MIN_ACTED_CALLS = 100
+
+# Outcomes. NOT_EVALUATED blocks exactly as FAIL does, inherited from M5:
+# absence of evidence is not evidence of safety.
+EVO_PASS = "PASS"
+EVO_FAIL = "FAIL"
+EVO_NOT_EVALUATED = "NOT_EVALUATED"
+
+CHAMPION_EVOLUTION_OUTCOMES: tuple[str, ...] = (EVO_PASS, EVO_FAIL, EVO_NOT_EVALUATED)
+
+# HISTORICAL FORECASTS REMAIN IMMUTABLE. A promotion never rewrites what a
+# past forecast said or which model made it. This is the one clause that is
+# not a threshold: it is an invariant, and a system that edits its own history
+# can report any track record it likes.
+CHAMPION_EVOLUTION_HISTORY_IMMUTABLE = True
+
+
+def _validate_champion_evolution_config() -> None:
+    """Import-time guard for the L8 contract."""
+    if len(set(CHAMPION_EVOLUTION_CONDITIONS)) != len(CHAMPION_EVOLUTION_CONDITIONS):
+        raise ValueError("CHAMPION_EVOLUTION_CONDITIONS contains a duplicate")
+    if len(CHAMPION_EVOLUTION_CONDITIONS) != 7:
+        raise ValueError(
+            f"the sprint names seven conditions and "
+            f"{len(CHAMPION_EVOLUTION_CONDITIONS)} are declared"
+        )
+    if set(CHAMPION_EVOLUTION_REQUIRED) != set(CHAMPION_EVOLUTION_CONDITIONS):
+        raise ValueError(
+            "every condition is required - the sprint lists them with 'and', "
+            "and a replacement that satisfies six is not a replacement"
+        )
+    unknown = set(CHAMPION_EVOLUTION_OWNED) - set(CHAMPION_EVOLUTION_CONDITIONS)
+    if unknown:
+        raise ValueError(f"CHAMPION_EVOLUTION_OWNED names unknown conditions: {sorted(unknown)}")
+    if EVO_GOVERNANCE in CHAMPION_EVOLUTION_OWNED:
+        raise ValueError(
+            "governance approval is M5's check - a second copy would let L8 "
+            "approve a promotion M5 would refuse"
+        )
+    if EVO_RISK not in CHAMPION_EVOLUTION_OWNED:
+        raise ValueError(
+            "risk must be owned here: MEASURED, nothing in the promotion path "
+            "measured risk at all, and a challenger with the SAME hit rate "
+            "carried a 28x worse drawdown"
+        )
+
+    if CHAMPION_EVOLUTION_CREDIBILITY_SIGMA < 1.96:
+        raise ValueError(
+            f"a credibility bar of {CHAMPION_EVOLUTION_CREDIBILITY_SIGMA} sigma "
+            f"is too lax. MEASURED, two models of IDENTICAL skill differ by "
+            f"5.6 points on 10% of comparisons at n=250 - an unqualified "
+            f"'it improved out of sample' is not credible evidence"
+        )
+    if CHAMPION_EVOLUTION_MIN_OOS_SAMPLE < 500:
+        raise ValueError(
+            f"an OOS floor of {CHAMPION_EVOLUTION_MIN_OOS_SAMPLE} cannot "
+            f"support a credibility test. MEASURED, detection of a real "
+            f"3-point edge at the p<0.01 bar is 6.3% at n=250"
+        )
+    if CHAMPION_EVOLUTION_MAX_DRAWDOWN_RATIO <= 1.0:
+        raise ValueError(
+            "the drawdown bound must allow at least parity, or no candidate "
+            "could ever be promoted"
+        )
+    if CHAMPION_EVOLUTION_MAX_DRAWDOWN_RATIO > 2.0:
+        raise ValueError(
+            f"a drawdown bound of {CHAMPION_EVOLUTION_MAX_DRAWDOWN_RATIO}x "
+            f"permits doubling the worst loss in exchange for accuracy. "
+            f"MEASURED, a challenger with the SAME hit rate carried a 28x "
+            f"worse drawdown while losing money"
+        )
+    if not 1.0 < CHAMPION_EVOLUTION_MAX_TAIL_RATIO <= 2.0:
+        raise ValueError("the tail bound must allow parity and stay under 2x")
+    if not 0.0 < CHAMPION_EVOLUTION_MAX_FP_INCREASE <= 0.10:
+        raise ValueError(
+            f"a false-positive allowance of {CHAMPION_EVOLUTION_MAX_FP_INCREASE} "
+            f"is not a bound. MEASURED, a challenger matching the champion on "
+            f"OVERALL accuracy moved the acted-on false-positive rate "
+            f"0.349 -> 0.551"
+        )
+    if CHAMPION_EVOLUTION_MIN_ACTED_CALLS < 100:
+        raise ValueError(
+            "a precision estimated from fewer than 100 acted-on calls is noise"
+        )
+    if EVO_NOT_EVALUATED == EVO_PASS:
+        raise ValueError(
+            "'could not be evaluated' must never equal PASS - absence of "
+            "evidence is not evidence of safety"
+        )
+    if not CHAMPION_EVOLUTION_HISTORY_IMMUTABLE:
+        raise ValueError(
+            "historical forecasts must remain immutable. A system that can "
+            "edit what a past forecast said, or which model made it, can "
+            "report any track record it likes - and every measurement in this "
+            "repository would become unverifiable"
+        )
+
+
+_validate_champion_evolution_config()
