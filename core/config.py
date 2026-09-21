@@ -4714,3 +4714,179 @@ def _validate_conditioning_noise_config() -> None:
 
 
 _validate_conditioning_noise_config()
+
+
+# ---------------------------------------------------------------------------
+# Sprint L5 - Controlled incremental learning
+# ---------------------------------------------------------------------------
+# "New data -> candidate update -> shadow evaluation -> drift testing -> OOS
+# validation -> promotion gate -> human approval -> new champion. Never
+# auto-replace the production champion daily."
+#
+# MOST OF THIS CHAIN ALREADY EXISTS, and L5 must not rebuild it (W5):
+#
+#   new data            scripts/daily_collect.py            L-sprint
+#   candidate update    core.training.train_baseline        M-sprint
+#   shadow evaluation   M7 roles, SHADOW_MIN_OBSERVATIONS   M-sprint
+#   drift testing       M5 PROMO_CHECK_DRIFT (PSI)          M-sprint
+#   OOS validation      M5 PROMO_CHECK_OOS                  M-sprint
+#   promotion gate      core.promotion.evaluate_promotion   M-sprint
+#   human approval      M5 PROMO_CHECK_APPROVAL             M-sprint
+#   new champion        registry.crown_champion             M7
+#
+# TWO THINGS WERE MISSING, and they are what L5 adds.
+#
+# MISSING 1: THE LAST SENTENCE WAS UNENFORCED. "Never auto-replace the
+# production champion daily" had NO implementation anywhere - MEASURED, the
+# words cooldown/last_promoted/min_days/interval/elapsed/cadence appear ZERO
+# times across core/promotion.py and core/model_registry.py. `crown_champion`
+# checks role, status and approval but never compares `changed_at` to the
+# outgoing champion's tenure. DEMONSTRATED: four champions crowned inside
+# FIFTEEN MINUTES, every crowning accepted.
+#
+# WHY THAT MATTERS, MEASURED. Two models with IDENTICAL true skill: the
+# challenger looks better ~48% of the time at ANY sample size (43.6% at n=20,
+# 49.5% at n=1000). A rule of "promote whatever is better on the evidence so
+# far" therefore churns the champion roughly every other evaluation FOREVER,
+# on pure noise. Meanwhile a REAL 3-point edge is detected only 64% of the
+# time at n=100 - so evidence, not a threshold, is what separates them.
+#
+# THE COST OF CHURN, SIMULATED over three years with a candidate appearing
+# daily and a genuinely better (+4pt) model arriving on day 360:
+#
+#     min days   noise churn/3yr   mean adopt delay   median
+#            0             433.5                1.9      1.0
+#            7             127.2                7.8      5.5
+#           14              70.0               16.7     12.0
+#           30              34.8               35.6     19.0
+#           60              18.0               47.7     11.0
+#           90              12.0               64.5      8.0
+#          180               6.0              150.2      6.0
+#
+# Churn collapses 433 -> 35 (92%) by 30 days and then FLATTENS, while the
+# delay in adopting a real winner climbs steeply past 60. 30 days is the knee:
+# both costs are acceptable and neither dominates.
+CHAMPION_TENURE_VERSION = "champion-tenure-v1"
+
+# The minimum days a champion must serve before it may be replaced.
+#
+# This is the implementation of "never auto-replace the production champion
+# daily" - the clause had no code behind it before L5.
+CHAMPION_MIN_TENURE_DAYS = 30
+
+# A tenure bound must never block a SAFETY withdrawal. Retiring a champion
+# that is failing is not the churn this guard exists to prevent, and a guard
+# that trapped a broken model in production would be worse than no guard.
+CHAMPION_TENURE_ALLOWS_ROLLBACK = True
+
+# The bound is on REPLACEMENT, measured from the outgoing champion's crowning.
+# Measuring from the candidate's readiness instead would let a queue of
+# candidates replace the champion in sequence, each "ready" on a different day.
+CHAMPION_TENURE_MEASURED_FROM = "incumbent_crowned_at"
+
+# L5 STAGES, in order. The chain is declared as data so the orchestrator
+# cannot silently skip one: every stage must reach a verdict, and a stage that
+# could not run blocks exactly as a failure does (inherited from M5's
+# NOT_EVALUATED).
+L5_STAGE_DATA = "new_data"
+L5_STAGE_CANDIDATE = "candidate_update"
+L5_STAGE_SHADOW = "shadow_evaluation"
+L5_STAGE_DRIFT = "drift_testing"
+L5_STAGE_OOS = "oos_validation"
+L5_STAGE_GATE = "promotion_gate"
+L5_STAGE_APPROVAL = "human_approval"
+L5_STAGE_TENURE = "champion_tenure"
+L5_STAGE_CHAMPION = "new_champion"
+
+L5_STAGES: tuple[str, ...] = (
+    L5_STAGE_DATA,
+    L5_STAGE_CANDIDATE,
+    L5_STAGE_SHADOW,
+    L5_STAGE_DRIFT,
+    L5_STAGE_OOS,
+    L5_STAGE_GATE,
+    L5_STAGE_APPROVAL,
+    L5_STAGE_TENURE,
+    L5_STAGE_CHAMPION,
+)
+
+# Stages L5 OWNS rather than delegates. Everything else is called through to
+# its existing owner (W5), and the orchestrator holds no second copy of the
+# logic.
+L5_OWNED_STAGES: tuple[str, ...] = (L5_STAGE_TENURE,)
+
+# MISSING 2: nothing ran the chain end to end, so no single call could answer
+# "may this candidate become champion today, and if not, which stage stopped
+# it". Each stage was individually correct and collectively unsequenced.
+L5_PIPELINE_VERSION = "controlled-learning-v1"
+
+# Promotion is never automatic, whatever the evidence says. This is a separate
+# statement from the approval CHECK: the check verifies an approver was
+# recorded, while this forbids the pipeline from supplying one itself.
+L5_AUTO_PROMOTE = False
+
+
+def _validate_controlled_learning_config() -> None:
+    """Import-time guard for the L5 contract."""
+    if CHAMPION_MIN_TENURE_DAYS < 2:
+        raise ValueError(
+            f"a tenure bound of {CHAMPION_MIN_TENURE_DAYS} day(s) permits "
+            f"daily replacement, which is exactly what the sprint forbids. "
+            f"MEASURED, two models of IDENTICAL skill trade places ~48% of "
+            f"evaluations at any sample size, so an unbounded rule churns the "
+            f"champion on pure noise - 433 replacements per three years"
+        )
+    if CHAMPION_MIN_TENURE_DAYS > 180:
+        raise ValueError(
+            f"a tenure bound of {CHAMPION_MIN_TENURE_DAYS} days delays a "
+            f"genuinely better model beyond usefulness. MEASURED, mean "
+            f"adoption delay for a real +4pt model rises to 150 days at a "
+            f"180-day bound while churn barely improves on 30 days"
+        )
+    if not CHAMPION_TENURE_ALLOWS_ROLLBACK:
+        raise ValueError(
+            "the tenure bound must never block a safety withdrawal: trapping "
+            "a failing champion in production would be worse than no guard"
+        )
+    if CHAMPION_TENURE_MEASURED_FROM != "incumbent_crowned_at":
+        raise ValueError(
+            "tenure must be measured from the OUTGOING champion's crowning; "
+            "measuring from candidate readiness lets a queue of candidates "
+            "replace the champion in sequence, each ready on a different day"
+        )
+
+    if len(set(L5_STAGES)) != len(L5_STAGES):
+        raise ValueError("L5_STAGES contains a duplicate")
+    if L5_STAGES[0] != L5_STAGE_DATA:
+        raise ValueError("the chain begins with new data")
+    if L5_STAGES[-1] != L5_STAGE_CHAMPION:
+        raise ValueError("the chain ends with a new champion")
+    if L5_STAGES.index(L5_STAGE_TENURE) >= L5_STAGES.index(L5_STAGE_CHAMPION):
+        raise ValueError(
+            "the tenure check must run BEFORE a champion is crowned - after "
+            "is not a guard, it is a report"
+        )
+    if L5_STAGES.index(L5_STAGE_APPROVAL) >= L5_STAGES.index(L5_STAGE_CHAMPION):
+        raise ValueError("human approval must precede the new champion")
+    if L5_STAGES.index(L5_STAGE_SHADOW) >= L5_STAGES.index(L5_STAGE_OOS):
+        raise ValueError(
+            "shadow evaluation precedes OOS validation - a model that has not "
+            "run in shadow has no out-of-sample record to validate"
+        )
+    unknown = set(L5_OWNED_STAGES) - set(L5_STAGES)
+    if unknown:
+        raise ValueError(f"L5_OWNED_STAGES names unknown stages: {sorted(unknown)}")
+    if L5_STAGE_GATE in L5_OWNED_STAGES:
+        raise ValueError(
+            "L5 must DELEGATE the promotion gate to core.promotion (W5), not "
+            "own a second copy of it"
+        )
+    if L5_AUTO_PROMOTE:
+        raise ValueError(
+            "promotion must never be automatic: the sprint requires human "
+            "approval, and a pipeline that supplies its own approver has "
+            "removed the only stage a machine cannot satisfy"
+        )
+
+
+_validate_controlled_learning_config()

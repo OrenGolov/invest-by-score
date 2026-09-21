@@ -3359,6 +3359,84 @@ rule inherited from F3→L3.
   code, the backing states collapsed, the noise band flattened, CONDITIONAL
   claimed below the floor, and a CONDITIONAL score stripped of its cell.
 
+### L5. Controlled incremental learning ✓ DONE
+
+"New data → candidate update → shadow evaluation → drift testing → OOS
+validation → promotion gate → human approval → new champion. Never
+auto-replace the production champion daily."
+`core/controlled_learning.py` plus the L5 block in `core/config.py`.
+
+**MOST OF THIS CHAIN ALREADY EXISTED**, and L5 must not rebuild it (W5):
+
+| stage | owner |
+|---|---|
+| new data | `scripts/daily_collect.py` (L) |
+| candidate update | `core.training.train_baseline` (M) |
+| shadow evaluation | M7 roles, `SHADOW_MIN_OBSERVATIONS` |
+| drift testing | M5 `PROMO_CHECK_DRIFT` |
+| OOS validation | M5 `PROMO_CHECK_OOS` |
+| promotion gate | `core.promotion.evaluate_promotion` |
+| human approval | M5 `PROMO_CHECK_APPROVAL` |
+| new champion | `registry.crown_champion` (M7) |
+
+L5 owns exactly one stage — `champion_tenure` — and delegates the rest.
+
+**THE LAST SENTENCE HAD NO IMPLEMENTATION.** MEASURED, the words cooldown,
+last_promoted, min_days, interval, elapsed and cadence appear **zero** times
+across `core/promotion.py` and `core/model_registry.py`. `crown_champion`
+checks role, status and approval but never looks at how long the outgoing
+champion has served. **DEMONSTRATED: four champions crowned inside fifteen
+minutes, every crowning accepted.**
+
+**Why a bound is needed at all.** MEASURED, two models with IDENTICAL true
+skill: the challenger looks better **~48% of the time at any sample size**
+(43.6% at n=20, 49.5% at n=1000). So "promote whatever is better on the
+evidence so far" churns the champion roughly every other evaluation forever,
+on pure noise — while a real 3-point edge is detected only 64% of the time at
+n=100. Evidence separates them; no threshold does.
+
+**THE DECIDING MEASUREMENT.** Simulated over three years, a candidate
+appearing daily and a genuinely better (+4pt) model arriving on day 360:
+
+```
+min days   noise churn/3yr   mean adopt delay   median
+       0             433.5                1.9      1.0
+       7             127.2                7.8      5.5
+      14              70.0               16.7     12.0
+      30              34.8               35.6     19.0
+      60              18.0               47.7     11.0
+      90              12.0               64.5      8.0
+     180               6.0              150.2      6.0
+```
+
+Churn collapses **433 → 35 (92%)** by 30 days and then flattens, while the
+delay in adopting a real winner climbs steeply past 60. **30 days is the
+knee** — both costs acceptable, neither dominating.
+
+**The guard has three carve-outs, each for a reason.** A **rollback** is
+exempt, because trapping a failing champion in production would be worse than
+no guard. **No incumbent** passes, or the system could never crown its first
+champion. A **back-dated crowning** fails rather than passing — MEASURED, an
+`abs()` on the interval let a future-dated crowning *buy* 71 days of tenure.
+
+**A bug in my own delegation, caught by running it against the real gate.**
+`_from_checklist` assumed M5's `checks` was a LIST and its flag was
+`promoted`. M5 emits a DICT keyed by check name with the flag `approved`, so
+every real verdict would have surfaced as NOT_EVALUATED — a chain that looked
+healthy while reading nothing. Fixed and now gate-verified.
+
+**Proof it is the tenure bound deciding:** with a fully approved M5 verdict
+and identical evidence, an incumbent crowned 8 months ago gives
+`may_promote=True`, while one crowned yesterday blocks at `champion_tenure`.
+
+- Acceptance: 36 tests in `tests/test_controlled_learning.py`; gate
+  `scripts/check_controlled_learning.py`, verified to FAIL under ten
+  reinjected invariants — the bound removed, lowered to 1 day, raised to 10
+  years, measured from candidate readiness, the rollback exemption removed,
+  auto-promotion enabled, a stage dropped, NOT_EVALUATED treated as passing,
+  an `abs()` letting a future crowning buy tenure, and an M5 check
+  reimplemented instead of delegated.
+
 ### L-blocker. Live chart state ✓ DONE
 
 `scripts/run_forecasts.py` derived each ticker's chart state from that
