@@ -5530,3 +5530,155 @@ def _validate_champion_evolution_config() -> None:
 
 
 _validate_champion_evolution_config()
+
+
+# ---------------------------------------------------------------------------
+# Sprint R1 - Position exposure
+# ---------------------------------------------------------------------------
+# Sprint R moves from "is this ticker attractive?" to "does acting on this
+# forecast improve the CURRENT portfolio without violating risk constraints?"
+# R1 is the foundation: knowing what is actually held, and what holding it
+# EXPOSES the portfolio to.
+#
+# THERE WAS NO PORTFOLIO STATE AT ALL. `fetch_data.PORTFOLIO_TICKERS` is a
+# 77-name WATCHLIST - a list of symbols with no share counts, no cost basis
+# and no weights. The backtest engine tracks shares internally but nothing
+# persists live holdings. So the question Sprint R asks could not previously
+# be asked: there was nothing to improve.
+#
+# THE DECIDING MEASUREMENT: POSITION WEIGHT IS NOT EXPOSURE. Two portfolios
+# built on REAL daily returns (498 aligned sessions to 2026-09-18):
+#
+#   A: 40% NVDA, 20% MSFT, 20% GOOGL, 20% CAT          max weight 40%
+#   B: 10% each NVDA/AMD/AVGO/SOXX, then 20/20/20      max weight 10%
+#
+#   portfolio      daily vol   max weight   share of variance in semis
+#   A (40% NVDA)      1.741%          40%                       58.6%
+#   B (4x10% semis)   1.760%          10%                       56.9%
+#
+# B looks FOUR TIMES more diversified by weight and is very slightly MORE
+# volatile, carrying the same bet. The watchlist's real mean pairwise
+# correlation is 0.484, with SOXX/AMD at 0.78.
+#
+# WORSE, A WEIGHT CAP IS GAMEABLE IN THE WRONG DIRECTION. "Comply with a 10%
+# cap" was satisfied by splitting 40% NVDA across four correlated semis, which
+# RAISED volatility 1.741% -> 1.760%. A rule that can be satisfied by making
+# risk worse is not merely incomplete.
+#
+# AND NEITHER NAIVE MEASURE ORDERS PORTFOLIOS CORRECTLY:
+#
+#   portfolio         vol   max weight   effective bets   max risk share
+#   all VOO        1.006%         100%             1.00           100.0%
+#   diversified    1.449%          30%             3.66            32.3%
+#   40% NVDA       1.741%          40%             2.49            58.6%
+#   4x10% semis    1.760%          10%             6.80            17.9%
+#
+# 100% VOO has the LOWEST volatility of the four while every concentration
+# measure ranks it worst. A single diversified fund is not a concentrated
+# position, and a weight-based rule cannot tell the difference. So R1 reports
+# RISK CONTRIBUTION alongside weight, and never weight alone.
+#
+# MARGINAL EXPOSURE IS THE QUESTION SPRINT R ASKS. Against a held portfolio of
+# 30% NVDA / 20% AMD / 25% MSFT / 25% CAT (vol 1.984%), the same 5% purchase:
+#
+#   add 5% SOXX   -> 2.000%  (+0.016%)  ADDS risk
+#   add 5% MSFT   -> 1.936%  (-0.048%)  REDUCES risk
+#   add 5% VOO    -> 1.927%  (-0.057%)  REDUCES risk
+#
+# The same trade helps or hurts depending ENTIRELY on what is already held,
+# and no per-ticker forecast can answer that.
+POSITION_EXPOSURE_VERSION = "position-exposure-v1"
+
+# A held position needs these to be a position rather than a mention. Without
+# a quantity there is no exposure to compute; without an as_of the holding is
+# not point-in-time and could silently describe a different day.
+POSITION_REQUIRED_FIELDS: tuple[str, ...] = ("ticker", "quantity", "as_of")
+
+# Sessions of aligned return history required before a covariance-based
+# exposure is reported. Below this the estimate is dominated by sampling
+# error and would give a confident-looking number for a relationship that has
+# not been observed.
+EXPOSURE_MIN_SESSIONS = 120
+
+# Returns MUST be aligned by DATE, never by position. MEASURED, slicing the
+# last N rows of each series instead put MSFT (501 rows ending 2026-09-18)
+# out of step with NVDA and VOO (500 rows ending 2026-09-21) and reported
+# MSFT's correlation with EVERYTHING as ~0.00, including with VOO - which the
+# date-aligned data puts at 0.53. A position-offset join does not fail loudly;
+# it silently reports independence.
+EXPOSURE_ALIGN_BY_DATE = True
+
+# Exposure is reported on both scales, and a weight-only report is refused.
+EXPOSURE_BASIS_WEIGHT = "weight"              # share of portfolio value
+EXPOSURE_BASIS_RISK = "risk_contribution"     # share of portfolio variance
+
+EXPOSURE_BASES: tuple[str, ...] = (EXPOSURE_BASIS_WEIGHT, EXPOSURE_BASIS_RISK)
+
+# A single position's share of portfolio VALUE above which it is flagged for
+# review. This is a reporting threshold, not a limit: MEASURED, 100% VOO
+# breaches it while being the least volatile portfolio tested.
+EXPOSURE_WEIGHT_REVIEW = 0.25
+
+# A single position's share of portfolio VARIANCE above which it is flagged.
+# MEASURED, the 40%-NVDA portfolio puts 58.6% of its variance in one name
+# while the 4x10% semi basket puts 56.9% in the same bet at a tenth of the
+# per-name weight.
+EXPOSURE_RISK_REVIEW = 0.40
+
+# Exposure is DESCRIBED, never enforced here. R1 reports what is held and what
+# it exposes the portfolio to; whether a trade is permitted is a later task
+# with its own evidence. A measurement that silently blocked trades would be a
+# policy wearing a measurement's clothes.
+EXPOSURE_BLOCKS_TRADES = False
+
+
+def _validate_position_exposure_config() -> None:
+    """Import-time guard for the R1 contract."""
+    if "quantity" not in POSITION_REQUIRED_FIELDS:
+        raise ValueError(
+            "a position without a quantity is a watchlist entry, not a "
+            "holding - PORTFOLIO_TICKERS was exactly that, and it is why the "
+            "Sprint R question could not previously be asked"
+        )
+    if "as_of" not in POSITION_REQUIRED_FIELDS:
+        raise ValueError(
+            "a holding must carry its as_of or it is not point-in-time and "
+            "may silently describe a different day"
+        )
+    if EXPOSURE_MIN_SESSIONS < 120:
+        raise ValueError(
+            f"{EXPOSURE_MIN_SESSIONS} sessions cannot support a covariance "
+            f"estimate across a portfolio; the result would be a "
+            f"confident-looking number for a relationship never observed"
+        )
+    if not EXPOSURE_ALIGN_BY_DATE:
+        raise ValueError(
+            "returns must be aligned by DATE. MEASURED, a position-offset "
+            "join reported MSFT's correlation with every other holding as "
+            "~0.00 - including 0.00 against VOO, which is really 0.53 - "
+            "because MSFT's series ended three days earlier. It does not fail "
+            "loudly; it silently reports independence"
+        )
+    if EXPOSURE_BASIS_RISK not in EXPOSURE_BASES:
+        raise ValueError(
+            "risk contribution must be reported. MEASURED, 100% VOO is the "
+            "LEAST volatile portfolio tested (1.006%) while carrying the "
+            "worst score on every weight-based concentration measure"
+        )
+    if EXPOSURE_BASIS_WEIGHT not in EXPOSURE_BASES:
+        raise ValueError("weight must still be reported alongside risk")
+    if not 0.0 < EXPOSURE_WEIGHT_REVIEW < 1.0:
+        raise ValueError("the weight review threshold must lie inside (0, 1)")
+    if not 0.0 < EXPOSURE_RISK_REVIEW < 1.0:
+        raise ValueError("the risk review threshold must lie inside (0, 1)")
+    if EXPOSURE_BLOCKS_TRADES:
+        raise ValueError(
+            "R1 DESCRIBES exposure, it does not enforce limits. A weight cap "
+            "enforced alone is gameable in the wrong direction: MEASURED, "
+            "satisfying a 10% cap by splitting 40% NVDA across four "
+            "correlated semiconductors RAISED portfolio volatility "
+            "1.741% -> 1.760%"
+        )
+
+
+_validate_position_exposure_config()

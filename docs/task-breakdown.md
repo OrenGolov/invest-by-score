@@ -3770,6 +3770,96 @@ must forecast zero.
 
 ## Sprint R — Portfolio Risk Context (completing the fail-closed system)
 
+> Retitled in practice to **Portfolio-Aware Forecasting**: the goal is moving
+> from "is this ticker attractive?" to "does acting on this forecast improve
+> the current portfolio without violating risk constraints?"
+
+### R1. Position exposure ✓ DONE
+
+`core/position_exposure.py` plus the R1 block in `core/config.py`.
+
+**THERE WAS NO PORTFOLIO STATE AT ALL.** `fetch_data.PORTFOLIO_TICKERS` is a
+77-name **watchlist** — symbols with no share counts, no cost basis, no
+weights. The backtest engine tracks shares internally but nothing persists
+live holdings. The Sprint R question could not previously be asked, because
+there was nothing to improve.
+
+**THE DECIDING MEASUREMENT: POSITION WEIGHT IS NOT EXPOSURE.** Two portfolios
+on real daily returns (498 date-aligned sessions to 2026-09-18):
+
+```
+portfolio                       daily vol   max weight   variance in semis
+A: 40% NVDA + 20/20/20             1.741%          40%               58.6%
+B: 10% each NVDA/AMD/AVGO/SOXX     1.760%          10%               56.9%
+```
+
+B looks **four times more diversified** by weight and is slightly *more*
+volatile — the same bet, spread thinner. The watchlist's real mean pairwise
+correlation is 0.484, with SOXX/AMD at 0.78.
+
+**A WEIGHT CAP IS GAMEABLE IN THE WRONG DIRECTION.** "Comply with a 10% cap"
+was satisfied by splitting 40% NVDA across four correlated semiconductors,
+which **raised** volatility 1.741% → 1.760%. A rule that can be satisfied by
+making risk worse is not merely incomplete.
+
+**AND NO NAIVE MEASURE ORDERS PORTFOLIOS CORRECTLY:**
+
+```
+portfolio         vol   max weight   effective bets   max risk share
+all VOO        1.006%         100%             1.00           100.0%
+diversified    1.449%          30%             3.66            32.3%
+40% NVDA       1.741%          40%             2.49            58.6%
+4x10% semis    1.760%          10%             6.80            17.9%
+```
+
+**100% VOO is the least volatile portfolio tested** while scoring worst on
+every weight-based concentration measure. A single diversified fund is not a
+concentrated position. So exposure is reported on **both** scales — weight and
+risk contribution — and a weight-only report is refused.
+
+**MARGINAL EXPOSURE IS THE QUESTION SPRINT R ASKS.** Against a held portfolio
+of 30% NVDA / 20% AMD / 25% MSFT / 25% CAT (vol 1.984%), the same 5% purchase:
+
+```
+add 5% SOXX  -> 2.000%  (+0.016%)  ADDS risk
+add 5% MSFT  -> 1.936%  (-0.048%)  REDUCES risk
+add 5% VOO   -> 1.927%  (-0.057%)  REDUCES risk
+```
+
+The same trade helps or hurts depending entirely on what is already held, and
+no per-ticker forecast can answer that.
+
+**A REAL DATA HAZARD, found while measuring.** My first correlation matrix
+reported MSFT as ~0.00 correlated with **everything**, including VOO. That was
+not a finding — MSFT's series had 501 rows ending 2026-09-18 while NVDA and
+VOO had 500 ending 2026-09-21, and slicing by POSITION rather than joining by
+DATE shifted the series out of step. Date-aligned, MSFT/VOO is 0.53. A
+position-offset join does not fail loudly; it **silently reports
+independence**, so date alignment is mandatory and gate-verified.
+
+**A missing return history is NOT_EVALUATED, never zero risk** — scored as
+zero it would render the least-understood holding as the safest (the shape
+rule, inherited F3→L3).
+
+**Exposure is described, not enforced.** Whether a trade is permitted is a
+later task with its own evidence.
+
+**Known limit, recorded rather than guessed at:** R1 flags POSITIONS, so a
+cluster of correlated holdings is invisible to it — the 4×10% semi portfolio
+raises **zero flags** while holding 56.9% of its variance in one bet.
+Registered as item 5 in [open-decisions.md](open-decisions.md); defining a
+cluster needs its own measurement.
+
+- Acceptance: 35 tests in `tests/test_position_exposure.py`; gate
+  `scripts/check_position_exposure.py`, verified to FAIL under ten reinjected
+  invariants — date alignment disabled in config and again in code (which
+  reproduced the real bug, correlation collapsing 0.96 → 0.07), the session
+  floor lowered, trade blocking enabled, risk contribution dropped, a
+  watchlist entry accepted in config and again in code, a missing history
+  scored as zero risk, risk shares that ignore covariance, and the risk-scale
+  flags removed.
+
+
 The W2 policy table gates single-decision quality; this sprint adds the
 portfolio dimension the design docs require before any paper posture can be
 trusted as more than theater.

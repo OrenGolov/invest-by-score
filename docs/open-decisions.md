@@ -92,7 +92,33 @@ the estimator degrades correctly, it is simply not yet learning.
 source-linked outcomes to populate. Even with the join built, the useful
 near-term output is per-source global rates, not the full cross-product.
 
-## 5. Collection cadence is manual — DECISION
+## 5. Cluster exposure is not measured — PARKED
+
+**Raised:** Sprint R1 (2026-09). **Blocked on:** a later R task.
+
+R1 flags exposure per POSITION, on both weight and risk. A CLUSTER of
+correlated holdings is a different question and R1 cannot see it.
+
+MEASURED on real returns, a portfolio of 10% each in NVDA/AMD/AVGO/SOXX plus
+MSFT/GOOGL/CAT:
+
+```
+no single holding exceeds the 40% risk threshold
+  CAT 17.9%   AMD 17.5%   GOOGL 14.4%   AVGO 13.9%
+
+but the four semiconductors TOGETHER hold 56.9% of portfolio variance,
+at a mean pairwise correlation of 0.62
+```
+
+That portfolio raises **zero flags** while being more volatile (1.760%) than
+one holding 40% NVDA outright (1.741%).
+
+**Why it is parked rather than bolted onto R1.** Defining a cluster needs its
+own evidence — by sector, by correlation clustering, or by factor loading —
+and each choice is a measurement, not a preference. Widening R1's scope to
+guess at one would be the kind of unmeasured decision this project avoids.
+
+## 6. Collection cadence is manual — DECISION
 
 **Raised:** Sprint L (2026-09). **Owner:** operator.
 
