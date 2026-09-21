@@ -4505,3 +4505,212 @@ def _validate_live_chart_config() -> None:
 
 
 _validate_live_chart_config()
+
+
+# ---------------------------------------------------------------------------
+# Sprint L4 - Source reliability learning
+# ---------------------------------------------------------------------------
+# "Source quality may depend on source x event type x sector x horizon - one
+# global source score is not assumed sufficient."
+#
+# THE TASK STATES A HYPOTHESIS, SO THE FIRST JOB IS TO TEST IT RATHER THAN
+# IMPLEMENT IT. Two things were measured before any scorer was written.
+#
+# FIRST: WHAT EXISTS TODAY IS NOT LEARNED AT ALL. `fetch_data.SOURCE_REGISTRY`
+# carries ONE asserted `base_confidence` per DOMAIN - news 0.75, fundamentals
+# 0.90, market data 0.80 - with no measurement behind any of them, and nothing
+# ever updates them from outcomes. The news schema already carries a
+# `source_quality` field: MEASURED over 2650 stored articles it is populated
+# ZERO times. So the gap is real and it is the whole task.
+#
+# SECOND, AND DECISIVE: CONDITIONING IS NOT FREE. Estimating a rate per cell
+# costs variance, and MEASURED against a simulated source whose TRUE accuracy
+# really does vary by cell, per-cell estimation is FIVE TIMES WORSE than a
+# single global rate when evidence is thin:
+#
+#   true quality varies by cell (sd=0.10)   global MSE   per-cell MSE
+#     5 observations per cell                  0.01224        0.05935
+#    25 observations per cell                  0.01000        0.00950
+#   100 observations per cell                  0.00936        0.00234
+#
+# Per-cell conditioning only starts to pay from ~25 observations per cell, and
+# when quality does NOT in fact vary it is worse everywhere. So "one global
+# score is not sufficient" and "condition on everything" are both wrong, and
+# the honest answer is that THE EVIDENCE DECIDES, PER CELL.
+#
+# THE SHIPPED ESTIMATOR IS SHRINKAGE: the rate of a cell is pulled toward the
+# global rate by k pseudo-counts, so it IS the global score when a cell is
+# empty and becomes the score of that cell as evidence accumulates. MEASURED,
+# it never loses badly in either world:
+#
+#   quality REALLY varies      global    per-cell    shrunk
+#     5 per cell              0.01224     0.05935   0.01064
+#    25 per cell              0.01000     0.00950   0.00505
+#   100 per cell              0.00936     0.00234   0.00192
+#
+# WHAT THIS CANNOT DO YET, AND WHY IT SHIPS ANYWAY. The scheme the task
+# describes is 50 sources x 9 event types x 11 sectors x 4 horizons = 19,800
+# cells, which at the ~380 outcomes needed to separate a 0.65 source from a
+# 0.55 one would require ~7.5 MILLION source-linked outcomes. MEASURED today:
+# ZERO. Not few - zero, structurally, because no outcome in the system is
+# joined to an outlet (see SOURCE_RELIABILITY_JOIN_GAP below). Shrinkage is
+# exactly the estimator that degrades to the global score under that
+# condition, which is why it can ship before the join exists.
+SOURCE_RELIABILITY_VERSION = "source-reliability-v1"
+
+# Pseudo-counts pulling a cell toward the global rate.
+#
+# CHOSEN BY WORST CASE, NOT BY MEAN. MEASURED across quality-variation regimes
+# x sample sizes, k=5 minimised the worst case overall but ONLY because of a
+# regime with sd=0.20 - sources ranging from 0.2 to 0.95 accuracy - which no
+# outlet population plausibly shows. Over the plausible range (sd <= 0.10):
+#
+#     k      worst-case MSE
+#     5             0.01503
+#    15             0.01079
+#    20             0.01013   <- minimum
+#    25             0.01075
+#    40             0.01054
+#
+# 15-30 is a flat basin, so this is not a knife edge.
+SOURCE_RELIABILITY_SHRINKAGE_K = 20
+
+# Observations in a cell before its OWN rate is reported as distinguishable
+# from the global one. MEASURED, per-cell estimation first beats global at ~25
+# observations per cell; below that the shrunk estimate is still used but the
+# cell is reported as GLOBAL-backed, because a reader must not read a
+# shrinkage-dominated number as a learned source property.
+SOURCE_RELIABILITY_MIN_CELL = 25
+
+# The dimensions a source score MAY condition on, in the order of the task.
+# Listed rather than assumed: a dimension is only USED where a cell has the
+# evidence for it, and the estimator falls back along this order.
+SOURCE_RELIABILITY_DIMENSIONS: tuple[str, ...] = (
+    "source", "event_type", "sector", "horizon",
+)
+
+# How a reported score was actually backed, weakest to strongest. The order IS
+# the precedence.
+SOURCE_BACKING_NONE = "NO_EVIDENCE"      # nothing observed anywhere
+SOURCE_BACKING_PRIOR = "REGISTRY_PRIOR"  # the asserted base_confidence only
+SOURCE_BACKING_GLOBAL = "GLOBAL"         # the overall rate of that source
+SOURCE_BACKING_CELL = "CONDITIONAL"      # this cell has its own evidence
+
+SOURCE_RELIABILITY_BACKINGS: tuple[str, ...] = (
+    SOURCE_BACKING_NONE,
+    SOURCE_BACKING_PRIOR,
+    SOURCE_BACKING_GLOBAL,
+    SOURCE_BACKING_CELL,
+)
+
+# THE JOIN GAP, RECORDED AS DATA. No outcome in the system is currently
+# attributable to an OUTLET. MEASURED 2026-09-21:
+#   - 2650 stored articles carry 50 distinct `source_name` values
+#   - 0 of them carry a ticker, so no article joins to a price outcome
+#   - 2084 event memories carry NO source name at all (1954 are inferred from
+#     volume cadence and have no source by construction)
+#   - `Event.source` is set to the PROVIDER ("newsapi_news"), not the outlet
+# Until an outlet reaches an outcome, every cell is NO_EVIDENCE and every score
+# is the registry prior. That is reported, never silently rendered as 0.0.
+SOURCE_RELIABILITY_JOIN_GAP = (
+    "MEASURED 2026-09-21: 0 of 2650 stored articles carry a ticker and 0 of "
+    "2084 event memories carry an outlet, so no source-linked outcome exists "
+    "yet. Event.source records the provider, not the outlet. Scores are "
+    "registry priors until the join is built."
+)
+
+# A source is never scored 0.0 for absence of evidence. An unmeasured outlet
+# and an outlet measured to be useless are different facts, and collapsing
+# them would silently discard every new source the moment it appeared.
+SOURCE_RELIABILITY_ABSENT_IS_ZERO = False
+
+
+def _validate_source_reliability_config() -> None:
+    """Import-time guard for the L4 contract."""
+    if SOURCE_RELIABILITY_SHRINKAGE_K < 1:
+        raise ValueError(
+            "shrinkage k must be at least 1: k=0 is per-cell estimation, "
+            "MEASURED five times worse than a global rate at 5 observations "
+            "per cell even when quality genuinely varies"
+        )
+    if SOURCE_RELIABILITY_SHRINKAGE_K > 100:
+        raise ValueError(
+            f"a k of {SOURCE_RELIABILITY_SHRINKAGE_K} pins every cell to the "
+            f"global rate, which is the 'one global score' the task refuses to "
+            f"assume is sufficient"
+        )
+    if SOURCE_RELIABILITY_MIN_CELL < 25:
+        raise ValueError(
+            f"a cell floor of {SOURCE_RELIABILITY_MIN_CELL} reports a "
+            f"shrinkage-dominated number as a learned source property. "
+            f"MEASURED, per-cell estimation first beats global at ~25 "
+            f"observations per cell"
+        )
+    if SOURCE_RELIABILITY_DIMENSIONS[0] != "source":
+        raise ValueError(
+            "the source itself must be the first dimension - every other one "
+            "conditions it"
+        )
+    if len(set(SOURCE_RELIABILITY_DIMENSIONS)) != len(SOURCE_RELIABILITY_DIMENSIONS):
+        raise ValueError("SOURCE_RELIABILITY_DIMENSIONS contains a duplicate")
+    if SOURCE_RELIABILITY_BACKINGS[0] != SOURCE_BACKING_NONE:
+        raise ValueError("NO_EVIDENCE must be the weakest backing")
+    if SOURCE_RELIABILITY_BACKINGS[-1] != SOURCE_BACKING_CELL:
+        raise ValueError("CONDITIONAL must be the strongest backing")
+    if SOURCE_BACKING_PRIOR == SOURCE_BACKING_GLOBAL:
+        raise ValueError(
+            "an asserted registry prior and a measured global rate are "
+            "different facts and must stay distinct"
+        )
+    if SOURCE_RELIABILITY_ABSENT_IS_ZERO:
+        raise ValueError(
+            "an unmeasured source must not score 0.0: that is the same number "
+            "as a source measured to be useless, and it would discard every "
+            "new outlet the moment it appeared. " + SOURCE_RELIABILITY_JOIN_GAP
+        )
+    if "MEASURED" not in SOURCE_RELIABILITY_JOIN_GAP:
+        raise ValueError(
+            "the join gap must carry its measurement, or a reader cannot tell "
+            "a missing capability from a finding"
+        )
+
+
+_validate_source_reliability_config()
+
+# The noise band a conditioning claim must clear, as a multiplier on the mean
+# standard error across cells.
+#
+# THE BAND TRACKS THE TAIL OF THE NULL, NOT ITS MEAN. A first version used a
+# flat 2.0, which sits near the MEAN of the null range, so MEASURED it claimed
+# "quality depends on event_type" on 7 of 30 runs with NO effect present.
+#
+# MEASURED, the multiplier placing the band at the 95th percentile of the null
+# range grows with the number of cells - more cells, more chances for a wide
+# spread by luck, the same multiple-comparison effect L3 measured:
+#
+#     cells    multiplier needed
+#       2                   1.90
+#       3                   2.35
+#       5                   2.70
+#       9                   3.11
+#
+# Fitted c = 1.4 + 0.8*ln(cells).
+CONDITIONING_NOISE_INTERCEPT = 1.4
+CONDITIONING_NOISE_LOG_SLOPE = 0.8
+
+
+def _validate_conditioning_noise_config() -> None:
+    if CONDITIONING_NOISE_LOG_SLOPE <= 0:
+        raise ValueError(
+            "the noise band must GROW with the number of cells: more cells "
+            "means more chances for a wide spread by luck, and a flat band "
+            "MEASURED 7 false conditioning claims in 30 clean runs"
+        )
+    if CONDITIONING_NOISE_INTERCEPT < 1.0:
+        raise ValueError(
+            "a band below one standard error is inside the noise by "
+            "construction"
+        )
+
+
+_validate_conditioning_noise_config()

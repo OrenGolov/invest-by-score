@@ -60,7 +60,39 @@ from price, volume or technical indicators — inferring it from today's
 constituents is survivorship bias by construction. Held open by 18 tests in
 `tests/test_deferred_features.py`, including the placeholder itself.
 
-## 4. Collection cadence is manual — DECISION
+## 4. The source → outcome join does not exist — PARKED
+
+**Raised:** Sprint L4 (2026-09). **Blocks:** everything L4 can actually learn.
+
+L4 ships a working source-reliability estimator, but it has nothing to learn
+from, because no outcome in the system is attributable to an OUTLET.
+
+MEASURED 2026-09-21:
+
+```
+2650 stored articles carry 50 distinct `source_name` values
+   0 of them carry a ticker, so no article joins to a price outcome
+2084 event memories carry NO outlet at all
+     (1954 are inferred from volume cadence and have no source by construction)
+Event.source is set to the PROVIDER ("newsapi_news"), not the outlet
+```
+
+**Why this is parked rather than fixed inside L4.** Building the join means
+attributing a price outcome to a specific article — which is an event-study
+question (E4/E5), not a scoring question. Doing it here would duplicate the
+attribution machinery those sprints own (W5).
+
+**What it would take:** articles resolved to tickers at ingestion (N-sprint
+entity resolution already does this for events), `Event.source` carrying the
+outlet alongside the provider, and the outlet surviving into `EventMemory`.
+Until then every L4 score is a registry prior and reports itself as such —
+the estimator degrades correctly, it is simply not yet learning.
+
+**Scale note:** the full conditional scheme is 19,800 cells needing ~7.5M
+source-linked outcomes to populate. Even with the join built, the useful
+near-term output is per-source global rates, not the full cross-product.
+
+## 5. Collection cadence is manual — DECISION
 
 **Raised:** Sprint L (2026-09). **Owner:** operator.
 

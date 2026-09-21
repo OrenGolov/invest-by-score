@@ -3278,6 +3278,87 @@ no bias** — it is most often a statement about sample size.
   NEGLIGIBLE collapsed into SYSTEMATIC, findings stripped of direction or of
   their comparison count, and detection power overstated or removed.
 
+### L4. Source reliability learning ✓ DONE
+
+"Source quality may depend on source × event type × sector × horizon — one
+global source score is not assumed sufficient."
+`core/source_reliability.py` plus the L4 block in `core/config.py`.
+
+**The task states a hypothesis, so the first job was to test it.**
+
+**What exists today is not learned at all.** `fetch_data.SOURCE_REGISTRY`
+carries one *asserted* `base_confidence` per DOMAIN — news 0.75, fundamentals
+0.90, market data 0.80 — with no measurement behind any of them, and nothing
+ever updates them from outcomes. The news schema already has a
+`source_quality` field: MEASURED over 2650 stored articles it is populated
+**zero** times.
+
+**THE DECIDING MEASUREMENT: CONDITIONING IS NOT FREE.** Estimating a rate per
+cell costs variance. MEASURED against a source whose TRUE accuracy really does
+vary by cell:
+
+```
+true quality varies (sd=0.10)   global MSE   per-cell MSE   shrunk
+  5 observations per cell          0.01224        0.05935  0.01064
+ 25 observations per cell          0.01000        0.00950  0.00505
+100 observations per cell          0.00936        0.00234  0.00192
+```
+
+Per-cell estimation is **five times worse** than a single global rate on thin
+evidence, and only starts to pay from ~25 per cell. So "one global score is
+not sufficient" and "condition on everything" are *both* wrong: the evidence
+decides, per cell.
+
+**The shipped estimator is shrinkage** — a cell pulled toward the global rate
+by k pseudo-counts, so it *is* the global score when a cell is empty and
+becomes the cell's own score as evidence arrives. It never loses badly in
+either world.
+
+**k chosen by worst case, not by mean.** k=5 minimised the worst case overall,
+but only because of a regime with sd=0.20 — outlets ranging 0.2 to 0.95
+accuracy — which no news population plausibly shows. Over the plausible range
+(sd ≤ 0.10) **k=20** is the minimum, in a flat 15–30 basin.
+
+**A REAL FALSE-POSITIVE BUG, caught by my own measurement.** The first noise
+band used a flat 2.0× multiplier, which sits near the *mean* of the null range
+— so MEASURED it claimed "quality depends on event_type" on **7 of 30 clean
+runs** with no effect present. The multiplier that places the band at the 95th
+percentile grows with the number of cells (the same multiple-comparison effect
+L3 measured):
+
+```
+cells    multiplier needed for p95
+  2                          1.90
+  3                          2.35
+  5                          2.70
+  9                          3.11
+```
+
+Fitted `c = 1.4 + 0.8·ln(cells)`. After calibration: **2% false claims** at
+realistic sample sizes (from 23%), with 100% detection of a real 0.30 spread
+at n=300.
+
+**WHAT THIS CANNOT DO YET, AND WHY IT SHIPS ANYWAY.** The full scheme is
+50 sources × 9 event types × 11 sectors × 4 horizons = **19,800 cells**, which
+at the ~380 outcomes needed to separate a 0.65 source from a 0.55 one would
+require **~7.5 million source-linked outcomes**. MEASURED today: **zero** —
+not few, zero, structurally (see the join gap in
+[open-decisions.md](open-decisions.md)). Shrinkage is precisely the estimator
+that degrades to the global score under that condition, and every score
+reports its backing: NO_EVIDENCE / REGISTRY_PRIOR / GLOBAL / CONDITIONAL.
+
+**Absence is never zero.** An unmeasured outlet and an outlet measured to be
+useless are different facts; collapsing them would discard every new source the
+moment it appeared. An unmeasured source scores `None`, never 0.0 — the shape
+rule inherited from F3→L3.
+
+- Acceptance: 33 tests in `tests/test_source_reliability.py`; gate
+  `scripts/check_source_reliability.py`, verified to FAIL under nine
+  reinjected invariants — shrinkage removed (k=0), k raised to pin every cell
+  to global, the cell floor dropped, absence scored 0.0 in config and again in
+  code, the backing states collapsed, the noise band flattened, CONDITIONAL
+  claimed below the floor, and a CONDITIONAL score stripped of its cell.
+
 ### L-blocker. Live chart state ✓ DONE
 
 `scripts/run_forecasts.py` derived each ticker's chart state from that
