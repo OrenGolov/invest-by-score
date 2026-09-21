@@ -3344,6 +3344,9 @@ must forecast zero.
 
 ### Sprint L open items — to close before the sprint ends
 
+> Superseded: the live register is **[docs/open-decisions.md](open-decisions.md)**.
+> The items below are kept for the sprint record.
+
 1. ~~**Live runs must use TODAY's chart state.**~~ ✓ FIXED — see below.
 2. **VOO news tracking is an open decision.** It is currently skipped as a
    broad-market fund whose news E5 would call confounded — but the S&P 500 is
