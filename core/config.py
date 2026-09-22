@@ -6452,3 +6452,142 @@ def _validate_portfolio_decision_config() -> None:
 
 
 _validate_portfolio_decision_config()
+
+
+# --- D1: the combined research view ----------------------------------------------
+# The sprint goal is "a research workstation, not a black box". The failure
+# mode of a dashboard is not that it shows too little; it is that it renders
+# an empty system as a confident one.
+#
+# THE DECIDING MEASUREMENT, taken on live data before any view was built. A
+# forecast snapshot for NVDA at 2026-09-22, at every horizon the roadmap asks
+# for, reports:
+#
+#     horizon   PRESENT   ABSENT   REFUSED
+#     1d              5        2         8
+#     5d              5        2         8
+#     20d             5        2         8
+#     60d             5        2         8
+#
+# The five PRESENT fields are ticker, as_of, forecast_version, horizon and
+# warnings - metadata only. Every field a reader would actually act on
+# (probability_up, confidence, regime, event_context, evidence) is REFUSED,
+# and expected_return is ABSENT because no trained model exists.
+#
+# So D1's first duty is arithmetic honesty: a view over 5 of 15 fields must
+# say so, in the header, before anything else. A dashboard that rendered these
+# as blanks would look like a working system with a quiet day.
+RESEARCH_VIEW_VERSION = "research-view-v1"
+
+# The horizons the research view shows, exactly as the roadmap names them.
+# A SUBSET of FORECAST_HORIZONS, which also carries 120d and 252d; the view
+# does not invent horizons the forecast machinery cannot produce, and it does
+# not silently drop the ones it was asked for.
+RESEARCH_VIEW_HORIZONS: tuple[str, ...] = ("1d", "5d", "20d", "60d")
+
+# The panels the view shows together. "Together" is the requirement: a score
+# read without its risk status, or a forecast read without its confidence, is
+# the black box the sprint exists to replace.
+RESEARCH_PANEL_QUALITY = "investment_quality"
+RESEARCH_PANEL_FORECAST = "multi_horizon_forecast"
+RESEARCH_PANEL_CONFIDENCE = "confidence"
+RESEARCH_PANEL_REGIME = "regime"
+RESEARCH_PANEL_RISK = "risk_status"
+RESEARCH_PANELS: tuple[str, ...] = (
+    RESEARCH_PANEL_QUALITY,
+    RESEARCH_PANEL_FORECAST,
+    RESEARCH_PANEL_CONFIDENCE,
+    RESEARCH_PANEL_REGIME,
+    RESEARCH_PANEL_RISK,
+)
+
+# Cell states. Deliberately the snapshot's own vocabulary rather than a second
+# one: PRESENT/ABSENT/REFUSED already distinguish "measured", "no producer
+# exists" and "a producer declined here", and a view that collapsed them would
+# undo the distinction F3-F7 were built to preserve.
+VIEW_CELL_PRESENT = "PRESENT"
+VIEW_CELL_ABSENT = "ABSENT"
+VIEW_CELL_REFUSED = "REFUSED"
+VIEW_CELL_STATES: tuple[str, ...] = (
+    VIEW_CELL_PRESENT,
+    VIEW_CELL_ABSENT,
+    VIEW_CELL_REFUSED,
+)
+
+# THE RETURN COLUMN IS SHOWN, AND IT IS ALWAYS ABSENT. The roadmap asks for
+# "return% and probability" per horizon. MEASURED, expected_return has no
+# honest producer: build_joint_forecast reports NO_MODEL, and
+# SNAPSHOT_UNAVAILABLE_FIELDS records that a 0.0 "would render as 'flat' in
+# any consumer that coalesces nulls". Omitting the column would hide that the
+# field was requested and refused; filling it would fabricate the quantity.
+# So the column exists, every cell reads ABSENT, and the reason travels with
+# it.
+RESEARCH_SHOW_RETURN_COLUMN = True
+RESEARCH_RETURN_IS_ABSENT = True
+
+# A view whose fields are mostly unavailable must say so before its contents.
+# This is the share of PRESENT fields below which the header leads with the
+# gap rather than the data. MEASURED, the live snapshot sits at 5/15 = 0.333,
+# far below it, so today every real view leads with its own emptiness.
+RESEARCH_COVERAGE_WARN = 0.60
+
+# A research view renders; it decides nothing. The refusal is R7's and the
+# veto is W2's, and the view reports both rather than forming a third opinion.
+RESEARCH_VIEW_BLOCKS_TRADES = False
+
+
+def _validate_research_view_config() -> None:
+    """Import-time guard for the D1 contract."""
+    if not RESEARCH_VIEW_HORIZONS:
+        raise ValueError("the research view must show at least one horizon")
+    for horizon in RESEARCH_VIEW_HORIZONS:
+        if horizon not in FORECAST_HORIZONS:
+            raise ValueError(
+                f"{horizon!r} is not a forecast horizon; the view must not "
+                f"invent horizons the forecast machinery cannot produce"
+            )
+    if len(set(RESEARCH_VIEW_HORIZONS)) != len(RESEARCH_VIEW_HORIZONS):
+        raise ValueError("duplicate research horizon")
+    if len(set(RESEARCH_PANELS)) != len(RESEARCH_PANELS):
+        raise ValueError("duplicate research panel")
+    for required in (
+        RESEARCH_PANEL_QUALITY,
+        RESEARCH_PANEL_FORECAST,
+        RESEARCH_PANEL_CONFIDENCE,
+        RESEARCH_PANEL_REGIME,
+        RESEARCH_PANEL_RISK,
+    ):
+        if required not in RESEARCH_PANELS:
+            raise ValueError(
+                f"{required!r} is missing: the sprint requires score, "
+                f"forecast, confidence, regime and risk status shown TOGETHER"
+            )
+    if set(VIEW_CELL_STATES) != set(SNAPSHOT_STATUSES):
+        raise ValueError(
+            "the view must reuse the snapshot's PRESENT/ABSENT/REFUSED "
+            "vocabulary; a second set of states would collapse the "
+            "distinction between 'no producer' and 'a producer declined'"
+        )
+    if not RESEARCH_SHOW_RETURN_COLUMN:
+        raise ValueError(
+            "the return column is shown so its refusal is visible; omitting "
+            "it hides that the field was requested and could not be produced"
+        )
+    if not RESEARCH_RETURN_IS_ABSENT:
+        raise ValueError(
+            "expected_return has no producer: MEASURED, build_joint_forecast "
+            "reports NO_MODEL and a 0.0 would render as 'flat'"
+        )
+    if not 0.0 < RESEARCH_COVERAGE_WARN <= 1.0:
+        raise ValueError(
+            f"RESEARCH_COVERAGE_WARN must be a share in (0, 1], got "
+            f"{RESEARCH_COVERAGE_WARN!r}"
+        )
+    if RESEARCH_VIEW_BLOCKS_TRADES:
+        raise ValueError(
+            "a research view renders; the refusal is R7's and the veto is "
+            "W2's, and the view reports both rather than forming a third"
+        )
+
+
+_validate_research_view_config()
