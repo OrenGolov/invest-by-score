@@ -6591,3 +6591,129 @@ def _validate_research_view_config() -> None:
 
 
 _validate_research_view_config()
+
+
+# --- D2: the WHY breakdown -------------------------------------------------------
+# The roadmap asks for "Technical / Fundamental / News / Macro / Regime /
+# Sentiment contributions". Two measured facts stand between that wording and
+# an honest panel, and D2 is built around both.
+#
+# FIRST: THEY ARE NOT CONTRIBUTIONS. F6 MEASURED, over 4,000 observations with
+# a realistic regime/chart correlation:
+#
+#     regime alone   +0.064
+#     chart alone    +0.067
+#     sum            +0.131
+#     ACTUAL joint   +0.060
+#
+# The parts overlap and double-count by more than 2x. A panel showing six
+# numbers that sum to the forecast would be arithmetically wrong AND would
+# imply each factor independently CAUSED its share. DECOMPOSITION_ADDITIVE is
+# False and F6's validator refuses to let it become True; D2 inherits that
+# refusal rather than re-deciding it.
+#
+# SECOND: HALF OF WHAT THE ROADMAP NAMES CANNOT BE MEASURED. Of F6's seven
+# components only four are wired, and the three that are NOT_WIRED -
+# fundamental, macro, sentiment - are exactly three of the six the roadmap
+# asks for. MEASURED on a live decomposition: 1 PRESENT, 3 ABSENT, 3
+# NOT_WIRED. Rendering those three as 0.0 would say they were measured and
+# found irrelevant; they were never measured, which is a different fact.
+WHY_PANEL_VERSION = "why-panel-v1"
+
+# The roadmap's six names, mapped onto F6's components. Declared as DATA so
+# the correspondence is auditable and so a reader sees that "News" and
+# "news_event" are the same thing rather than two systems.
+WHY_ROADMAP_NAMES: dict[str, str] = {
+    DECOMP_TECHNICAL: "Technical",
+    DECOMP_FUNDAMENTAL: "Fundamental",
+    DECOMP_NEWS_EVENT: "News",
+    DECOMP_MACRO: "Macro",
+    DECOMP_REGIME: "Regime",
+    DECOMP_SENTIMENT: "Sentiment",
+    # F6 carries a seventh the roadmap does not name. It is SHOWN anyway:
+    # MEASURED, historical_analog is the component that actually produced the
+    # forecast value, so omitting it would hide the only wired evidence that
+    # spoke.
+    DECOMP_HISTORICAL_ANALOG: "Historical analog",
+}
+
+# The panel shows every F6 component, not only the six the roadmap names. A
+# panel that dropped historical_analog would answer "why?" without the part
+# that did the work.
+WHY_SHOW_ALL_COMPONENTS = True
+
+# D2 NEVER PRESENTS A CONTRIBUTION NUMBER. It reports, per component, whether
+# it supplied evidence and how much it NARROWED the claim - F6's own
+# vocabulary. The word "contribution" is barred from the panel's own fields
+# for the reason F6 bars it from its vocabulary: it asserts additivity and
+# causation that were measured to be false.
+WHY_REPORTS_CONTRIBUTIONS = False
+WHY_BARRED_TERMS: tuple[str, ...] = ("contribution", "contributions", "contributed")
+
+# The panel's own statuses are F6's, reused rather than redefined, so
+# NOT_WIRED cannot quietly become ABSENT on the way to the screen. They mean
+# different things: ABSENT is "this component could have spoken and did not",
+# NOT_WIRED is "this component cannot speak at all yet".
+WHY_STATUSES: tuple[str, ...] = DECOMPOSITION_STATUSES
+
+# A WHY panel in which nothing was measured must say so before its rows.
+# MEASURED, a live decomposition has exactly ONE component PRESENT out of
+# seven, so today that headline fires on every real panel.
+WHY_MIN_PRESENT = 2
+
+# D2 explains; it decides nothing, and it recomputes nothing. Every value is
+# F6's, so the panel cannot disagree with the decomposition it displays.
+WHY_PANEL_BLOCKS_TRADES = False
+
+
+def _validate_why_panel_config() -> None:
+    """Import-time guard for the D2 contract."""
+    if WHY_REPORTS_CONTRIBUTIONS:
+        raise ValueError(
+            "D2 must not report contributions: MEASURED, regime +0.064 and "
+            "chart +0.067 sum to +0.131 against an ACTUAL joint effect of "
+            "+0.060 - the parts overlap and double-count by more than 2x"
+        )
+    if DECOMPOSITION_ADDITIVE:
+        raise ValueError(
+            "the WHY panel rests on F6's non-additivity; if the "
+            "decomposition ever became additive this panel must be "
+            "re-derived rather than inherited"
+        )
+    if set(WHY_ROADMAP_NAMES) != set(DECOMPOSITION_COMPONENTS):
+        missing = set(DECOMPOSITION_COMPONENTS) - set(WHY_ROADMAP_NAMES)
+        extra = set(WHY_ROADMAP_NAMES) - set(DECOMPOSITION_COMPONENTS)
+        raise ValueError(
+            f"the WHY panel must name every F6 component exactly once; "
+            f"missing {sorted(missing)}, unknown {sorted(extra)}"
+        )
+    if len(set(WHY_ROADMAP_NAMES.values())) != len(WHY_ROADMAP_NAMES):
+        raise ValueError("two components share a display name")
+    for component, label in WHY_ROADMAP_NAMES.items():
+        if not str(label or "").strip():
+            raise ValueError(f"{component}: no display name")
+    if not WHY_SHOW_ALL_COMPONENTS:
+        raise ValueError(
+            "the panel shows every component: MEASURED, historical_analog is "
+            "the one that produced the forecast value, and the roadmap does "
+            "not name it"
+        )
+    if tuple(WHY_STATUSES) != tuple(DECOMPOSITION_STATUSES):
+        raise ValueError(
+            "the panel must reuse F6's statuses; a second vocabulary lets "
+            "NOT_WIRED become ABSENT on the way to the screen"
+        )
+    if DECOMP_STATUS_NOT_WIRED not in WHY_STATUSES:
+        raise ValueError(
+            "NOT_WIRED must survive to the panel: reporting an unwired "
+            "component as 0.0 claims it was measured and found irrelevant"
+        )
+    if not WHY_BARRED_TERMS:
+        raise ValueError("the barred-term list cannot be empty")
+    if WHY_MIN_PRESENT < 1:
+        raise ValueError("WHY_MIN_PRESENT must be at least 1")
+    if WHY_PANEL_BLOCKS_TRADES:
+        raise ValueError("D2 explains; it decides nothing")
+
+
+_validate_why_panel_config()
