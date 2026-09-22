@@ -156,6 +156,32 @@ NewsAPI free tier's 100 requests/day is the binding constraint, which is why
 
 ---
 
+## 8. `test_current_and_long_term_scores_diverge_by_regime` is network-flaky — OPEN
+
+**Raised:** Sprint A (2026-09-22). **Owner:** unassigned.
+
+MEASURED on a fresh clone at `415ea7b`: the full suite failed once on
+`tests/test_scoring.py::ScoringEngineTests::test_current_and_long_term_scores_diverge_by_regime`,
+then passed on an immediate rerun (2684 passed). The test passes in isolation.
+
+**Cause.** The test calls `build_score(...)` for five tickers at `2024-01-02`,
+which reaches `fetch_price_history` -> Yahoo Finance through an on-disk cache.
+When a fetch degrades, the five scores collapse toward each other and the
+test's `len(set(...)) > 1` assertion fails. It is a live-network dependency in
+a unit test, not a scoring regression: A1 added four files and touches no
+scoring code.
+
+**Why it matters.** A flaky test trains the reader to ignore a red suite,
+which is exactly how the nine-run CI failure in `9e7852d` went unnoticed. It
+also means CI can go red for reasons unrelated to the commit under test.
+
+**What would settle it:** pin the test to a recorded fixture (the raw ledger
+already stores digest-addressable payloads, so a replay is available), or mark
+it as requiring network and exclude it from the default run. The first is
+preferable — it makes the test deterministic rather than merely quieter.
+
+---
+
 ## Closed
 
 - ~~**Live runs must use today's chart state.**~~ Fixed in `ad75f48`. The
