@@ -5922,3 +5922,106 @@ def _validate_sector_concentration_config() -> None:
 
 
 _validate_sector_concentration_config()
+
+
+# --- R4: forecast-adjusted risk --------------------------------------------------
+# R2 sized a position from correlation alone: how much of this can the
+# portfolio absorb? That question never asks whether the forecast motivating
+# the trade is worth acting on. A 51% P(up) from two observations and a 51%
+# from eight hundred produce the identical size.
+#
+# THE DECIDING MEASUREMENT: scaling size by confidence helps in one direction
+# and HURTS in the other. On a candidate correlated with what is held and more
+# volatile, shrinking by confidence walked portfolio volatility from +19.64%
+# down to +0.98%. On an uncorrelated candidate the SAME scaling walked it from
+# -19.23% to -0.99% -- it removed a benefit. Shrinking a low-confidence
+# diversifier makes the portfolio worse, not safer.
+#
+# MEASURED, the ordering is not even close: a HIGH-confidence concentrator at
+# 20% raised volatility +19.78%, while a LOW-confidence diversifier at 5%
+# LOWERED it -4.82%. So confidence ADJUSTS R2's answer; it never replaces the
+# correlation analysis, and it is never the only input.
+FORECAST_RISK_VERSION = "forecast-adjusted-risk-v1"
+
+# Confidence scales the size DOWNWARD only. It is a haircut on conviction, not
+# a multiplier: a confident forecast earns R2's size, never more than it.
+# MEASURED, allowing >1.0 on the TWIN candidate pushed volatility past +19.64%
+# for no reason other than the model liking its own forecast.
+FORECAST_RISK_MAX_MULTIPLIER = 1.0
+
+# The floor below which a forecast buys no position at all. A confidence-
+# scaled size decays smoothly toward zero, which silently produces positions
+# too small to be real -- R2 already refuses a trade under SIZING_MIN_WEIGHT.
+# Below this band the honest answer is NO_TRADE, not a token position.
+FORECAST_RISK_MIN_CONFIDENCE = 0.25
+
+# Direction matters more than confidence, which is why the haircut is applied
+# ONLY to candidates that increase portfolio risk. MEASURED, applying it to a
+# risk-REDUCING candidate degraded the portfolio monotonically at every
+# confidence level tested (-19.23%, -14.54%, -9.76%, -4.91%, -0.99%).
+FORECAST_RISK_HAIRCUT_INCREASERS_ONLY = True
+
+# An UNMEASURABLE confidence factor is not a low one. MEASURED, calibration,
+# model_agreement and model_drift are all UNMEASURABLE today because no model
+# is registered; F7 excludes them from the weighting rather than scoring them
+# 0.0. R4 inherits that: it never converts "not measured" into a haircut,
+# because a forecast is not less reliable for living in a system that has not
+# yet trained a model.
+FORECAST_RISK_UNMEASURABLE_IS_NOT_LOW = True
+
+# Verdicts. Kept distinct for the reason R2 keeps REFUSED and NOT_EVALUATED
+# apart: "the forecast is too weak to act on" and "no confidence could be
+# computed" are different answers, and collapsing them hides the second.
+FRISK_NOT_EVALUATED = "NOT_EVALUATED"  # no confidence or no R2 size to adjust
+FRISK_NO_TRADE = "NO_TRADE"            # confidence below the floor
+FRISK_REDUCED = "REDUCED"              # haircut applied to a risk increaser
+FRISK_UNCHANGED = "UNCHANGED"          # risk reducer, or full confidence
+FRISK_VERDICTS: tuple[str, ...] = (
+    FRISK_NOT_EVALUATED,
+    FRISK_NO_TRADE,
+    FRISK_REDUCED,
+    FRISK_UNCHANGED,
+)
+
+# R4 adjusts a proposed size. It does not decide whether to trade: that is R7,
+# with the whole portfolio in view. The same rule as R1 and R3.
+FORECAST_RISK_BLOCKS_TRADES = False
+
+
+def _validate_forecast_risk_config() -> None:
+    """Import-time guard for the R4 contract."""
+    if FORECAST_RISK_MAX_MULTIPLIER != 1.0:
+        raise ValueError(
+            "confidence is a haircut, not a multiplier: a confident forecast "
+            "earns R2's size and never more than it"
+        )
+    if not 0.0 < FORECAST_RISK_MIN_CONFIDENCE < 1.0:
+        raise ValueError(
+            f"FORECAST_RISK_MIN_CONFIDENCE must be a share in (0, 1), got "
+            f"{FORECAST_RISK_MIN_CONFIDENCE!r}"
+        )
+    if not FORECAST_RISK_HAIRCUT_INCREASERS_ONLY:
+        raise ValueError(
+            "the haircut applies only to risk INCREASERS: MEASURED, scaling a "
+            "risk-reducing candidate by confidence degraded the portfolio at "
+            "every level tested (-19.23% through -0.99%)"
+        )
+    if not FORECAST_RISK_UNMEASURABLE_IS_NOT_LOW:
+        raise ValueError(
+            "an UNMEASURABLE confidence factor is not a low one; F7 excludes "
+            "it from the weighting rather than scoring it 0.0"
+        )
+    if FRISK_NO_TRADE == FRISK_NOT_EVALUATED:
+        raise ValueError(
+            "'too weak to act on' and 'no confidence could be computed' are "
+            "different answers; collapsing them hides the second"
+        )
+    if len(set(FRISK_VERDICTS)) != len(FRISK_VERDICTS):
+        raise ValueError("duplicate R4 verdict")
+    if FORECAST_RISK_BLOCKS_TRADES:
+        raise ValueError(
+            "R4 adjusts a size; whether to trade at all is R7's decision"
+        )
+
+
+_validate_forecast_risk_config()
