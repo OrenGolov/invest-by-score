@@ -6942,3 +6942,114 @@ def _validate_provenance_surface_config() -> None:
 
 
 _validate_provenance_surface_config()
+
+
+# --- A1: forecast change alert ---------------------------------------------------
+# "Alert when the forecast materially changes." Two obvious implementations
+# both fire on things that are not changes, and both were measured rather than
+# argued.
+#
+# THE FIRST TRAP - DIGEST DIFFING. A snapshot is digest-addressable, so the
+# tempting test is "did the digest change?". MEASURED on four consecutive days
+# of an identical, entirely-unavailable forecast: FOUR DISTINCT DIGESTS. The
+# digest covers as_of, so it changes every day by construction. A digest-diff
+# alert fires on 100% of days while the forecast never changes at all.
+#
+# THE SECOND TRAP - COALESCING NULLS. MEASURED: comparing values through
+# `float(x or 0)` turns a forecast APPEARING (REFUSED -> 0.56) into a +0.56
+# move, and a forecast DISAPPEARING (0.56 -> REFUSED) into a -0.56 crash.
+# Nothing fell. The availability changed, which is a different event and one a
+# reader acts on differently.
+#
+# So A1 compares AVAILABILITY first and MAGNITUDE only between two values that
+# both exist.
+FORECAST_ALERT_VERSION = "forecast-change-alert-v1"
+
+# Change kinds. APPEARED and DISAPPEARED are first-class rather than being
+# folded into a magnitude, because that is precisely the fold that produces a
+# phantom crash to zero.
+ALERT_CHANGE_NONE = "NONE"
+ALERT_CHANGE_MOVED = "MOVED"              # both present, magnitude crossed
+ALERT_CHANGE_APPEARED = "APPEARED"        # was unavailable, now measured
+ALERT_CHANGE_DISAPPEARED = "DISAPPEARED"  # was measured, now unavailable
+ALERT_CHANGE_NOT_EVALUATED = "NOT_EVALUATED"  # no prior to compare against
+FORECAST_CHANGE_KINDS: tuple[str, ...] = (
+    ALERT_CHANGE_NOT_EVALUATED,
+    ALERT_CHANGE_NONE,
+    ALERT_CHANGE_MOVED,
+    ALERT_CHANGE_APPEARED,
+    ALERT_CHANGE_DISAPPEARED,
+)
+
+# The P(up) move that counts as material. DERIVED from sampling noise rather
+# than chosen: at F4's point-estimate floor of 40 observations, the 95% band on
+# a base rate near 0.5 is +/-0.155. A threshold below that alerts on
+# resampling. At n=100 the band is +/-0.098, so 0.10 is the point where a move
+# starts to mean something for a realistically-sized cell.
+FORECAST_ALERT_MIN_PROBABILITY_MOVE = 0.10
+
+# Availability changes are ALWAYS material. A forecast arriving or vanishing is
+# news about the system regardless of magnitude, and it cannot be compared on
+# magnitude at all - which is the trap above.
+FORECAST_ALERT_AVAILABILITY_IS_MATERIAL = True
+
+# A1 NEVER COMPARES DIGESTS. MEASURED, that fires every day on an unchanged
+# forecast, because the digest covers as_of by design.
+FORECAST_ALERT_USES_DIGEST = False
+
+# Severities, reused from W2's vocabulary so severity means one thing system
+# wide.
+ALERT_SEVERITY_INFO = "info"
+ALERT_SEVERITY_WARN = "warn"
+ALERT_SEVERITIES: tuple[str, ...] = (ALERT_SEVERITY_INFO, ALERT_SEVERITY_WARN)
+
+# An alert reports; it does not trade and it does not override governance. A7
+# adds suppression and the risk/governance gate on top of this.
+FORECAST_ALERT_BLOCKS_TRADES = False
+
+
+def _validate_forecast_alert_config() -> None:
+    """Import-time guard for the A1 contract."""
+    if FORECAST_ALERT_USES_DIGEST:
+        raise ValueError(
+            "A1 must not compare snapshot digests: MEASURED, four "
+            "consecutive days of an identical unavailable forecast produced "
+            "four distinct digests, because the digest covers as_of"
+        )
+    if not FORECAST_ALERT_AVAILABILITY_IS_MATERIAL:
+        raise ValueError(
+            "a forecast appearing or disappearing is always material: "
+            "MEASURED, folding it into a magnitude turns a vanished forecast "
+            "into a -0.56 crash that never happened"
+        )
+    if not 0.0 < FORECAST_ALERT_MIN_PROBABILITY_MOVE < 1.0:
+        raise ValueError(
+            f"FORECAST_ALERT_MIN_PROBABILITY_MOVE must lie in (0, 1), got "
+            f"{FORECAST_ALERT_MIN_PROBABILITY_MOVE!r}"
+        )
+    if FORECAST_ALERT_MIN_PROBABILITY_MOVE < 0.05:
+        raise ValueError(
+            f"a {FORECAST_ALERT_MIN_PROBABILITY_MOVE} threshold sits inside "
+            f"sampling noise: at 100 observations the 95% band on a base rate "
+            f"near 0.5 is +/-0.098, so the alert would fire on resampling"
+        )
+    if len(set(FORECAST_CHANGE_KINDS)) != len(FORECAST_CHANGE_KINDS):
+        raise ValueError("duplicate forecast change kind")
+    for required in (ALERT_CHANGE_APPEARED, ALERT_CHANGE_DISAPPEARED):
+        if required not in FORECAST_CHANGE_KINDS:
+            raise ValueError(
+                f"{required!r} must be expressible: an availability change "
+                f"folded into a magnitude is a phantom move"
+            )
+    if ALERT_CHANGE_NONE == ALERT_CHANGE_NOT_EVALUATED:
+        raise ValueError(
+            "'the forecast did not change' and 'there was nothing to compare "
+            "against' are different answers"
+        )
+    if len(set(ALERT_SEVERITIES)) != len(ALERT_SEVERITIES):
+        raise ValueError("duplicate alert severity")
+    if FORECAST_ALERT_BLOCKS_TRADES:
+        raise ValueError("an alert reports; it does not trade")
+
+
+_validate_forecast_alert_config()
