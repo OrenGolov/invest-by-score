@@ -6139,3 +6139,134 @@ def _validate_expected_impact_config() -> None:
 
 
 _validate_expected_impact_config()
+
+
+# --- R6: stress scenarios --------------------------------------------------------
+# R1-R5 all rest on ONE covariance estimated over a long, mostly-calm window.
+# That covariance is the thing a stressed market breaks, so every answer built
+# on it is a calm-market answer unless it is re-asked under stress.
+#
+# THE DECIDING MEASUREMENT, on 76 real tickers over 1,170 common sessions:
+# correlation does not merely rise under stress, it roughly DOUBLES. Average
+# pairwise correlation measured about the full-period mean:
+#
+#     stress definition   calm     stress   ratio
+#     worst  5% of days   0.2421   0.6066   x2.51
+#     worst 10% of days   0.2263   0.5534   x2.45
+#     worst 15% of days   0.2214   0.4958   x2.24
+#     worst 20% of days   0.2199   0.4591   x2.09
+#
+# On an equal-weight portfolio of those 76 names, portfolio volatility under
+# stress is 2.30x calm, and the diversification ratio falls 38.1% (2.080 ->
+# 1.288). Diversification weakens most in exactly the conditions it is held
+# for, so a calm-window covariance overstates every hedge in the book.
+STRESS_SCENARIO_VERSION = "stress-scenario-v1"
+
+# THE TRAP THIS MODULE EXISTS TO AVOID, and it is not hypothetical: it is the
+# first result this sprint produced. Estimating the stress covariance by
+# demeaning WITHIN the stress subset reported average correlation FALLING
+# under stress (0.2166 -> 0.1492, -31.1%) and the diversification ratio
+# IMPROVING (2.128 -> 2.789). MEASURED, the stress decile has a mean market
+# return of -3.15% against +0.14% over all sessions; subtracting the subset
+# mean removes the crash itself, so every name looks as though it barely
+# moved and co-movement collapses. The stress covariance is therefore measured
+# about the FULL-PERIOD mean, which keeps the crash in the deviations.
+STRESS_DEMEAN_FULL_PERIOD = True
+STRESS_DEMEAN_REASON = (
+    "demeaning within the stress subset subtracts the crash being measured: "
+    "MEASURED, the worst decile averages -3.15% against +0.14% overall, and "
+    "subset demeaning reported correlation FALLING 31.1% under stress and "
+    "diversification IMPROVING - both artifacts of the estimator"
+)
+
+# Which sessions count as stressed. Defined by the worst market-wide returns
+# rather than by a volatility filter, because a decision needs to know what
+# happens when everything falls together, not when quotes are merely noisy.
+STRESS_WORST_SHARE = 0.10
+
+# The floor of sessions a stress estimate needs. Below this the covariance is
+# estimated from too few observations to be an estimate; MEASURED, the 10%
+# decile of 1,170 sessions is 117 days, comfortably above this floor.
+STRESS_MIN_SESSIONS = 30
+
+# Scenarios are DECLARED here as data, so a reader learns what was tested
+# without reading code, and adding one is a deliberate edit. Each names a
+# shock in the units of a daily return.
+STRESS_SCENARIO_HISTORICAL = "historical_worst_decile"
+STRESS_SCENARIO_CORRELATION_SHOCK = "correlation_to_one"
+STRESS_SCENARIO_VOLATILITY_SHOCK = "volatility_x2"
+STRESS_SCENARIOS: tuple[str, ...] = (
+    STRESS_SCENARIO_HISTORICAL,
+    STRESS_SCENARIO_CORRELATION_SHOCK,
+    STRESS_SCENARIO_VOLATILITY_SHOCK,
+)
+
+# The correlation assumed in the correlation_to_one scenario. Not literally
+# 1.0: a perfectly correlated matrix is singular and portfolio variance stops
+# being well conditioned. MEASURED, the worst 5% decile already reaches 0.607
+# average pairwise correlation, so 0.95 is a stress beyond the observed record
+# without being a degenerate matrix.
+STRESS_CORRELATION_LEVEL = 0.95
+
+# The multiplier in the volatility_x2 scenario. MEASURED, portfolio volatility
+# under the historical stress decile was 2.30x calm, so a 2x per-name shock is
+# calibrated to the observed record rather than chosen for roundness.
+STRESS_VOLATILITY_MULTIPLIER = 2.0
+
+# A loss of diversification worth reporting. MEASURED, the historical decile
+# costs 38.1% of the diversification ratio; a threshold well below that flags
+# the observed case while leaving room for milder ones to pass quietly.
+STRESS_MATERIAL_DEGRADATION = 0.15
+
+# R6 measures what stress does. It does not refuse trades: that is R7, which
+# weighs this against everything else. Same rule as R1, R3, R4 and R5.
+STRESS_BLOCKS_TRADES = False
+
+
+def _validate_stress_scenario_config() -> None:
+    """Import-time guard for the R6 contract."""
+    if not STRESS_DEMEAN_FULL_PERIOD:
+        raise ValueError(
+            "the stress covariance must be measured about the FULL-PERIOD "
+            "mean: MEASURED, subset demeaning reported correlation FALLING "
+            "31.1% under stress and diversification IMPROVING, because it "
+            "subtracts away the -3.15% crash it is trying to measure"
+        )
+    if not STRESS_DEMEAN_REASON.strip():
+        raise ValueError("the demeaning choice must carry its measured reason")
+    if not 0.0 < STRESS_WORST_SHARE < 0.5:
+        raise ValueError(
+            f"STRESS_WORST_SHARE must be a minority of sessions, got "
+            f"{STRESS_WORST_SHARE!r}"
+        )
+    if STRESS_MIN_SESSIONS < 2:
+        raise ValueError("a covariance needs at least two observations")
+    if len(set(STRESS_SCENARIOS)) != len(STRESS_SCENARIOS):
+        raise ValueError("duplicate stress scenario")
+    if STRESS_SCENARIO_HISTORICAL not in STRESS_SCENARIOS:
+        raise ValueError(
+            "the historical scenario is mandatory: a hypothetical shock that "
+            "is never checked against the observed record is an assumption"
+        )
+    if not 0.0 < STRESS_CORRELATION_LEVEL < 1.0:
+        raise ValueError(
+            f"STRESS_CORRELATION_LEVEL must lie in (0, 1) - a literal 1.0 is "
+            f"singular - got {STRESS_CORRELATION_LEVEL!r}"
+        )
+    if STRESS_VOLATILITY_MULTIPLIER <= 1.0:
+        raise ValueError(
+            f"a volatility shock must raise volatility, got "
+            f"{STRESS_VOLATILITY_MULTIPLIER!r}"
+        )
+    if not 0.0 < STRESS_MATERIAL_DEGRADATION < 1.0:
+        raise ValueError(
+            f"STRESS_MATERIAL_DEGRADATION must be a share in (0, 1), got "
+            f"{STRESS_MATERIAL_DEGRADATION!r}"
+        )
+    if STRESS_BLOCKS_TRADES:
+        raise ValueError(
+            "R6 measures what stress does; whether to trade is R7's decision"
+        )
+
+
+_validate_stress_scenario_config()
