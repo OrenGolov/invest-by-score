@@ -5829,3 +5829,96 @@ def _validate_correlation_sizing_config() -> None:
 
 
 _validate_correlation_sizing_config()
+
+
+# --- R3: sector concentration ----------------------------------------------------
+# R1 established that weight alone is gameable: satisfying a 10% per-name cap
+# by splitting 40% NVDA across four correlated semiconductors raised portfolio
+# volatility. R3 is that finding one level up.
+#
+# MEASURED on the tracked portfolio: 38 of 73 sector-mapped holdings are
+# Information Technology - 52.1% of the book. Every one of those 38 names sits
+# near 1.3% by equal weight, so the entire concentration respects a 10%
+# per-name cap while being a single sector bet.
+SECTOR_CONCENTRATION_VERSION = "sector-concentration-v1"
+
+# Sector shares are reported on BOTH scales, for the same reason R1 refuses a
+# weight-only exposure report: they answer different questions and can
+# disagree. Weight says how much capital sits in a sector; risk says how much
+# of the portfolio's variance it drives.
+SECTOR_BASIS_WEIGHT = "weight"
+SECTOR_BASIS_RISK = "risk_contribution"
+SECTOR_BASES: tuple[str, ...] = (SECTOR_BASIS_WEIGHT, SECTOR_BASIS_RISK)
+
+# A sector's share of portfolio VALUE above which it is flagged for review.
+# MEASURED, the tracked portfolio's IT share is 52.1% - more than double this
+# - while no single holding breaches R1's 25% per-name review threshold.
+SECTOR_WEIGHT_REVIEW = 0.25
+
+# A sector's share of portfolio VARIANCE above which it is flagged. Set above
+# the weight threshold because sector risk concentrates faster than sector
+# weight: correlated names inside one sector contribute jointly.
+SECTOR_RISK_REVIEW = 0.40
+
+# Herfindahl-Hirschman index over sector shares, and the effective sector
+# count it implies (1/HHI). MEASURED, the tracked portfolio scores HHI 0.3113
+# across 10 sectors present - an effective diversification of 3.21 sectors.
+# Holding ten sectors is not the same as being diversified across ten, and the
+# count is what makes that visible.
+SECTOR_HHI_REVIEW = 0.25
+
+# Holdings whose sector cannot be established are reported as a distinct
+# UNCLASSIFIED bucket and never folded into a sector. MEASURED, 4 of 77
+# tracked holdings are funds (VOO, SOXX, CIBR, NASA): a fund has no single
+# sector, and assigning one would invent concentration that is not there --
+# or hide concentration that is.
+SECTOR_UNCLASSIFIED = "UNCLASSIFIED"
+
+# Unclassified share above which the sector picture itself is untrustworthy.
+# Below the threshold the measured sectors still describe most of the book;
+# above it, a "top sector 30%" claim is really "30% of the part we could
+# classify", which is a different and weaker statement.
+SECTOR_UNCLASSIFIED_REVIEW = 0.20
+
+# R3 DESCRIBES concentration; it does not block trades. R7 is where a
+# portfolio-level NO_TRADE is decided, with its own evidence. A measurement
+# that silently blocked trades would be a policy wearing a measurement's
+# clothes -- the same rule R1 states and for the same reason.
+SECTOR_BLOCKS_TRADES = False
+
+
+def _validate_sector_concentration_config() -> None:
+    """Import-time guard for the R3 contract."""
+    if SECTOR_BASIS_WEIGHT not in SECTOR_BASES or SECTOR_BASIS_RISK not in SECTOR_BASES:
+        raise ValueError(
+            "sector concentration is reported on both weight and risk: "
+            "MEASURED, 38 IT names at ~1.3% each respect every per-name weight "
+            "cap while forming a 52.1% single-sector bet"
+        )
+    if SECTOR_RISK_REVIEW <= SECTOR_WEIGHT_REVIEW:
+        raise ValueError(
+            "the risk threshold sits above the weight threshold: correlated "
+            "names inside one sector contribute jointly, so sector variance "
+            "concentrates faster than sector weight"
+        )
+    for name, value in (
+        ("SECTOR_WEIGHT_REVIEW", SECTOR_WEIGHT_REVIEW),
+        ("SECTOR_RISK_REVIEW", SECTOR_RISK_REVIEW),
+        ("SECTOR_HHI_REVIEW", SECTOR_HHI_REVIEW),
+        ("SECTOR_UNCLASSIFIED_REVIEW", SECTOR_UNCLASSIFIED_REVIEW),
+    ):
+        if not 0.0 < value <= 1.0:
+            raise ValueError(f"{name} must be a share in (0, 1], got {value!r}")
+    if not SECTOR_UNCLASSIFIED:
+        raise ValueError(
+            "unclassified holdings need their own bucket: a fund has no single "
+            "sector, and folding it into one invents or hides concentration"
+        )
+    if SECTOR_BLOCKS_TRADES:
+        raise ValueError(
+            "R3 describes concentration, it does not enforce it. The "
+            "portfolio-level NO_TRADE is R7's decision, with its own evidence"
+        )
+
+
+_validate_sector_concentration_config()
