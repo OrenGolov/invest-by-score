@@ -6717,3 +6717,117 @@ def _validate_why_panel_config() -> None:
 
 
 _validate_why_panel_config()
+
+
+# --- D3: the event context panel -------------------------------------------------
+# The roadmap asks for "recent event, classification, historical analog count,
+# median historical response, current setup similarity". Every one of those has
+# a producer - E4/E6 supply them - so D3 is mostly assembly. What it must NOT
+# do is quote the median response as though it were a clean number.
+#
+# THE DECIDING MEASUREMENT: a third of comparable setups are not comparable for
+# the reason the panel implies. E5 classifies each remembered response as
+# event_associated or confounded, and MEASURED across 40 seeded analog sets,
+# excluding the confounded ones shifts the median historical response by
+# +1.36pp (median shift), up to 5.71pp, and by more than one percentage point
+# in 24 of 40 cases.
+#
+# So "median historical response: +2.7%" is a composite of the event's own
+# association AND whatever else moved those names. The panel reports the
+# median WITH the event-associated share beside it, always, and never one
+# without the other.
+EVENT_CONTEXT_VERSION = "event-context-v1"
+
+# The five fields the roadmap names, declared as data so a reader sees the
+# correspondence without reading code.
+EVENT_CONTEXT_FIELDS: tuple[str, ...] = (
+    "recent_event",
+    "classification",
+    "analog_count",
+    "median_response",
+    "setup_similarity",
+)
+
+# THE MEDIAN NEVER TRAVELS ALONE. MEASURED, dropping confounded analogs moves
+# it by more than a percentage point in 24 of 40 cases, so a median quoted
+# without its association share overstates what the event itself explains.
+EVENT_CONTEXT_REQUIRE_ASSOCIATION_SHARE = True
+
+# Below this share of event-associated analogs, the median is reported with an
+# explicit caution. MEASURED, the reference set sits at 0.667 - a third of the
+# evidence is attributed elsewhere - which is exactly the case that needs
+# saying out loud.
+EVENT_CONTEXT_ASSOCIATION_CAUTION = 0.75
+
+# Analog statuses, reused from E6 rather than redefined. "insufficient_analogs"
+# is not "no effect": MEASURED, E6 refuses to summarise below
+# EVENT_MEMORY_MIN_ANALOGS because a typical response from that few examples is
+# not typical of anything.
+EVENT_CONTEXT_STATUS_MEASURED = "measured"
+EVENT_CONTEXT_STATUS_INSUFFICIENT = "insufficient_analogs"
+EVENT_CONTEXT_STATUS_NO_EVENT = "no_event"
+EVENT_CONTEXT_STATUSES: tuple[str, ...] = (
+    EVENT_CONTEXT_STATUS_MEASURED,
+    EVENT_CONTEXT_STATUS_INSUFFICIENT,
+    EVENT_CONTEXT_STATUS_NO_EVENT,
+)
+
+# An INFERRED event is real evidence about a real price move; what is uncertain
+# is WHICH event produced it. The panel states provenance per event rather than
+# letting an inferred event read like an observed one - E6 defaults provenance
+# to "" precisely so an unlabelled memory cannot launder itself into evidence.
+EVENT_CONTEXT_SHOW_PROVENANCE = True
+
+# Association is not causation, and the panel says so in its own payload
+# rather than relying on a reader to remember it.
+EVENT_CONTEXT_DISCLAIMER = (
+    "historical association under comparable conditions - not a forecast, and "
+    "not evidence that these events caused these moves. MEASURED, excluding "
+    "E5-confounded analogs shifts the median response by more than a "
+    "percentage point in 24 of 40 cases"
+)
+
+# D3 describes what happened before; it decides nothing.
+EVENT_CONTEXT_BLOCKS_TRADES = False
+
+
+def _validate_event_context_config() -> None:
+    """Import-time guard for the D3 contract."""
+    if len(set(EVENT_CONTEXT_FIELDS)) != len(EVENT_CONTEXT_FIELDS):
+        raise ValueError("duplicate event context field")
+    for required in ("analog_count", "median_response", "setup_similarity"):
+        if required not in EVENT_CONTEXT_FIELDS:
+            raise ValueError(f"the roadmap requires {required!r}")
+    if not EVENT_CONTEXT_REQUIRE_ASSOCIATION_SHARE:
+        raise ValueError(
+            "the median response must travel with its event-associated "
+            "share: MEASURED, excluding confounded analogs shifts it by more "
+            "than a percentage point in 24 of 40 cases"
+        )
+    if not 0.0 < EVENT_CONTEXT_ASSOCIATION_CAUTION <= 1.0:
+        raise ValueError(
+            f"EVENT_CONTEXT_ASSOCIATION_CAUTION must be a share in (0, 1], "
+            f"got {EVENT_CONTEXT_ASSOCIATION_CAUTION!r}"
+        )
+    if len(set(EVENT_CONTEXT_STATUSES)) != len(EVENT_CONTEXT_STATUSES):
+        raise ValueError("duplicate event context status")
+    if EVENT_CONTEXT_STATUS_INSUFFICIENT == EVENT_CONTEXT_STATUS_NO_EVENT:
+        raise ValueError(
+            "'too few analogs to summarise' and 'no event to analyse' are "
+            "different answers; collapsing them hides which one applies"
+        )
+    if not EVENT_CONTEXT_SHOW_PROVENANCE:
+        raise ValueError(
+            "provenance is shown per event: an INFERRED event is evidence "
+            "about a real move, but WHICH event produced it is uncertain"
+        )
+    if "not a forecast" not in EVENT_CONTEXT_DISCLAIMER:
+        raise ValueError(
+            "the disclaimer must state that this is association, not a "
+            "forecast and not causation"
+        )
+    if EVENT_CONTEXT_BLOCKS_TRADES:
+        raise ValueError("D3 describes what happened before; it decides nothing")
+
+
+_validate_event_context_config()
