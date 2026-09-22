@@ -6025,3 +6025,117 @@ def _validate_forecast_risk_config() -> None:
 
 
 _validate_forecast_risk_config()
+
+
+# --- R5: expected portfolio impact -----------------------------------------------
+# R2 answered "how much of this can the portfolio absorb?" and R4 answered "how
+# much has the forecast earned?". Neither answers what the portfolio LOOKS LIKE
+# afterwards, which is the question a decision actually rests on.
+#
+# THE DECIDING MEASUREMENT: volatility and concentration disagree about half
+# the time. Across 20 seeded markets x 2 candidates, 21 of 40 trades (52%)
+# moved portfolio volatility and risk concentration in OPPOSITE directions. On
+# the reference market a correlated candidate raised volatility +5.00% while
+# IMPROVING risk concentration (risk-HHI 0.5000 -> 0.3736), and a diversifier
+# cut volatility -20.56% while leaving concentration untouched (0.5005).
+# A single risk number cannot answer both questions, so R5 reports both and
+# never collapses them into one verdict.
+EXPECTED_IMPACT_VERSION = "expected-impact-v1"
+
+# WHAT R5 REFUSES TO ESTIMATE. There is no trained forecasting model:
+# build_joint_forecast reports UNAVAILABLE, and SNAPSHOT_UNAVAILABLE_FIELDS
+# already records that expected_return "needs a trained model, and none
+# exists". So R5 projects RISK, which is measurable from the covariance, and
+# never RETURN, which is not. An expected-return impact would be a confident
+# claim about a quantity nobody computed - the exact hazard F3/F4/F5/F6 and the
+# snapshot contract each guard against.
+IMPACT_PROJECTS_RETURN = False
+IMPACT_RETURN_REASON = (
+    "projecting an expected return needs a trained model and none is "
+    "registered; build_joint_forecast reports UNAVAILABLE. A 0.0 impact would "
+    "render as 'flat' in any consumer that coalesces nulls, which is a "
+    "confident claim about a quantity nobody computed"
+)
+
+# The dimensions R5 projects. Each is measurable from the covariance alone.
+IMPACT_DIMENSION_VOLATILITY = "volatility"
+IMPACT_DIMENSION_CONCENTRATION = "risk_concentration"
+IMPACT_DIMENSION_LARGEST = "largest_risk_share"
+IMPACT_DIMENSIONS: tuple[str, ...] = (
+    IMPACT_DIMENSION_VOLATILITY,
+    IMPACT_DIMENSION_CONCENTRATION,
+    IMPACT_DIMENSION_LARGEST,
+)
+
+# A relative move in portfolio volatility worth reporting as material. Set at
+# the R2 risk budget so the two agree about what "a lot" means: a trade R2
+# sized to the edge of its budget is exactly a material one here.
+IMPACT_MATERIAL_VOLATILITY = SIZING_RISK_BUDGET
+
+# A move in risk-HHI worth reporting. MEASURED, the reference correlated trade
+# moved risk-HHI by 0.1264 (0.5000 -> 0.3736) while the diversifier moved it
+# 0.0005 - three orders of magnitude apart. A threshold between them separates
+# a trade that reshapes who drives risk from one that does not.
+IMPACT_MATERIAL_CONCENTRATION = 0.05
+
+# Directions. Kept distinct from verdicts: R5 states which way each dimension
+# moved and by how much. It does not rule, because MEASURED the dimensions
+# disagree 52% of the time and a single verdict would have to silently pick a
+# winner. R7 weighs them with the whole portfolio in view.
+IMPACT_IMPROVES = "IMPROVES"
+IMPACT_WORSENS = "WORSENS"
+IMPACT_NEUTRAL = "NEUTRAL"
+IMPACT_NOT_EVALUATED = "NOT_EVALUATED"
+IMPACT_DIRECTIONS: tuple[str, ...] = (
+    IMPACT_IMPROVES,
+    IMPACT_WORSENS,
+    IMPACT_NEUTRAL,
+    IMPACT_NOT_EVALUATED,
+)
+
+# R5 projects; it does not decide. Same rule as R1, R3 and R4.
+IMPACT_BLOCKS_TRADES = False
+
+
+def _validate_expected_impact_config() -> None:
+    """Import-time guard for the R5 contract."""
+    if IMPACT_PROJECTS_RETURN:
+        raise ValueError(
+            "R5 must not project an expected return: no trained model exists, "
+            "and a fabricated 0.0 renders as 'flat' to any consumer that "
+            "coalesces nulls"
+        )
+    if not IMPACT_RETURN_REASON.strip():
+        raise ValueError("the refusal to project return must carry its reason")
+    if len(set(IMPACT_DIMENSIONS)) != len(IMPACT_DIMENSIONS):
+        raise ValueError("duplicate R5 impact dimension")
+    if IMPACT_DIMENSION_VOLATILITY not in IMPACT_DIMENSIONS:
+        raise ValueError("volatility is not among the projected dimensions")
+    if IMPACT_DIMENSION_CONCENTRATION not in IMPACT_DIMENSIONS:
+        raise ValueError(
+            "concentration is not projected: MEASURED, volatility and "
+            "concentration moved in opposite directions on 21 of 40 trades, "
+            "so volatility alone answers only half the question"
+        )
+    if not 0.0 < IMPACT_MATERIAL_VOLATILITY < 1.0:
+        raise ValueError(
+            f"IMPACT_MATERIAL_VOLATILITY must be a share in (0, 1), got "
+            f"{IMPACT_MATERIAL_VOLATILITY!r}"
+        )
+    if not 0.0 < IMPACT_MATERIAL_CONCENTRATION < 1.0:
+        raise ValueError(
+            f"IMPACT_MATERIAL_CONCENTRATION must be in (0, 1), got "
+            f"{IMPACT_MATERIAL_CONCENTRATION!r}"
+        )
+    if len(set(IMPACT_DIRECTIONS)) != len(IMPACT_DIRECTIONS):
+        raise ValueError("duplicate R5 direction")
+    if IMPACT_NOT_EVALUATED == IMPACT_NEUTRAL:
+        raise ValueError(
+            "'no impact could be measured' and 'the impact was negligible' "
+            "are different answers; collapsing them hides the first"
+        )
+    if IMPACT_BLOCKS_TRADES:
+        raise ValueError("R5 projects an impact; R7 decides whether to trade")
+
+
+_validate_expected_impact_config()
