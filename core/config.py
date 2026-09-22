@@ -6270,3 +6270,185 @@ def _validate_stress_scenario_config() -> None:
 
 
 _validate_stress_scenario_config()
+
+
+# --- R7: portfolio-level NO_TRADE ------------------------------------------------
+# R1, R3, R4, R5 and R6 each deliberately refused to block a trade and deferred
+# to R7. This is where that deferral comes due.
+#
+# W2 (RISK_POLICY_V2) already vetoes on EVIDENCE quality, and R7 does not
+# duplicate it: every W2 rule reads one ticker's inputs - data quality, source
+# confidence, point-in-time validity, that ticker's score and regime. None of
+# them can see the portfolio. R7 asks the question W2 structurally cannot:
+# given everything already held, can the book absorb this?
+#
+# THE DECIDING MEASUREMENT: a set of individually-correct trades can be
+# collectively impossible. On a diversified 4-name book with 6 candidates in
+# one correlated cluster, R2 sized each candidate against the ORIGINAL
+# portfolio and approved all six at 20% - every one marked diversifying=True,
+# every one REDUCING volatility in isolation (-0.28% to -1.45%). The approved
+# set sums to 120% OF THE BOOK.
+#
+#     total executed   portfolio vol   cluster share of RISK
+#              24%          -0.67%              27%
+#              48%          +7.88%              60%
+#              72%         +23.76%              85%
+#              96%         +44.57%              99%
+#             120%      INFEASIBLE - exceeds 100% of the book
+#
+# Every trade was individually right and the set is unexecutable. Nothing
+# below R7 can see this, because each module sizes ONE candidate against the
+# CURRENT book and never against the other candidates.
+PORTFOLIO_DECISION_VERSION = "portfolio-decision-v1"
+
+# R7 inherits W2's fail-closed construction: a missing input TRIGGERS the rule
+# that reads it rather than passing it. A portfolio check that silently passes
+# when its evidence is absent is worse than no check, because it produces a
+# confident approval from nothing.
+PORTFOLIO_FAIL_CLOSED = True
+
+# The total of all proposed sizes above which the set is refused outright.
+# MEASURED, the approved set summed to 120% of the book; anything at or above
+# 100% cannot be executed at all. The budget sits below that because a book
+# fully consumed by new positions has sold everything it already held, which
+# is a different decision than the one being asked.
+PORTFOLIO_MAX_TOTAL_SIZE = 0.40
+
+# Portfolio volatility increase, across the whole accepted set, above which
+# the set is refused. Set at R2's per-trade budget: a set of trades must not
+# do collectively what no single trade was allowed to do.
+PORTFOLIO_MAX_VOLATILITY_INCREASE = SIZING_RISK_BUDGET
+
+# Severities. Reused from W2's vocabulary rather than redefined, so a veto
+# means the same thing at both levels.
+PORTFOLIO_SEVERITY_VETO = "veto"
+PORTFOLIO_SEVERITY_WARN = "warn"
+
+# Verdicts. NO_TRADE and NOT_EVALUATED stay distinct for the reason R2 and R4
+# keep REFUSED and NOT_EVALUATED apart: "the portfolio refuses this" and "the
+# portfolio could not be assessed" are different answers, and collapsing them
+# turns an absence of evidence into a decision.
+PORTFOLIO_PROCEED = "PROCEED"
+PORTFOLIO_REDUCED = "REDUCED"
+PORTFOLIO_NO_TRADE = "NO_TRADE"
+PORTFOLIO_NOT_EVALUATED = "NOT_EVALUATED"
+PORTFOLIO_VERDICTS: tuple[str, ...] = (
+    PORTFOLIO_NOT_EVALUATED,
+    PORTFOLIO_NO_TRADE,
+    PORTFOLIO_REDUCED,
+    PORTFOLIO_PROCEED,
+)
+
+# The portfolio-level rules. Declared as DATA so a reader learns what the book
+# is checked against without reading code, and adding one is a deliberate
+# edit here. Each names the sprint whose measurement it enforces.
+PORTFOLIO_RULES: dict[str, dict] = {
+    "total_size_exceeds_budget": {
+        "severity": PORTFOLIO_SEVERITY_VETO,
+        "source": "R7",
+        "detail": (
+            "MEASURED, six individually-approved trades summed to 120% of the "
+            "book. Each was sized against the ORIGINAL portfolio and never "
+            "against the others"
+        ),
+    },
+    "set_volatility_exceeds_budget": {
+        "severity": PORTFOLIO_SEVERITY_VETO,
+        "source": "R2/R5",
+        "detail": (
+            "MEASURED, a set whose members each REDUCED volatility in "
+            "isolation raised it +44.57% when executed together"
+        ),
+    },
+    "sector_concentration_breach": {
+        "severity": PORTFOLIO_SEVERITY_WARN,
+        "source": "R3",
+        "detail": (
+            "MEASURED, 38 IT names at ~1.3% each formed a 52.1% single-sector "
+            "bet that cleared every per-name cap"
+        ),
+    },
+    "stress_diversification_collapse": {
+        "severity": PORTFOLIO_SEVERITY_WARN,
+        "source": "R6",
+        "detail": (
+            "MEASURED on 76 real tickers, correlation roughly doubles under "
+            "the worst decile and diversification falls 38.1%"
+        ),
+    },
+    "no_candidate_survived": {
+        "severity": PORTFOLIO_SEVERITY_VETO,
+        "source": "R4",
+        "detail": (
+            "every candidate was already refused upstream; proceeding would "
+            "execute nothing while reporting approval"
+        ),
+    },
+}
+
+# THIS is the module that blocks trades, and the only one. Every other Sprint
+# R module carries *_BLOCKS_TRADES = False and says so in its report.
+PORTFOLIO_BLOCKS_TRADES = True
+
+
+def _validate_portfolio_decision_config() -> None:
+    """Import-time guard for the R7 contract."""
+    if not PORTFOLIO_FAIL_CLOSED:
+        raise ValueError(
+            "R7 must be fail-closed like W2: a portfolio check that passes "
+            "when its evidence is absent produces a confident approval from "
+            "nothing"
+        )
+    if not PORTFOLIO_BLOCKS_TRADES:
+        raise ValueError(
+            "R7 is the module that blocks trades; R1, R3, R4, R5 and R6 each "
+            "deferred here precisely so one place owns the refusal"
+        )
+    if not 0.0 < PORTFOLIO_MAX_TOTAL_SIZE < 1.0:
+        raise ValueError(
+            f"PORTFOLIO_MAX_TOTAL_SIZE must leave the book intact, got "
+            f"{PORTFOLIO_MAX_TOTAL_SIZE!r}"
+        )
+    if PORTFOLIO_MAX_VOLATILITY_INCREASE != SIZING_RISK_BUDGET:
+        raise ValueError(
+            "the set-level volatility budget must equal R2's per-trade "
+            "budget: a set of trades must not do collectively what no single "
+            "trade was allowed to do"
+        )
+    if PORTFOLIO_NO_TRADE == PORTFOLIO_NOT_EVALUATED:
+        raise ValueError(
+            "'the portfolio refuses this' and 'the portfolio could not be "
+            "assessed' are different answers; collapsing them turns an "
+            "absence of evidence into a decision"
+        )
+    if len(set(PORTFOLIO_VERDICTS)) != len(PORTFOLIO_VERDICTS):
+        raise ValueError("duplicate R7 verdict")
+    if PORTFOLIO_SEVERITY_VETO != "veto":
+        raise ValueError(
+            "the veto severity must match W2's vocabulary so a veto means the "
+            "same thing at both levels"
+        )
+    for rule_id, spec in PORTFOLIO_RULES.items():
+        if spec.get("severity") not in (
+            PORTFOLIO_SEVERITY_VETO,
+            PORTFOLIO_SEVERITY_WARN,
+        ):
+            raise ValueError(f"{rule_id}: unknown severity")
+        if not str(spec.get("detail") or "").strip():
+            raise ValueError(
+                f"{rule_id}: a portfolio rule must carry the measurement it "
+                f"enforces, not merely a name"
+            )
+        if not str(spec.get("source") or "").strip():
+            raise ValueError(f"{rule_id}: no sprint named as the rule's source")
+    if not any(
+        spec["severity"] == PORTFOLIO_SEVERITY_VETO
+        for spec in PORTFOLIO_RULES.values()
+    ):
+        raise ValueError(
+            "no rule can veto: a decision module that cannot refuse is not a "
+            "decision module"
+        )
+
+
+_validate_portfolio_decision_config()
