@@ -6831,3 +6831,114 @@ def _validate_event_context_config() -> None:
 
 
 _validate_event_context_config()
+
+
+# --- D4: the provenance surface --------------------------------------------------
+# "The UI must expose provenance, not hide it." Exposing it requires that it
+# exist per displayed value, and MEASURED, it does not.
+#
+# THE DECIDING MEASUREMENT: of the 5 PRESENT fields in a live forecast
+# snapshot, ZERO carry any identification of where the value came from. The
+# snapshot as a whole is digest-addressable (snapshot_digest) and its versions
+# are pinned (forecast_versions), but no individual value says which source,
+# which payload or which calculation produced it. A reader looking at
+# "P(up) 0.56" has no way to reach the bytes behind it.
+#
+# The substrate exists: MEASURED, the raw ledger holds 6,641 payloads across
+# 2,758 distinct SHA-256 digests, each carrying source_id, request_key,
+# ingested_time and schema_version. What was missing is the LINK from a
+# displayed value to one of them.
+PROVENANCE_SURFACE_VERSION = "provenance-surface-v1"
+
+# The four things a provenance record must answer. Fewer than four and the
+# value cannot be re-derived: WHICH source, WHICH payload, WHEN it arrived,
+# and under WHICH calculation version it was interpreted.
+PROV_FIELD_SOURCE = "source_id"
+PROV_FIELD_PAYLOAD = "payload_sha256"
+PROV_FIELD_INGESTED = "ingested_time"
+PROV_FIELD_VERSION = "calculation_version"
+PROVENANCE_REQUIRED_FIELDS: tuple[str, ...] = (
+    PROV_FIELD_SOURCE,
+    PROV_FIELD_PAYLOAD,
+    PROV_FIELD_INGESTED,
+    PROV_FIELD_VERSION,
+)
+
+# Origin kinds. A value that was OBSERVED from a source and one DERIVED by
+# calculation are different claims, and a reader must be able to tell which
+# is which without inspecting the pipeline. COMPOSED marks a value assembled
+# from other traced values - it is traceable only as far as its parts.
+PROV_ORIGIN_OBSERVED = "OBSERVED"
+PROV_ORIGIN_DERIVED = "DERIVED"
+PROV_ORIGIN_COMPOSED = "COMPOSED"
+PROV_ORIGIN_UNTRACED = "UNTRACED"
+PROVENANCE_ORIGINS: tuple[str, ...] = (
+    PROV_ORIGIN_OBSERVED,
+    PROV_ORIGIN_DERIVED,
+    PROV_ORIGIN_COMPOSED,
+    PROV_ORIGIN_UNTRACED,
+)
+
+# UNTRACED IS REPORTED, NEVER HIDDEN. This is the whole point of the sprint
+# bullet. A value with no provenance is shown AS untraced rather than shown
+# without the question being asked - MEASURED, that is currently every
+# PRESENT value in the snapshot, and a surface that quietly omitted them
+# would report perfect provenance over an empty set.
+PROVENANCE_REPORT_UNTRACED = True
+
+# The share of displayed values that must be traceable before the surface
+# stops leading with its own incompleteness. MEASURED, the live snapshot sits
+# at 0.00, so today every real surface leads with the gap.
+PROVENANCE_COVERAGE_WARN = 0.80
+
+# A refusal carries provenance too: WHY a value is absent is itself evidence,
+# and a reader who cannot see why cannot judge whether to wait for it.
+PROVENANCE_TRACE_REFUSALS = True
+
+# D4 exposes; it decides nothing and it recomputes nothing.
+PROVENANCE_BLOCKS_TRADES = False
+
+
+def _validate_provenance_surface_config() -> None:
+    """Import-time guard for the D4 contract."""
+    if len(set(PROVENANCE_REQUIRED_FIELDS)) != len(PROVENANCE_REQUIRED_FIELDS):
+        raise ValueError("duplicate provenance field")
+    for required in (PROV_FIELD_SOURCE, PROV_FIELD_PAYLOAD):
+        if required not in PROVENANCE_REQUIRED_FIELDS:
+            raise ValueError(
+                f"{required!r} is required: without it a displayed value "
+                f"cannot be traced to the bytes behind it"
+            )
+    if len(set(PROVENANCE_ORIGINS)) != len(PROVENANCE_ORIGINS):
+        raise ValueError("duplicate provenance origin")
+    if PROV_ORIGIN_OBSERVED == PROV_ORIGIN_DERIVED:
+        raise ValueError(
+            "'read from a source' and 'computed from other values' are "
+            "different claims and must not share a label"
+        )
+    if PROV_ORIGIN_UNTRACED not in PROVENANCE_ORIGINS:
+        raise ValueError(
+            "UNTRACED must be expressible: MEASURED, 0 of 5 PRESENT snapshot "
+            "fields carry provenance today, and a surface that cannot say so "
+            "would report perfect provenance over an empty set"
+        )
+    if not PROVENANCE_REPORT_UNTRACED:
+        raise ValueError(
+            "the sprint requires provenance be EXPOSED, not hidden; an "
+            "untraced value is the case that most needs exposing"
+        )
+    if not PROVENANCE_TRACE_REFUSALS:
+        raise ValueError(
+            "a refusal carries provenance too: why a value is absent is "
+            "itself evidence a reader needs"
+        )
+    if not 0.0 < PROVENANCE_COVERAGE_WARN <= 1.0:
+        raise ValueError(
+            f"PROVENANCE_COVERAGE_WARN must be a share in (0, 1], got "
+            f"{PROVENANCE_COVERAGE_WARN!r}"
+        )
+    if PROVENANCE_BLOCKS_TRADES:
+        raise ValueError("D4 exposes provenance; it decides nothing")
+
+
+_validate_provenance_surface_config()
