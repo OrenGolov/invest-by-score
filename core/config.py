@@ -7053,3 +7053,122 @@ def _validate_forecast_alert_config() -> None:
 
 
 _validate_forecast_alert_config()
+
+
+# --- A2: confidence change alert -------------------------------------------------
+# "Alert when confidence changes materially." A2 is NOT A1 with a different
+# field, and the difference was measured rather than assumed.
+#
+# CONFIDENCE MOVES WHEN THE FORECAST DOES NOT. MEASURED: holding P(up) fixed at
+# 0.56 and dropping feature completeness from 10/10 to 6/10 moved confidence
+# -0.0146 while the forecast value did not move at all. A1 would never fire on
+# this, and it should not - the forecast is unchanged. What changed is how much
+# it can be trusted.
+#
+# THE DECIDING MEASUREMENT: A MAGNITUDE-ONLY ALERT IS BLIND HALF THE TIME.
+# F7's confidence is bounded by its WEAKEST factor and always reports which one
+# bound it. Over 3,000 sampled assessment pairs, 1,170 moved confidence by less
+# than 0.10 - below any sane threshold - and in 600 OF THOSE 1,170 (51%) the
+# BINDING FACTOR changed completely. A concrete instance: confidence 0.5559 ->
+# 0.4640, a -0.0919 move no threshold would fire on, while the binding factor
+# went from event_similarity to regime_similarity. The forecast became
+# uncertain for an entirely different reason and a magnitude-only alert says
+# nothing.
+#
+# So A2 watches THREE things: the magnitude, the BAND, and the BINDING FACTOR.
+CONFIDENCE_ALERT_VERSION = "confidence-change-alert-v1"
+
+# The raw confidence move that counts as material on its own.
+CONFIDENCE_ALERT_MIN_MOVE = 0.10
+
+# A BAND CROSSING IS MATERIAL AT ANY MAGNITUDE. MEASURED, the same 0.10 delta
+# crosses a band at 0.20->0.30, 0.45->0.55 and 0.70->0.80, but not at
+# 0.05->0.15 or 0.85->0.95. The bands are what a reader acts on, so a crossing
+# is news even when the number barely moved.
+CONFIDENCE_ALERT_BAND_CROSS_IS_MATERIAL = True
+
+# A CHANGE OF BINDING FACTOR IS MATERIAL AT ANY MAGNITUDE. This is the 51%
+# case. "We are unsure because the sample is small" and "we are unsure because
+# no comparable regime exists" are different problems with different remedies,
+# and a reader who is told only the number cannot tell them apart.
+CONFIDENCE_ALERT_BINDING_CHANGE_IS_MATERIAL = True
+
+# Change kinds. Availability is first-class for A1's reason: a confidence
+# APPEARING or DISAPPEARING is not a move of its own magnitude.
+CONF_CHANGE_NONE = "NONE"
+CONF_CHANGE_MOVED = "MOVED"                  # magnitude crossed the threshold
+CONF_CHANGE_BAND = "BAND_CHANGED"            # crossed a band boundary
+CONF_CHANGE_BINDING = "BINDING_CHANGED"      # a different factor now binds
+CONF_CHANGE_APPEARED = "APPEARED"
+CONF_CHANGE_DISAPPEARED = "DISAPPEARED"
+CONF_CHANGE_NOT_EVALUATED = "NOT_EVALUATED"
+CONFIDENCE_CHANGE_KINDS: tuple[str, ...] = (
+    CONF_CHANGE_NOT_EVALUATED,
+    CONF_CHANGE_NONE,
+    CONF_CHANGE_MOVED,
+    CONF_CHANGE_BAND,
+    CONF_CHANGE_BINDING,
+    CONF_CHANGE_APPEARED,
+    CONF_CHANGE_DISAPPEARED,
+)
+
+# UNMEASURABLE IS NOT LOW, inherited from F7 and R4. MEASURED, calibration,
+# model_agreement and model_drift are all UNMEASURABLE because no model is
+# registered. A factor becoming unmeasurable is not a confidence drop, and a
+# factor becoming measurable is not a rise - the SET of things being measured
+# changed, which is its own event.
+CONFIDENCE_ALERT_MEASURABILITY_IS_ITS_OWN_EVENT = True
+
+# A2 reports; A7 suppresses and gates. Same rule as A1.
+CONFIDENCE_ALERT_BLOCKS_TRADES = False
+
+
+def _validate_confidence_alert_config() -> None:
+    """Import-time guard for the A2 contract."""
+    if not 0.0 < CONFIDENCE_ALERT_MIN_MOVE < 1.0:
+        raise ValueError(
+            f"CONFIDENCE_ALERT_MIN_MOVE must lie in (0, 1), got "
+            f"{CONFIDENCE_ALERT_MIN_MOVE!r}"
+        )
+    if not CONFIDENCE_ALERT_BAND_CROSS_IS_MATERIAL:
+        raise ValueError(
+            "a band crossing is material at any magnitude: MEASURED, the same "
+            "0.10 delta crosses a band at 0.45->0.55 and does not at "
+            "0.85->0.95, and the band is what a reader acts on"
+        )
+    if not CONFIDENCE_ALERT_BINDING_CHANGE_IS_MATERIAL:
+        raise ValueError(
+            "a change of binding factor is material at any magnitude: "
+            "MEASURED, of 1,170 assessment pairs moving confidence by less "
+            "than 0.10, 600 (51%) changed which factor bound it. A "
+            "magnitude-only alert is silent on all of them"
+        )
+    if not CONFIDENCE_ALERT_MEASURABILITY_IS_ITS_OWN_EVENT:
+        raise ValueError(
+            "a factor becoming UNMEASURABLE is not a confidence drop; F7 "
+            "excludes unmeasurable factors rather than scoring them 0.0"
+        )
+    if len(set(CONFIDENCE_CHANGE_KINDS)) != len(CONFIDENCE_CHANGE_KINDS):
+        raise ValueError("duplicate confidence change kind")
+    for required in (CONF_CHANGE_BAND, CONF_CHANGE_BINDING):
+        if required not in CONFIDENCE_CHANGE_KINDS:
+            raise ValueError(
+                f"{required!r} must be expressible, or A2 is A1 with a "
+                f"different field and is blind to 51% of real changes"
+            )
+    for required in (CONF_CHANGE_APPEARED, CONF_CHANGE_DISAPPEARED):
+        if required not in CONFIDENCE_CHANGE_KINDS:
+            raise ValueError(
+                f"{required!r} must be expressible: an availability change "
+                f"folded into a magnitude is a phantom move"
+            )
+    if CONF_CHANGE_NONE == CONF_CHANGE_NOT_EVALUATED:
+        raise ValueError(
+            "'confidence did not change' and 'there was nothing to compare' "
+            "are different answers"
+        )
+    if CONFIDENCE_ALERT_BLOCKS_TRADES:
+        raise ValueError("an alert reports; it does not trade")
+
+
+_validate_confidence_alert_config()
