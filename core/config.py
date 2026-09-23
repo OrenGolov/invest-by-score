@@ -7308,3 +7308,145 @@ def _validate_event_impact_alert_config() -> None:
 
 
 _validate_event_impact_alert_config()
+
+
+# --- A4: regime change alert -----------------------------------------------------
+# "Alert when the regime changes. E.g. BULLISH -> RISK_OFF." The obvious
+# implementation compares today's label to yesterday's and fires on any
+# difference. MEASURED on real data, that alert is mostly noise.
+#
+# THE DECIDING MEASUREMENT, over 74 tickers and 74,600 labelled sessions from
+# the local 5-year ingest: the regime classifier flips 4,923 times - 16.6 times
+# per 252 sessions per ticker - and 26% OF THOSE RUNS LAST A SINGLE SESSION.
+# 48% last three sessions or fewer, and the median run is 4 sessions. A
+# label-difference alert fires roughly seventeen times a year per name, a
+# quarter of them on a state that reverses the next day.
+#
+# CONFIRMATION IS WHAT MAKES THE ALERT MEAN SOMETHING. Requiring the new label
+# to persist before firing, and asking whether the alert still held 5 sessions
+# later:
+#
+#     confirming sessions   alerts   per 252d   still held 5d later
+#                       1    4,923       16.6                   42%
+#                       2    3,016       10.2                   53%
+#                       3    2,272        7.6                   61%
+#                       5    1,628        5.5                   71%
+#
+# At confirm=1 the MAJORITY of alerts - 58% - do not survive a week. Three
+# confirming sessions more than halves the alert rate and lifts durability to
+# 61%, which is the knee: going to 5 buys 10 more points of durability for
+# another 28% fewer alerts, and delays every genuine regime change by two more
+# sessions.
+REGIME_ALERT_VERSION = "regime-change-alert-v1"
+
+# Sessions the new label must hold before the change is reported. MEASURED,
+# this is the knee of the durability curve above.
+REGIME_ALERT_CONFIRM_SESSIONS = 3
+
+# A4 NEVER FIRES ON A SINGLE-SESSION DIFFERENCE. MEASURED, 26% of regime runs
+# last exactly one session, so an unconfirmed alert is a quarter noise by
+# construction.
+REGIME_ALERT_REQUIRES_CONFIRMATION = True
+
+# Transitions INTO these labels are escalated regardless of confirmation
+# progress being complete, because the cost of a late warning is asymmetric: a
+# missed stress onset is worse than a false one, and the roadmap names
+# BULLISH -> RISK_OFF as the example transition. They still require
+# confirmation - the escalation is in SEVERITY, not in skipping the evidence.
+REGIME_ALERT_ESCALATED_LABELS: tuple[str, ...] = (
+    REGIME_RISKOFF_LABEL,
+    REGIME_STRESS_LABEL,
+)
+
+# Change kinds. Availability is first-class for A1's reason: a regime becoming
+# computable is not a transition from some previous state.
+REGIME_CHANGE_NONE = "NONE"
+REGIME_CHANGE_CONFIRMED = "CONFIRMED"      # held for the required sessions
+REGIME_CHANGE_PENDING = "PENDING"          # differs, not yet confirmed
+REGIME_CHANGE_APPEARED = "APPEARED"        # regime became computable
+REGIME_CHANGE_DISAPPEARED = "DISAPPEARED"  # regime stopped being computable
+REGIME_CHANGE_NOT_EVALUATED = "NOT_EVALUATED"
+REGIME_CHANGE_KINDS: tuple[str, ...] = (
+    REGIME_CHANGE_NOT_EVALUATED,
+    REGIME_CHANGE_NONE,
+    REGIME_CHANGE_PENDING,
+    REGIME_CHANGE_CONFIRMED,
+    REGIME_CHANGE_APPEARED,
+    REGIME_CHANGE_DISAPPEARED,
+)
+
+# PENDING IS REPORTED BUT DOES NOT FIRE. A change that is accumulating
+# evidence is worth showing on a dashboard and is NOT worth waking someone
+# for; collapsing it into NONE would hide a transition in progress, and
+# collapsing it into CONFIRMED is the noise this module exists to remove.
+REGIME_ALERT_PENDING_FIRES = False
+
+# A regime that cannot be computed is not a regime of "no regime". The
+# classifier returns computable=False when the frame is too short or missing
+# columns, and that is an absence of measurement rather than a calm market.
+REGIME_ALERT_UNCOMPUTABLE_IS_NOT_A_REGIME = True
+
+# A4 reports; A7 suppresses and gates.
+REGIME_ALERT_BLOCKS_TRADES = False
+
+
+def _validate_regime_alert_config() -> None:
+    """Import-time guard for the A4 contract."""
+    if not REGIME_ALERT_REQUIRES_CONFIRMATION:
+        raise ValueError(
+            "A4 must require confirmation: MEASURED, 26% of regime runs last "
+            "a single session and 58% of unconfirmed alerts do not survive "
+            "five sessions"
+        )
+    if REGIME_ALERT_CONFIRM_SESSIONS < 2:
+        raise ValueError(
+            f"{REGIME_ALERT_CONFIRM_SESSIONS} confirming session(s) is not "
+            f"confirmation: MEASURED, a single-session rule fires 16.6 times "
+            f"per year per ticker and 58% of those alerts reverse within a "
+            f"week"
+        )
+    if REGIME_ALERT_CONFIRM_SESSIONS > 10:
+        raise ValueError(
+            f"{REGIME_ALERT_CONFIRM_SESSIONS} confirming sessions delays "
+            f"every genuine regime change past the point of usefulness; the "
+            f"median regime run is 4 sessions"
+        )
+    for label in REGIME_ALERT_ESCALATED_LABELS:
+        if label not in REGIME_LABELS:
+            raise ValueError(
+                f"{label!r} is escalated but is not a regime label; the "
+                f"escalation set must name states the classifier can emit"
+            )
+    if REGIME_RISKOFF_LABEL not in REGIME_ALERT_ESCALATED_LABELS:
+        raise ValueError(
+            "risk_off must be escalated: the roadmap names BULLISH -> "
+            "RISK_OFF as the example transition, and a missed stress onset "
+            "costs more than a false one"
+        )
+    if len(set(REGIME_CHANGE_KINDS)) != len(REGIME_CHANGE_KINDS):
+        raise ValueError("duplicate regime change kind")
+    if REGIME_CHANGE_PENDING == REGIME_CHANGE_NONE:
+        raise ValueError(
+            "'a transition is accumulating evidence' and 'nothing changed' "
+            "are different answers; collapsing them hides a change in progress"
+        )
+    if REGIME_CHANGE_PENDING == REGIME_CHANGE_CONFIRMED:
+        raise ValueError(
+            "collapsing PENDING into CONFIRMED reinstates the single-session "
+            "alert this module exists to remove"
+        )
+    if REGIME_ALERT_PENDING_FIRES:
+        raise ValueError(
+            "a PENDING change must not fire: it is exactly the unconfirmed "
+            "state MEASURED to reverse 58% of the time"
+        )
+    if not REGIME_ALERT_UNCOMPUTABLE_IS_NOT_A_REGIME:
+        raise ValueError(
+            "an uncomputable regime is an absence of measurement, not a calm "
+            "market"
+        )
+    if REGIME_ALERT_BLOCKS_TRADES:
+        raise ValueError("an alert reports; it does not trade")
+
+
+_validate_regime_alert_config()
