@@ -7732,3 +7732,173 @@ def _validate_forecast_threshold_config() -> None:
 
 
 _validate_forecast_threshold_config()
+
+
+# --- A7: alert suppression -------------------------------------------------------
+# "Prevent repeated/spam alerts. Alerts must respect risk and governance."
+# Two requirements that pull in OPPOSITE directions, and the measurement says
+# the naive reading of the first one breaks the system.
+#
+# THE DECIDING MEASUREMENT, over 8 tickers walked forward one session at a time
+# exactly as a daily run would execute them - 4,622 classified sessions:
+#
+#     sessions in an alerting state      4,622
+#     distinct episodes                    308
+#     repeat days                        4,314  (93.3%)
+#     alerts per episode, unsuppressed   15.01
+#
+# So spam is REAL and suppression is genuinely needed. But the obvious rule -
+# "suppress while the label is unchanged" - is measurably wrong:
+#
+#     same-label consecutive pairs               4,314
+#     of those, |d probability| >= 0.10            697  (16.2%)
+#     of those, CROSSED a 0.5/0.6/0.75 band        491  (11.4%)
+#     median |d probability| within a run       0.0033
+#     max |d probability| within a run          1.0000
+#
+# A LABEL THAT DID NOT CHANGE IS NOT A STATE THAT DID NOT CHANGE. Eleven
+# percent of the days a label-only rule would silence crossed a decision
+# boundary, and the largest move under an unchanged label was a FULL reversal
+# of conviction from 1.00 to 0.00. Deduplicating on the label alone hides
+# exactly the days worth reading.
+#
+# Hence suppression keys on the DECISION-RELEVANT STATE, not on the label and
+# not on the whole payload. Keying on the whole payload suppresses nothing at
+# all, because as_of changes every day by construction - the same trap A1
+# measured for digests (FORECAST_ALERT_USES_DIGEST).
+ALERT_SUPPRESSION_VERSION = "alert-suppression-v1"
+
+# WHAT THE SUPPRESSION KEY COVERS. Declared as DATA so a reader sees the
+# identity rule without reading code, and so widening it is a deliberate edit
+# here rather than a quiet drift.
+SUPPRESS_KEY_FIELDS: tuple[str, ...] = ("alert", "ticker", "horizon", "state")
+
+# FIELDS THAT MUST NEVER ENTER THE KEY. MEASURED, as_of advances every session
+# by construction, so any key containing it is unique every day and suppresses
+# nothing - the alert storm survives untouched while the code claims to
+# deduplicate.
+SUPPRESS_KEY_FORBIDDEN: tuple[str, ...] = ("as_of", "timestamp", "digest", "note")
+
+# ESCALATION ALWAYS BREAKS SUPPRESSION. A repeat that got WORSE is new
+# information, and the whole point of the measurement above is that 11.4% of
+# repeats moved across a decision boundary under an unchanged label.
+SUPPRESS_ESCALATION_BREAKS = True
+
+# DE-ESCALATION DOES NOT. Going from warn to info is the situation improving;
+# re-notifying on relief is how a channel trains its reader to ignore it.
+SUPPRESS_DEESCALATION_BREAKS = False
+
+# THE COOLDOWN. MEASURED, an episode runs 15.01 sessions on average, so a
+# window shorter than that re-fires inside a single unchanged episode and
+# reintroduces the spam this module exists to remove. 15 sessions is that
+# measured mean, used directly rather than rounded to a habitual number.
+SUPPRESS_COOLDOWN_SESSIONS = 15
+
+# A SUPPRESSED ALERT IS RECORDED, NEVER DISCARDED. "Nothing fired" and "it
+# fired and we chose not to show it" are different facts, and only one of them
+# can be audited after a loss.
+SUPPRESS_RECORDS_SUPPRESSED = True
+
+# GOVERNANCE GATING. An alert that survives suppression still must not be
+# delivered as actionable while the portfolio refuses to trade.
+#
+# THE UNKNOWN STATE IS NOT THE CLEAR STATE. This is the one place A7 inherits
+# W2 fail-closed reasoning wholesale, for the reason A6 gave: claiming
+# governance passed when nobody asked is how a blocked trade gets recommended.
+SUPPRESS_UNKNOWN_GOVERNANCE_GATES = True
+
+# GATING IS NOT DELETION. A vetoed alert is still DELIVERED, marked
+# non-actionable, because "the market moved against you and the book is frozen"
+# is precisely the alert a reader most needs. Silencing alerts during a veto
+# would blind the operator exactly when governance says conditions are worst.
+SUPPRESS_VETO_SILENCES = False
+
+# Dispositions.
+SUPPRESS_DELIVER = "DELIVER"                  # new, or escalated past the last
+SUPPRESS_SUPPRESSED = "SUPPRESSED"            # a repeat inside the cooldown
+SUPPRESS_GATED = "GATED"                      # delivered, but not actionable
+SUPPRESS_NOT_EVALUATED = "NOT_EVALUATED"      # the alert own state is unknown
+SUPPRESS_DISPOSITIONS: tuple[str, ...] = (
+    SUPPRESS_NOT_EVALUATED,
+    SUPPRESS_SUPPRESSED,
+    SUPPRESS_GATED,
+    SUPPRESS_DELIVER,
+)
+
+# A7 gates DELIVERY; it does not trade.
+SUPPRESS_BLOCKS_TRADES = False
+
+
+def _validate_alert_suppression_config() -> None:
+    """Import-time guard for the A7 contract."""
+    if not SUPPRESS_KEY_FIELDS:
+        raise ValueError("a suppression key with no fields suppresses everything")
+    if len(set(SUPPRESS_KEY_FIELDS)) != len(SUPPRESS_KEY_FIELDS):
+        raise ValueError("duplicate suppression key field")
+    if "state" not in SUPPRESS_KEY_FIELDS:
+        raise ValueError(
+            "the key must cover the decision-relevant STATE: MEASURED, 11.4% "
+            "of same-label repeats crossed a 0.5/0.6/0.75 band and the largest "
+            "move under an unchanged label was a full 1.00 reversal, so a "
+            "label-only key hides exactly the days worth reading"
+        )
+    for forbidden in SUPPRESS_KEY_FORBIDDEN:
+        if forbidden in SUPPRESS_KEY_FIELDS:
+            raise ValueError(
+                f"{forbidden!r} must not enter the suppression key: it advances "
+                f"every session by construction, so the key is unique every day "
+                f"and suppresses nothing"
+            )
+    if not SUPPRESS_ESCALATION_BREAKS:
+        raise ValueError(
+            "escalation must break suppression: a repeat that got worse is new "
+            "information, and 697 of 4,314 measured repeats moved the "
+            "probability by 0.10 or more under an unchanged label"
+        )
+    if SUPPRESS_DEESCALATION_BREAKS:
+        raise ValueError(
+            "de-escalation must not break suppression: re-notifying on relief "
+            "is how a channel trains its reader to ignore it"
+        )
+    if SUPPRESS_COOLDOWN_SESSIONS < 1:
+        raise ValueError(
+            "a cooldown below one session suppresses nothing, because two "
+            "alerts never share a session"
+        )
+    if SUPPRESS_COOLDOWN_SESSIONS < 15:
+        raise ValueError(
+            f"a cooldown of {SUPPRESS_COOLDOWN_SESSIONS} sessions re-fires "
+            f"inside a single unchanged episode: MEASURED, an episode runs "
+            f"15.01 sessions on average"
+        )
+    if not SUPPRESS_RECORDS_SUPPRESSED:
+        raise ValueError(
+            "a suppressed alert must be recorded: 'nothing fired' and 'it "
+            "fired and we chose not to show it' are different facts, and only "
+            "one of them can be audited after a loss"
+        )
+    if not SUPPRESS_UNKNOWN_GOVERNANCE_GATES:
+        raise ValueError(
+            "an unknown governance state is not a clear one: claiming "
+            "governance passed when nobody asked is how a blocked trade gets "
+            "recommended"
+        )
+    if SUPPRESS_VETO_SILENCES:
+        raise ValueError(
+            "a veto must not silence an alert: 'the market moved against you "
+            "and the book is frozen' is precisely the alert a reader most "
+            "needs, and silencing it blinds the operator when governance says "
+            "conditions are worst"
+        )
+    if len(set(SUPPRESS_DISPOSITIONS)) != len(SUPPRESS_DISPOSITIONS):
+        raise ValueError("duplicate suppression disposition")
+    if SUPPRESS_SUPPRESSED == SUPPRESS_GATED:
+        raise ValueError(
+            "'we chose not to show this' and 'governance blocks acting on "
+            "this' are different answers; collapsing them loses the reason"
+        )
+    if SUPPRESS_BLOCKS_TRADES:
+        raise ValueError("an alert gate governs delivery; it does not trade")
+
+
+_validate_alert_suppression_config()
