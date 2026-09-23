@@ -7450,3 +7450,122 @@ def _validate_regime_alert_config() -> None:
 
 
 _validate_regime_alert_config()
+
+
+# --- A5: thesis break alert ------------------------------------------------------
+# "Alert when evidence materially contradicts the existing thesis." The obvious
+# implementation watches the SCORE and fires when it falls. MEASURED, that
+# alert is silent on most real thesis breaks.
+#
+# THE DECIDING MEASUREMENT: the score is a SUM, and a sum hides a reversal.
+# W1 attributes every score to three evidence buckets - operational
+# (fundamental + technical), narrative (news + sentiment) and macro_shock
+# (macroeconomic + market regime). Over 20,000 sampled bucket pairs, 1,306
+# moved the total score by less than the 0.25 support threshold, and in 765 OF
+# THOSE 1,306 (59%) A BUCKET REVERSED SIGN - it went from supporting the case
+# to opposing it, or the reverse.
+#
+# The concrete case, constructed from the same arithmetic:
+#
+#     bucket          before          after
+#     operational     +1.40 supports  -1.20 opposes
+#     narrative       -0.10 neutral   +2.50 supports
+#     macro_shock     +0.20 neutral   +0.20 neutral
+#     SCORE           +1.50           +1.50   delta +0.00
+#
+# A score-only alert sees a +0.00 move and says nothing, while the thesis has
+# inverted: the case WAS carried by operational evidence and is now carried
+# purely by narrative. That is a different investment with the same number.
+THESIS_ALERT_VERSION = "thesis-break-alert-v1"
+
+# A5 watches the BUCKETS, not the score. The score is reported for context and
+# is never the trigger on its own.
+THESIS_ALERT_WATCHES_BUCKETS = True
+
+# The support threshold, REUSED from W1's attribution rather than redefined.
+# A second threshold would let A5 call a bucket "supporting" that the score
+# engine calls neutral, and the two would disagree about the same number.
+THESIS_SUPPORT_THRESHOLD = ATTRIBUTION_SUPPORT_THRESHOLD
+
+# Break kinds, ordered by how much they contradict the thesis.
+THESIS_BREAK_NONE = "NONE"
+THESIS_BREAK_REVERSAL = "REVERSAL"        # a bucket crossed supports <-> opposes
+THESIS_BREAK_CARRIER = "CARRIER_CHANGED"  # a different bucket now carries it
+THESIS_BREAK_WITHDRAWN = "SUPPORT_WITHDRAWN"  # the carrier went neutral
+THESIS_BREAK_APPEARED = "APPEARED"
+THESIS_BREAK_DISAPPEARED = "DISAPPEARED"
+THESIS_BREAK_NOT_EVALUATED = "NOT_EVALUATED"
+THESIS_BREAK_KINDS: tuple[str, ...] = (
+    THESIS_BREAK_NOT_EVALUATED,
+    THESIS_BREAK_NONE,
+    THESIS_BREAK_WITHDRAWN,
+    THESIS_BREAK_CARRIER,
+    THESIS_BREAK_REVERSAL,
+    THESIS_BREAK_APPEARED,
+    THESIS_BREAK_DISAPPEARED,
+)
+
+# A REVERSAL IS THE STRONGEST BREAK and fires regardless of the score move.
+# MEASURED, 59% of flat-score periods contain one.
+THESIS_REVERSAL_IS_MATERIAL = True
+
+# A BUCKET AT 0.0 IS NOT A BUCKET THAT OPPOSES. MEASURED, score_engine itself
+# distinguishes three reasons a bucket totals exactly 0.0: "status OK but no
+# usable sentiment score", "no eligible narrative sources", and "net-zero
+# contribution". Two of the three are an ABSENCE of evidence, and reading
+# absence as contradiction would fire a thesis break every time a news feed
+# went quiet.
+THESIS_ZERO_IS_NOT_OPPOSITION = True
+
+# A5 reports; A7 suppresses and gates.
+THESIS_ALERT_BLOCKS_TRADES = False
+
+
+def _validate_thesis_alert_config() -> None:
+    """Import-time guard for the A5 contract."""
+    if not THESIS_ALERT_WATCHES_BUCKETS:
+        raise ValueError(
+            "A5 must watch the evidence buckets, not the score: MEASURED, "
+            "59% of flat-score periods contain a bucket reversal, and a "
+            "score-only alert is silent on all of them"
+        )
+    if THESIS_SUPPORT_THRESHOLD != ATTRIBUTION_SUPPORT_THRESHOLD:
+        raise ValueError(
+            "the support threshold must be W1's: a second threshold lets A5 "
+            "call a bucket supporting that the score engine calls neutral"
+        )
+    if not 0.0 < THESIS_SUPPORT_THRESHOLD < 10.0:
+        raise ValueError(
+            f"THESIS_SUPPORT_THRESHOLD {THESIS_SUPPORT_THRESHOLD!r} is not a "
+            f"score-scale threshold"
+        )
+    if not THESIS_REVERSAL_IS_MATERIAL:
+        raise ValueError(
+            "a bucket crossing from supporting to opposing is the definition "
+            "of evidence contradicting the thesis"
+        )
+    if not THESIS_ZERO_IS_NOT_OPPOSITION:
+        raise ValueError(
+            "a bucket at 0.0 is not opposition: MEASURED, two of the three "
+            "reasons score_engine gives for a 0.0 bucket are an ABSENCE of "
+            "evidence, and reading absence as contradiction fires a thesis "
+            "break every time a feed goes quiet"
+        )
+    if len(set(THESIS_BREAK_KINDS)) != len(THESIS_BREAK_KINDS):
+        raise ValueError("duplicate thesis break kind")
+    for required in (THESIS_BREAK_REVERSAL, THESIS_BREAK_CARRIER, THESIS_BREAK_WITHDRAWN):
+        if required not in THESIS_BREAK_KINDS:
+            raise ValueError(
+                f"{required!r} must be expressible, or A5 collapses distinct "
+                f"kinds of contradiction into one verdict"
+            )
+    if THESIS_BREAK_NONE == THESIS_BREAK_NOT_EVALUATED:
+        raise ValueError(
+            "'the thesis held' and 'there was nothing to compare against' are "
+            "different answers"
+        )
+    if THESIS_ALERT_BLOCKS_TRADES:
+        raise ValueError("an alert reports; it does not trade")
+
+
+_validate_thesis_alert_config()
