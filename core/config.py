@@ -7902,3 +7902,151 @@ def _validate_alert_suppression_config() -> None:
 
 
 _validate_alert_suppression_config()
+
+
+# --- X1: out-of-sample forecast validation ---------------------------------------
+# "Demonstrate performance on unseen data." MEASURED against the 8 training runs
+# on disk, the honest answer is that NO ESTIMATOR DEMONSTRATES ANYTHING.
+#
+# THE DECIDING MEASUREMENT. Every run is a single fold of 120 validation
+# observations at the 20d horizon, trained to 2025-04-16 and validated from
+# 2025-07-21 - a 96-day embargo, so PIT ordering is clean and the numbers below
+# are not leakage artefacts. They are simply negative.
+#
+#     estimator            rmse      95% bootstrap CI     dir_acc
+#     historical_mean   0.12164   [0.09741, 0.14757]      0.5500   <- BASELINE
+#     random_forest     0.13192   [0.10390, 0.16231]      0.4583
+#     gradient_boosting 0.14657   [0.11887, 0.17134]      0.4750
+#     ridge             0.15769   [0.13414, 0.18321]      0.5000
+#     momentum          0.17255   [0.15174, 0.19451]      0.5750
+#     elastic_net       0.17850   [0.15316, 0.20415]      0.5333
+#     mean_reversion    0.19152   [0.16585, 0.22028]      0.4250
+#     logistic          0.19178   [0.16519, 0.22092]      0.4750
+#
+# ZERO OF SEVEN LEARNED ESTIMATORS BEAT THE NO-FEATURE BASELINE. historical_mean
+# carries no features at all and posts the best RMSE. Four estimators are
+# SIGNIFICANTLY WORSE - their bootstrap intervals exclude the baseline entirely.
+# The three that overlap are merely indistinguishable from predicting the mean.
+#
+# DIRECTIONAL ACCURACY IS ENTIRELY NOISE. At n=120 the 95% sampling band around
+# a coin flip is 0.5 +/- 0.0895, i.e. [0.4105, 0.5895]. ALL EIGHT observed
+# accuracies fall inside it. A 10,000-shuffle permutation test on the best of
+# them, momentum at 0.5750, returns p=0.0625 - failing at alpha=0.05 BEFORE any
+# correction for having tested eight estimators. With eight tests the chance of
+# at least one spurious winner at 0.05 is 33.7%.
+#
+# SO X1 REPORTS NOT_APPROVED, AND THAT IS THE CORRECT ENGINEERING OUTCOME. The
+# temptation this gate exists to refuse is picking momentum because 0.5750 is
+# the largest number in the column. A gate that approves the best of eight
+# noise draws is not a gate; it is a random number generator with a rubber stamp.
+OOS_VALIDATION_VERSION = "oos-validation-v1"
+
+# The baseline every candidate must BEAT, not merely match. Named here as data
+# so the comparison cannot quietly drift to an easier opponent.
+OOS_BASELINE_ESTIMATOR = "historical_mean"
+
+# A CANDIDATE MUST BEAT THE BASELINE, not tie it. MEASURED, the three estimators
+# whose intervals overlap the baseline are indistinguishable from predicting the
+# mean, and shipping one would claim an edge the data does not show.
+OOS_REQUIRES_BEATING_BASELINE = True
+
+# Significance is required, not just a better point estimate. MEASURED, the
+# whole directional column sits inside the sampling band, so point estimates
+# alone would approve pure noise.
+OOS_REQUIRES_SIGNIFICANCE = True
+OOS_ALPHA = 0.05
+
+# Minimum validation observations. At n=120 the directional sampling band is
+# +/-0.0895 - wider than any effect observed - so 120 is demonstrably too few to
+# resolve the question, and a gate that accepted it would be certifying noise.
+# 120 is therefore the FLOOR for even attempting the test, never evidence of
+# sufficiency.
+OOS_MIN_OBSERVATIONS = 120
+
+# FOLDS. MEASURED, every run on disk has exactly ONE fold, so its metric has no
+# dispersion and nothing distinguishes a real edge from one lucky split. More
+# than one fold is required before a result is believable.
+OOS_MIN_FOLDS = 2
+
+# The embargo between train and validation, in days. MEASURED at 96 days on the
+# runs on disk, which is why those numbers are negative rather than leaked. A
+# zero embargo at a 20d horizon would let the validation window overlap labels
+# the model already saw.
+OOS_MIN_EMBARGO_DAYS = 20
+
+# THE GATE NEVER INVENTS A RESULT FOR A MISSING RUN. An absent estimator is
+# ABSENT, never a zero score, because a zero would rank it last rather than
+# unranked and could make a real candidate look good by comparison.
+OOS_COERCES_MISSING = False
+
+# Verdicts.
+OOS_APPROVED = "APPROVED"
+OOS_NOT_APPROVED = "NOT_APPROVED"
+OOS_NOT_EVALUATED = "NOT_EVALUATED"   # nothing to evaluate
+OOS_VERDICTS: tuple[str, ...] = (
+    OOS_NOT_EVALUATED,
+    OOS_NOT_APPROVED,
+    OOS_APPROVED,
+)
+
+# X1 reports; it does not promote. The registry decides promotion.
+OOS_BLOCKS_TRADES = False
+
+
+def _validate_oos_validation_config() -> None:
+    """Import-time guard for the X1 contract."""
+    if not OOS_REQUIRES_BEATING_BASELINE:
+        raise ValueError(
+            "a candidate must BEAT the baseline, not tie it: MEASURED, the "
+            "estimators whose bootstrap intervals overlap historical_mean are "
+            "indistinguishable from predicting the mean"
+        )
+    if not OOS_REQUIRES_SIGNIFICANCE:
+        raise ValueError(
+            "a better point estimate is not evidence: MEASURED, all eight "
+            "directional accuracies fall inside the 0.5 +/- 0.0895 sampling "
+            "band at n=120, so point estimates alone would approve pure noise"
+        )
+    if not 0.0 < OOS_ALPHA < 1.0:
+        raise ValueError(f"OOS_ALPHA must lie in (0, 1), got {OOS_ALPHA!r}")
+    if OOS_ALPHA > 0.05:
+        raise ValueError(
+            f"an alpha of {OOS_ALPHA} is looser than the 0.05 the best "
+            f"estimator already fails at (momentum, p=0.0625)"
+        )
+    if OOS_MIN_OBSERVATIONS < 120:
+        raise ValueError(
+            "120 observations is already too few to resolve a directional "
+            "edge; a lower floor certifies noise"
+        )
+    if OOS_MIN_FOLDS < 2:
+        raise ValueError(
+            "a single fold has no dispersion: MEASURED, every run on disk has "
+            "exactly one fold, so nothing distinguishes a real edge from one "
+            "lucky split"
+        )
+    if OOS_MIN_EMBARGO_DAYS <= 0:
+        raise ValueError(
+            "a zero embargo at a 20d horizon lets the validation window "
+            "overlap labels the model already saw"
+        )
+    if OOS_COERCES_MISSING:
+        raise ValueError(
+            "an absent estimator must stay ABSENT: a zero score would rank it "
+            "last rather than unranked, and could make a real candidate look "
+            "good by comparison"
+        )
+    if len(set(OOS_VERDICTS)) != len(OOS_VERDICTS):
+        raise ValueError("duplicate OOS verdict")
+    if OOS_NOT_APPROVED == OOS_NOT_EVALUATED:
+        raise ValueError(
+            "'we tested and it failed' and 'there was nothing to test' are "
+            "different answers; collapsing them hides which one happened"
+        )
+    if not OOS_BASELINE_ESTIMATOR:
+        raise ValueError("the baseline estimator must be named")
+    if OOS_BLOCKS_TRADES:
+        raise ValueError("X1 reports; the registry promotes")
+
+
+_validate_oos_validation_config()
