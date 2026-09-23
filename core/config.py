@@ -7569,3 +7569,166 @@ def _validate_thesis_alert_config() -> None:
 
 
 _validate_thesis_alert_config()
+
+
+# --- A6: forecast threshold alert ------------------------------------------------
+# "E.g. 20D expected return + P(up) + confidence crossing a defined threshold,
+# with no veto active." Three conditions and a gate. MEASURED, one of the three
+# has no producer, and the two obvious ways to handle that are both wrong.
+#
+# THE DECIDING MEASUREMENT: A6 CANNOT FIRE TODAY, AT ANY HORIZON. Across 1d,
+# 5d, 20d and 60d, ZERO of the twelve condition inputs are PRESENT -
+# expected_return is ABSENT at every horizon because no trained model exists,
+# and probability_up and confidence are REFUSED because nothing supplied them.
+#
+#     horizon  expected_return  probability_up  confidence
+#     1d       ABSENT           REFUSED         REFUSED
+#     5d       ABSENT           REFUSED         REFUSED
+#     20d      ABSENT           REFUSED         REFUSED
+#     60d      ABSENT           REFUSED         REFUSED
+#
+# THE TWO WRONG ANSWERS, both measured rather than argued:
+#
+#   Coalesce the missing value to 0.0. Then 0.0 >= the return threshold is
+#   False and the alert NEVER FIRES - dead, and silent about being dead.
+#
+#   Skip the condition that cannot be evaluated. Then P(up) and confidence
+#   alone can fire, reporting a "threshold crossing" on two of three
+#   conditions, silently weakening the rule it claims to enforce.
+#
+# So an unevaluable condition produces NOT_EVALUATED, which is neither fired
+# nor quiet. W2's fail-closed rule does not transfer: blocking on missing
+# evidence is right for a VETO, but an ALERT that fires on absent data is pure
+# noise.
+FORECAST_THRESHOLD_ALERT_VERSION = "forecast-threshold-alert-v1"
+
+# The horizon the roadmap names.
+FTHRESHOLD_HORIZON = "20d"
+
+# The three conditions, declared as DATA so a reader sees what must hold
+# without reading code, and so adding one is a deliberate edit here.
+FTHRESHOLD_CONDITION_RETURN = "expected_return"
+FTHRESHOLD_CONDITION_PROBABILITY = "probability_up"
+FTHRESHOLD_CONDITION_CONFIDENCE = "confidence"
+FTHRESHOLD_CONDITIONS: tuple[str, ...] = (
+    FTHRESHOLD_CONDITION_RETURN,
+    FTHRESHOLD_CONDITION_PROBABILITY,
+    FTHRESHOLD_CONDITION_CONFIDENCE,
+)
+
+# The thresholds each condition must clear.
+#
+# expected_return: unreachable today and stated anyway, so the contract is
+# visible rather than quietly dropped. 3% over 20 sessions is roughly 40%
+# annualised - a deliberately demanding bar for a system with no trained model.
+FTHRESHOLD_MIN_RETURN = 0.03
+# probability_up: DERIVED, not chosen. At 100 observations the 95% band on a
+# base rate near 0.5 is +/-0.098 (A1's measurement), so 0.60 is the first
+# tenth that clears a coin flip by more than sampling noise.
+FTHRESHOLD_MIN_PROBABILITY = 0.60
+# confidence: F7's MODERATE band floor, READ FROM F7's own band table rather
+# than restated. A bar below MODERATE would act on a forecast F7 itself
+# describes as weak, and a hardcoded 0.5 would drift if F7 retuned its bands.
+FTHRESHOLD_MIN_CONFIDENCE = dict(FORECAST_CONFIDENCE_BANDS)[FCONF_BAND_MODERATE]
+
+# EVERY CONDITION MUST BE EVALUABLE FOR THE ALERT TO HAVE A VERDICT. Skipping
+# one turns "all three held" into "the ones we could check held", which is a
+# weaker claim wearing the stronger one's name.
+FTHRESHOLD_REQUIRES_ALL_CONDITIONS = True
+
+# A MISSING INPUT IS NEVER COERCED. MEASURED, coalescing to 0.0 makes the
+# alert permanently and silently dead.
+FTHRESHOLD_COERCES_MISSING = False
+
+# A VETO SUPPRESSES THE ALERT, and its absence is not assumed. An unknown veto
+# state is NOT "no veto active" - that is the one place A6 does inherit W2's
+# fail-closed instinct, because claiming governance passed when nobody asked
+# is how a blocked trade gets recommended.
+FTHRESHOLD_UNKNOWN_VETO_SUPPRESSES = True
+
+# Verdicts.
+FTHRESHOLD_FIRED = "FIRED"
+FTHRESHOLD_NOT_MET = "NOT_MET"           # every condition evaluable, some failed
+FTHRESHOLD_VETOED = "VETOED"             # conditions met but governance blocks
+FTHRESHOLD_NOT_EVALUATED = "NOT_EVALUATED"  # a condition could not be tested
+FTHRESHOLD_VERDICTS: tuple[str, ...] = (
+    FTHRESHOLD_NOT_EVALUATED,
+    FTHRESHOLD_VETOED,
+    FTHRESHOLD_NOT_MET,
+    FTHRESHOLD_FIRED,
+)
+
+# A6 reports; A7 suppresses and gates.
+FTHRESHOLD_BLOCKS_TRADES = False
+
+
+def _validate_forecast_threshold_config() -> None:
+    """Import-time guard for the A6 contract."""
+    if FTHRESHOLD_COERCES_MISSING:
+        raise ValueError(
+            "a missing condition input must never be coerced: MEASURED, "
+            "coalescing expected_return to 0.0 makes the alert permanently "
+            "and silently dead, because 0.0 never clears the return threshold"
+        )
+    if not FTHRESHOLD_REQUIRES_ALL_CONDITIONS:
+        raise ValueError(
+            "skipping an unevaluable condition turns 'all three held' into "
+            "'the ones we could check held', which is a weaker claim wearing "
+            "the stronger one's name"
+        )
+    if len(set(FTHRESHOLD_CONDITIONS)) != len(FTHRESHOLD_CONDITIONS):
+        raise ValueError("duplicate threshold condition")
+    for required in (
+        FTHRESHOLD_CONDITION_RETURN,
+        FTHRESHOLD_CONDITION_PROBABILITY,
+        FTHRESHOLD_CONDITION_CONFIDENCE,
+    ):
+        if required not in FTHRESHOLD_CONDITIONS:
+            raise ValueError(
+                f"the roadmap names {required!r} as a condition and it is "
+                f"missing"
+            )
+    if not 0.0 < FTHRESHOLD_MIN_PROBABILITY < 1.0:
+        raise ValueError(
+            f"FTHRESHOLD_MIN_PROBABILITY must lie in (0, 1), got "
+            f"{FTHRESHOLD_MIN_PROBABILITY!r}"
+        )
+    if FTHRESHOLD_MIN_PROBABILITY <= 0.5:
+        raise ValueError(
+            f"a probability bar of {FTHRESHOLD_MIN_PROBABILITY} does not "
+            f"clear a coin flip; DERIVED, the 95% sampling band at 100 "
+            f"observations is +/-0.098 around 0.5"
+        )
+    if not 0.0 < FTHRESHOLD_MIN_CONFIDENCE <= 1.0:
+        raise ValueError(
+            f"FTHRESHOLD_MIN_CONFIDENCE must lie in (0, 1], got "
+            f"{FTHRESHOLD_MIN_CONFIDENCE!r}"
+        )
+    if FTHRESHOLD_MIN_CONFIDENCE != dict(FORECAST_CONFIDENCE_BANDS)[FCONF_BAND_MODERATE]:
+        raise ValueError(
+            "the confidence bar must be F7's MODERATE floor: a lower bar acts "
+            "on a forecast F7 itself describes as weak"
+        )
+    if FTHRESHOLD_MIN_RETURN <= 0.0:
+        raise ValueError(
+            "a non-positive return bar would fire on a forecast of nothing"
+        )
+    if not FTHRESHOLD_UNKNOWN_VETO_SUPPRESSES:
+        raise ValueError(
+            "an unknown veto state is not 'no veto active': claiming "
+            "governance passed when nobody asked is how a blocked trade gets "
+            "recommended"
+        )
+    if len(set(FTHRESHOLD_VERDICTS)) != len(FTHRESHOLD_VERDICTS):
+        raise ValueError("duplicate threshold verdict")
+    if FTHRESHOLD_NOT_EVALUATED == FTHRESHOLD_NOT_MET:
+        raise ValueError(
+            "'a condition could not be tested' and 'the conditions were "
+            "tested and failed' are different answers; collapsing them hides "
+            "that the alert is dead"
+        )
+    if FTHRESHOLD_BLOCKS_TRADES:
+        raise ValueError("an alert reports; it does not trade")
+
+
+_validate_forecast_threshold_config()
