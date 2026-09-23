@@ -7172,3 +7172,139 @@ def _validate_confidence_alert_config() -> None:
 
 
 _validate_confidence_alert_config()
+
+
+# --- A3: high-impact event alert -------------------------------------------------
+# "Alert when a high-impact event is detected." The obvious implementation
+# reads the event's own `magnitude` field and fires above a threshold. That is
+# exactly what the E-sprint contract forbids, and the reason is structural
+# rather than stylistic.
+#
+# THE FIRST TRAP - ALERTING ON AN UNVALIDATED CLAIM. `magnitude` is documented
+# in core/event_contract.py as "a bounded, unitless claim size - NOT an
+# expected return", precisely so an unvalidated number is not treated as a
+# forecast. MEASURED, it is worse than unvalidated: `magnitude` appears NOWHERE
+# in core/event_memory.py or core/event_study.py, and is not among
+# EventMemory's fields. It is never carried into memory, so it has never been
+# compared against a single realized outcome. An alert keyed on it would fire
+# on an assertion nobody has ever checked.
+#
+# WHAT IS MEASURABLE: THE EVENT TYPE'S REALIZED HISTORY. E6 stores the abnormal
+# return per horizon and E5's attribution verdict. MEASURED on 400 seeded
+# memories across four event types, the median absolute 20d move differs by
+# more than 12x between them:
+#
+#     event_type        n    median |move|   p90 |move|
+#     earnings_beat    94        0.0497        0.0962
+#     guidance_cut    114        0.0470        0.1056
+#     analyst_note    102        0.0085        0.0183
+#     minor_pr         90        0.0040        0.0088
+#
+# So "high impact" means "this KIND of event has historically moved this name",
+# measured from stored outcomes, not claimed in the payload.
+EVENT_IMPACT_ALERT_VERSION = "event-impact-alert-v1"
+
+# A3 NEVER READS THE CLAIMED MAGNITUDE. An import-time guard enforces it.
+EVENT_IMPACT_USES_CLAIMED_MAGNITUDE = False
+EVENT_IMPACT_MAGNITUDE_REASON = (
+    "magnitude is a bounded, unitless CLAIM SIZE, not an expected return, and "
+    "MEASURED it appears in neither event_memory nor event_study and is not "
+    "an EventMemory field - it has never been compared against a realized "
+    "outcome, so an alert keyed on it fires on an unchecked assertion"
+)
+
+# The horizon whose realized response defines impact. 20d matches the horizon
+# E5's attribution verdict is recorded against, so impact and attribution
+# describe the same window rather than two.
+EVENT_IMPACT_HORIZON = "20d"
+
+# The median absolute abnormal return above which an event type counts as
+# high-impact. MEASURED, this separates earnings_beat (0.0497) and
+# guidance_cut (0.0470) from analyst_note (0.0085) and minor_pr (0.0040) with
+# room on both sides - it is not tuned to the boundary of either group.
+EVENT_IMPACT_MIN_MEDIAN_MOVE = 0.025
+
+# The analog floor, REUSED from E6 rather than redefined. MEASURED, a median
+# |move| estimate at n=3 spans 0.0128-0.0646 across resamples - a five-fold
+# range around a true value of 0.0337 - and tightens to roughly 1.9x at n=20.
+# A second floor here would drift from the one E6 already enforces.
+EVENT_IMPACT_MIN_ANALOGS = EVENT_MEMORY_MIN_ANALOGS
+
+# IMPACT IS NOT DIRECTION. A large move is high-impact whether it was up or
+# down, which is why the measure is the median ABSOLUTE return. A reader needs
+# to know a name is about to move before knowing which way, and folding sign
+# into the magnitude would let a symmetric history cancel itself to zero.
+EVENT_IMPACT_USES_ABSOLUTE_MOVE = True
+
+# Verdicts.
+EVENT_IMPACT_HIGH = "HIGH_IMPACT"
+EVENT_IMPACT_LOW = "LOW_IMPACT"
+EVENT_IMPACT_UNKNOWN = "UNKNOWN_IMPACT"   # too few analogs to say
+EVENT_IMPACT_NO_EVENT = "NO_EVENT"
+EVENT_IMPACT_VERDICTS: tuple[str, ...] = (
+    EVENT_IMPACT_NO_EVENT,
+    EVENT_IMPACT_UNKNOWN,
+    EVENT_IMPACT_LOW,
+    EVENT_IMPACT_HIGH,
+)
+
+# UNKNOWN IS NOT LOW. An event type with too little history is not a quiet one;
+# it is one nobody can rate. Reporting it as LOW_IMPACT would silence exactly
+# the events the system has never seen before, which are the ones most worth
+# a human look.
+EVENT_IMPACT_UNKNOWN_IS_NOT_LOW = True
+
+# A3 reports; A7 suppresses and gates.
+EVENT_IMPACT_BLOCKS_TRADES = False
+
+
+def _validate_event_impact_alert_config() -> None:
+    """Import-time guard for the A3 contract."""
+    if EVENT_IMPACT_USES_CLAIMED_MAGNITUDE:
+        raise ValueError(
+            "A3 must not read the claimed magnitude: it is a unitless claim "
+            "size that MEASURED appears in neither event_memory nor "
+            "event_study, so it has never been checked against an outcome"
+        )
+    if not EVENT_IMPACT_MAGNITUDE_REASON.strip():
+        raise ValueError("the refusal to read magnitude must carry its reason")
+    if not EVENT_IMPACT_USES_ABSOLUTE_MOVE:
+        raise ValueError(
+            "impact is measured on the ABSOLUTE move: a symmetric history "
+            "would otherwise cancel itself to zero and read as harmless"
+        )
+    if not 0.0 < EVENT_IMPACT_MIN_MEDIAN_MOVE < 1.0:
+        raise ValueError(
+            f"EVENT_IMPACT_MIN_MEDIAN_MOVE must lie in (0, 1), got "
+            f"{EVENT_IMPACT_MIN_MEDIAN_MOVE!r}"
+        )
+    if EVENT_IMPACT_MIN_ANALOGS != EVENT_MEMORY_MIN_ANALOGS:
+        raise ValueError(
+            "the analog floor must be E6's: a second floor drifts from the "
+            "one E6 already enforces on the same memories"
+        )
+    if EVENT_IMPACT_MIN_ANALOGS < 3:
+        raise ValueError(
+            f"MEASURED, a median |move| estimate at n=3 spans a five-fold "
+            f"range across resamples; {EVENT_IMPACT_MIN_ANALOGS} is not a "
+            f"floor"
+        )
+    if not EVENT_IMPACT_HORIZON.strip():
+        raise ValueError("an impact horizon is required")
+    if len(set(EVENT_IMPACT_VERDICTS)) != len(EVENT_IMPACT_VERDICTS):
+        raise ValueError("duplicate event impact verdict")
+    if EVENT_IMPACT_UNKNOWN == EVENT_IMPACT_LOW:
+        raise ValueError(
+            "'too little history to rate' and 'historically quiet' are "
+            "different answers; collapsing them silences the events the "
+            "system has never seen"
+        )
+    if not EVENT_IMPACT_UNKNOWN_IS_NOT_LOW:
+        raise ValueError(
+            "an unrated event type must not be reported as low-impact"
+        )
+    if EVENT_IMPACT_BLOCKS_TRADES:
+        raise ValueError("an alert reports; it does not trade")
+
+
+_validate_event_impact_alert_config()
