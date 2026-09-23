@@ -182,6 +182,65 @@ preferable — it makes the test deterministic rather than merely quieter.
 
 ---
 
+## 9. A sabotage probe needs a plausible wrong answer available — OPEN
+
+**Raised:** Sprint A (2026-09-23). **Owner:** unassigned.
+
+MEASURED across Sprint A: **six** sabotages passed a gate that was supposed to
+catch them, and in every case the gate was fine — the PROBE was too weak to
+exercise the branch it targeted.
+
+| task | sabotage that wrongly passed | why the probe could not decide |
+|---|---|---|
+| A2 | band-cross branch removed | every scenario also changed the binding factor or cleared the magnitude bar |
+| A3 | (contract-check bug, different shape) | substring guard flagged the field that *declares* magnitude unused |
+| A4 | computability guard removed | every uncomputable scenario already had `label=None` |
+| A6 | confidence read as "first numeric value" | the probe was `{"band": "HIGH"}` — no numbers to guess from |
+| A7 | de-escalation rule removed | probe sat inside the cooldown, which already suppressed |
+| A7 | absent severity ranked `0` | the gate never probed an appearing/vanishing severity |
+
+**The pattern.** A sabotage only proves something when a plausible WRONG answer
+is reachable in the scenario. `{"band": "HIGH"}` cannot catch "guess a number"
+because there is no number to guess; `sessions_since=1` cannot catch "ignore
+de-escalation" because the cooldown decides first. A passing sabotage is
+therefore ambiguous by default — it means either the guard works or the probe
+is inert, and those are not the same result.
+
+**Why it matters.** Five of the six were found only because each sabotage was
+re-checked for reachability before being trusted. Without that habit, all five
+would have been recorded as "guard verified" while the guard was untested.
+
+**What would settle it:** a convention that every sabotage is accompanied by a
+positive control — a paired scenario that FAILS when the guard is removed and
+PASSES when restored — so an inert probe is visible rather than silent. A7 does
+this ad hoc (`unchanged_old` beside `relieved`); making it a rule would cost
+little and remove the ambiguity.
+
+---
+
+## 10. F7's structured assessment has no declared consumer contract — OPEN
+
+**Raised:** Sprint A (2026-09-23). **Owner:** unassigned.
+
+F7 stores its WHOLE assessment mapping in a field whose name refers to a
+scalar. Two separate tasks hit this independently and each had to special-case
+it: D1's renderer dumped a ~4,000-character mapping into a table cell, and A6
+raised on it before learning to read the scalar from the field that names the
+quantity.
+
+**Why it matters.** The mapping carries several unrelated floats
+(`binding_value`, `weighted_sum`, every factor score), so a consumer that
+guesses — "take the first number" — silently thresholds on a factor score
+instead of the confidence. A6's gate now catches exactly that, but only for A6.
+Every future consumer re-derives the same handling, and the third one may guess.
+
+**What would settle it:** either a documented accessor F7 exports (so the
+scalar is read one way everywhere), or a named field carrying the scalar
+alongside the assessment. Two independent consumers hitting the same shape in
+one sprint suggests a third is coming.
+
+---
+
 ## Closed
 
 - ~~**Live runs must use today's chart state.**~~ Fixed in `ad75f48`. The
