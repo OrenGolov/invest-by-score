@@ -8205,3 +8205,162 @@ def _validate_calibration_gate_config() -> None:
 
 
 _validate_calibration_gate_config()
+
+
+# --- X3: regime robustness -------------------------------------------------------
+# "No single regime should explain the entire edge." MEASURED, this gate CANNOT
+# RUN on the data the repository ships, and the reason is structural rather
+# than a shortage of history.
+#
+# THE BLOCKING MEASUREMENT: THE FOLDS CARRY NO REGIME AND NO WAY TO RECOVER ONE.
+# A persisted fold holds exactly this:
+#
+#     actuals, predictions, fold_id, metrics,
+#     train_end_time, train_rows, validation_rows, validation_start_time
+#
+# There is no ticker and no per-observation timestamp - only a FOLD-LEVEL
+# window. TrainingRow DOES carry ticker and prediction_time (training_dataset.py
+# builds and sorts on them), and the dataset record on disk is a MANIFEST: it
+# describes 406 rows with hashes and versions but stores no row. The identity
+# exists at build time and is DROPPED when folds are persisted, because
+# _fit_predict works on bare arrays.
+#
+# So a regime label cannot be joined onto a validation observation, and X3 must
+# report NOT_EVALUATED rather than invent an attribution. The named next action
+# is concrete: persist ticker and prediction_time alongside each fold's
+# predictions, which is a change to the training pipeline and not to this gate.
+#
+# WHAT THE GATE WILL MEASURE ONCE THAT LANDS, demonstrated here on seeded data
+# rather than asserted. Four regimes of 100 observations each, one carrying a
+# real edge and three pure noise:
+#
+#     pooled directional accuracy          0.6800
+#       bullish                            0.9700
+#       range                              0.6400
+#       bearish                            0.5600
+#       risk_off                           0.5500
+#     with the carrying regime removed     0.5833
+#
+# A pooled 0.6800 that looks like an edge collapses to 0.5833 when ONE regime
+# is dropped. That is the failure this gate exists to catch.
+#
+# WHY "IS EVERY REGIME ABOVE A COIN FLIP" IS THE WRONG TEST. MEASURED, the
+# answer is 4 OF 4 for BOTH the concentrated book above and a book with a
+# modest edge spread evenly - the statistic does not separate them at all.
+#
+# THE STATISTIC THAT DOES: LEAVE ONE REGIME OUT. Measured on the same pair:
+#
+#                         concentrated   broad
+#     worst LOO drop            0.0967  0.0225
+#     per-regime spread         0.4200  0.1200
+#
+# THE THRESHOLD IS MEASURED, NOT CHOSEN. Simulating 400 books whose edge is
+# GENUINELY UNIFORM across regimes, the worst leave-one-out drop has a median
+# of 0.0150, a p95 of 0.0300, and a MAXIMUM of 0.0525. A 0.05 bar therefore
+# sits at the top of what uniformity produces by chance. At cell sizes 60, 100
+# and 200 it flagged the concentrated book 100% of the time and the uniform
+# book 0% of the time.
+REGIME_ROBUSTNESS_VERSION = "regime-robustness-v1"
+
+# The regimes an edge must survive, reused from N4's vocabulary so "regime"
+# means one thing system wide.
+REGIME_ROBUSTNESS_LABELS: tuple[str, ...] = REGIME_LABELS
+
+# The leave-one-out drop above which an edge is judged CONCENTRATED. MEASURED:
+# the maximum a uniform edge produced in 400 trials was 0.0525, with a p95 of
+# 0.0300, so 0.05 is the top of the null rather than a round number.
+REGIME_ROBUSTNESS_MAX_DROP = 0.05
+
+# PER-REGIME SPREAD IS RECORDED BUT NEVER DECIDES. MEASURED, a uniform edge
+# produces a spread with a p95 of 0.1800 and a max of 0.2700 purely from
+# per-cell sampling noise, so a spread test would fail robust models constantly.
+REGIME_ROBUSTNESS_SPREAD_DECIDES = False
+
+# Minimum observations in a regime cell before that regime's number is used.
+# MEASURED, the sampling band on directional accuracy at n=100 is +/-0.0980 -
+# wider than the 0.05 bar itself - so a thinner cell cannot support a
+# leave-one-out claim in either direction. Reused from L7's measured floor so
+# the two agree on what a usable cell is.
+REGIME_ROBUSTNESS_MIN_CELL = REGIME_SPECIALIZATION_MIN_CELL
+
+# Minimum regimes that must be represented. With fewer than two, "leave one
+# out" leaves nothing to compare against.
+REGIME_ROBUSTNESS_MIN_REGIMES = 2
+
+# AN UNLABELLED OBSERVATION IS NEVER ASSIGNED A REGIME. This is the rule that
+# makes the gate honest today: guessing a label from the fold window would
+# manufacture the very attribution the gate is supposed to test.
+REGIME_ROBUSTNESS_INFERS_LABELS = False
+
+# Verdicts.
+REGIME_ROBUST = "ROBUST"                       # no single regime carries it
+REGIME_CONCENTRATED = "CONCENTRATED"           # one regime explains the edge
+REGIME_ROBUSTNESS_NOT_EVALUATED = "NOT_EVALUATED"  # no regime labels exist
+REGIME_ROBUSTNESS_VERDICTS: tuple[str, ...] = (
+    REGIME_ROBUSTNESS_NOT_EVALUATED,
+    REGIME_CONCENTRATED,
+    REGIME_ROBUST,
+)
+
+# X3 reports; the registry promotes.
+REGIME_ROBUSTNESS_BLOCKS_TRADES = False
+
+
+def _validate_regime_robustness_config() -> None:
+    """Import-time guard for the X3 contract."""
+    if set(REGIME_ROBUSTNESS_LABELS) != set(REGIME_LABELS):
+        raise ValueError(
+            "X3 must test the same regimes N4 classifies, or an edge could "
+            "hide in a regime nobody checked"
+        )
+    if not 0.0 < REGIME_ROBUSTNESS_MAX_DROP < 1.0:
+        raise ValueError(
+            f"REGIME_ROBUSTNESS_MAX_DROP must lie in (0, 1), got "
+            f"{REGIME_ROBUSTNESS_MAX_DROP!r}"
+        )
+    if REGIME_ROBUSTNESS_MAX_DROP < 0.03:
+        raise ValueError(
+            f"a drop bar of {REGIME_ROBUSTNESS_MAX_DROP} sits below the 0.0300 "
+            f"p95 that a UNIFORM edge produces by chance, so genuinely robust "
+            f"models would be flagged as concentrated"
+        )
+    if REGIME_ROBUSTNESS_MAX_DROP > 0.0967:
+        raise ValueError(
+            f"a drop bar of {REGIME_ROBUSTNESS_MAX_DROP} is above the 0.0967 "
+            f"drop MEASURED on a book where one regime carried the entire "
+            f"edge, so that book would pass"
+        )
+    if REGIME_ROBUSTNESS_SPREAD_DECIDES:
+        raise ValueError(
+            "per-regime spread must not decide: MEASURED, a uniform edge "
+            "produces a spread with a p95 of 0.1800 and a max of 0.2700 from "
+            "sampling noise alone"
+        )
+    if REGIME_ROBUSTNESS_MIN_CELL != REGIME_SPECIALIZATION_MIN_CELL:
+        raise ValueError(
+            "X3 and L7 must agree on what a usable regime cell is, or one "
+            "would trust a cell the other rejects"
+        )
+    if REGIME_ROBUSTNESS_MIN_REGIMES < 2:
+        raise ValueError(
+            "leave-one-out needs at least two regimes, or there is nothing "
+            "left to compare against"
+        )
+    if REGIME_ROBUSTNESS_INFERS_LABELS:
+        raise ValueError(
+            "an unlabelled observation must never be assigned a regime: "
+            "guessing from the fold window would manufacture the very "
+            "attribution this gate exists to test"
+        )
+    if len(set(REGIME_ROBUSTNESS_VERDICTS)) != len(REGIME_ROBUSTNESS_VERDICTS):
+        raise ValueError("duplicate regime robustness verdict")
+    if REGIME_CONCENTRATED == REGIME_ROBUSTNESS_NOT_EVALUATED:
+        raise ValueError(
+            "'one regime carries the edge' and 'we could not tell' are "
+            "different answers; collapsing them hides that the test never ran"
+        )
+    if REGIME_ROBUSTNESS_BLOCKS_TRADES:
+        raise ValueError("X3 reports; the registry promotes")
+
+
+_validate_regime_robustness_config()

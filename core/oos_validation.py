@@ -80,7 +80,7 @@ def rmse(predictions: Sequence[float], actuals: Sequence[float]) -> float:
             f"{len(predictions)} predictions against {len(actuals)} actuals; "
             f"a mismatched pair cannot be scored"
         )
-    if not predictions:
+    if len(predictions) == 0:
         raise OOSValidationError("an empty fold has no error to measure")
     total = 0.0
     for predicted, actual in zip(predictions, actuals):
@@ -99,7 +99,7 @@ def directional_accuracy(
     """Share of predictions whose sign matches the outcome."""
     if len(predictions) != len(actuals):
         raise OOSValidationError("mismatched prediction and actual lengths")
-    if not predictions:
+    if len(predictions) == 0:
         raise OOSValidationError("an empty fold has no direction to score")
     hits = sum(
         1

@@ -78,6 +78,30 @@ class MetricTests(unittest.TestCase):
         with self.assertRaises(OOSValidationError):
             rmse([1.0, None], [1.0, 2.0])
 
+    def test_metrics_accept_numpy_arrays(self):
+        """REGRESSION: `if not predictions` raises on an ndarray.
+
+        The functions worked for lists and broke for arrays, so any caller
+        holding fold data as numpy — which is how it arrives — hit a
+        ValueError from truthiness rather than a usable number.
+        """
+        import numpy as np
+
+        self.assertAlmostEqual(
+            rmse(np.array([1.0, 2.0]), np.array([1.0, 3.0])), math.sqrt(0.5)
+        )
+        self.assertAlmostEqual(
+            directional_accuracy(np.array([1.0, -1.0]), np.array([1.0, 1.0])), 0.5
+        )
+
+    def test_empty_numpy_input_is_still_refused(self):
+        import numpy as np
+
+        with self.assertRaises(OOSValidationError):
+            rmse(np.array([]), np.array([]))
+        with self.assertRaises(OOSValidationError):
+            directional_accuracy(np.array([]), np.array([]))
+
     def test_directional_accuracy_counts_sign_matches(self):
         self.assertAlmostEqual(
             directional_accuracy([1.0, -1.0, 1.0], [1.0, -1.0, -1.0]), 2 / 3
