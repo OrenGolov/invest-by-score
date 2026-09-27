@@ -156,7 +156,7 @@ NewsAPI free tier's 100 requests/day is the binding constraint, which is why
 
 ---
 
-## 8. `test_current_and_long_term_scores_diverge_by_regime` is network-flaky — OPEN
+## 8. `test_current_and_long_term_scores_diverge_by_regime` is network-flaky — CLOSED
 
 **Raised:** Sprint A (2026-09-22). **Owner:** unassigned.
 
@@ -179,6 +179,39 @@ also means CI can go red for reasons unrelated to the commit under test.
 already stores digest-addressable payloads, so a replay is available), or mark
 it as requiring network and exclude it from the default run. The first is
 preferable — it makes the test deterministic rather than merely quieter.
+
+**FIXED (2026-09-27), by the preferred route.** The test now replays from
+`data/raw/yahoo_finance_chart/`, which is tracked on purpose as the W6
+provenance ledger, via the `rebuild_price_frame` helper that already existed.
+All five tickers resolve from `*_15y_1d` records spanning 2011-09-19 to
+2026-09-18, so 2024-01-02 is covered on a fresh clone with no network.
+
+Verified rather than assumed:
+
+* **The failure mode was reproduced first.** Feeding every ticker the same
+  frame collapses all five scores to a single value (5.26), which is exactly
+  the `len(set(...)) > 1` failure. The patch point matters: several modules
+  bind `fetch_price_history` at import, so `agents.market_data_agent` is the
+  one that has to be patched.
+* **`build_score` reaches TWO providers, not one.** Replaying only the Yahoo
+  price frames still hit `www.alphavantage.co` for fundamentals. This was
+  caught only by testing against a *fresh clone*, which has no
+  `data/*.parquet` cache — the working directory passed while the clone
+  failed, which is precisely the gap open item 6 exists to close. Fundamentals
+  now come from an offline fixture.
+* **Holding fundamentals constant does not weaken the assertion.** With one
+  snapshot given to all five tickers the current scores are still five distinct
+  values (5.26 / 4.45 / 7.91 / 4.53 / 7.67), and the long-term scores likewise.
+  Price alone drives the separation the test measures. The real snapshot is a
+  `manual_fallback_contract` with all-null metrics anyway, since no API key is
+  configured.
+* **The fix was proved against a blocked network on a clean clone.** With
+  `socket.connect`, `create_connection` and `getaddrinfo` all raising and zero
+  parquet files present, both tests pass; the old version fails with a
+  `ValueError` out of `agents/market_data_agent.py:118`.
+* **The collapse is now its own regression test**
+  (`test_identical_frames_collapse_the_scores`), so the degraded-provider
+  behaviour is pinned rather than merely avoided.
 
 ---
 

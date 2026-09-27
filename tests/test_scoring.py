@@ -10,6 +10,8 @@ from unittest.mock import patch
 
 import pandas as pd
 
+from agents import market_data_agent
+from core import score_engine
 from agents.market_data_agent import _pct_change, fetch_market_snapshot
 from core import config as core_config
 from core.agent_contracts import AgentContract, OrchestrationDecision
@@ -29,6 +31,74 @@ from core.raw_store import append_raw_records, load_raw_records, rebuild_price_f
 from core.risk_policy import evaluate_risk_policy
 from core.score_engine import _compute_confidence, _ensemble_blend, _score_current_time, _score_long_term, build_score
 from fetch_data import fetch_fundamental_snapshot, get_provider_health_matrix, resolve_fundamental_provider
+
+
+
+def _replayed_history(ticker: str):
+    """The longest tracked raw frame for a ticker, or None when absent.
+
+    `data/raw/yahoo_finance_chart/` is tracked on purpose (the W6 provenance
+    ledger), so this replays identically on a fresh clone with no network.
+    """
+    for period in ("15y", "10y", "5y", "3y", "2y"):
+        frame = rebuild_price_frame("yahoo_finance_chart", f"{ticker}_{period}_1d")
+        if frame is not None and not frame.empty:
+            return frame
+    return None
+
+
+def _offline_fundamentals(ticker: str, as_of: str, *args, **kwargs):
+    """A fundamentals snapshot that needs no provider.
+
+    MEASURED, `build_score` reaches TWO providers, not one: Yahoo for price and
+    Alpha Vantage for fundamentals. Replaying only the price frames still hit
+    `www.alphavantage.co` on a fresh clone, which has no `data/*.parquet` cache.
+
+    Holding fundamentals CONSTANT does not weaken the divergence assertion:
+    with this same snapshot given to all five tickers, the current scores are
+    still 5 distinct values (5.26 / 4.45 / 7.91 / 4.53 / 7.67) and the long-term
+    scores likewise. Price alone drives the separation the test measures.
+    """
+    stamp = f"{as_of[:10]} 00:00:00"
+    contract = {
+        "provider": "replayed_fixture",
+        "source_type": "fundamentals",
+        "source_id": "replayed_fixture",
+        "source_confidence": 0.0,
+        "source_timestamp": None,
+        "as_of": stamp,
+        "status": "provider_key_required",
+    }
+    return {
+        "ticker": ticker,
+        "as_of": stamp,
+        "as_of_source_timestamp": None,
+        "source": "replayed_fixture",
+        "source_type": "fundamentals",
+        "source_status": "provider_key_required",
+        "source_confidence": 0.0,
+        "source_contract": contract,
+        "provider_resolution": dict(contract, fallback_rank=0, fallbacks=[]),
+        "point_in_time_valid": True,
+        "point_in_time_policy": "fixture carries no future information",
+        "latest_close": 0.0,
+        "valuation_metrics": {
+            "trailing_pe": None,
+            "forward_pe": None,
+            "price_to_book": None,
+            "price_to_sales": None,
+            "payout_ratio": None,
+            "debt_to_equity": None,
+            "free_cash_flow": None,
+            "operating_cash_flow": None,
+            "revenue_growth": None,
+        },
+        "calendar_events": {
+            "earnings_date": None,
+            "ex_dividend_date": None,
+            "dividend_date": None,
+        },
+    }
 
 
 class ScoringEngineTests(unittest.TestCase):
@@ -81,12 +151,63 @@ class ScoringEngineTests(unittest.TestCase):
         self.assertIn("weighted_contributions", payload["scoring_breakdown"])
 
     def test_current_and_long_term_scores_diverge_by_regime(self):
-        per_ticker = {ticker: build_score(ticker, "2024-01-02") for ticker in ["MSFT", "AAPL", "NVDA", "TSLA", "META"]}
+        """Scores must separate by ticker, replayed from the tracked raw ledger.
+
+        This test used to call the live provider. MEASURED, that made it
+        network-flaky: when a fetch degrades and every ticker receives the same
+        frame, all five scores collapse to one value (5.26 in the reproduction)
+        and the `> 1` assertion fails for a reason unrelated to the commit under
+        test. A flaky test trains the reader to ignore a red suite.
+
+        The frames now come from `data/raw/yahoo_finance_chart/`, which is
+        TRACKED, so the replay is deterministic on a fresh clone and the
+        assertion measures the scoring engine rather than the provider.
+        """
+        tickers = ["MSFT", "AAPL", "NVDA", "TSLA", "META"]
+        frames = {ticker: _replayed_history(ticker) for ticker in tickers}
+        missing = sorted(t for t, frame in frames.items() if frame is None)
+        self.assertEqual(
+            missing,
+            [],
+            f"the raw ledger no longer covers {missing}; this test must replay "
+            f"rather than fetch, so the gap has to be filled before it can run",
+        )
+
+        def replay(ticker, period="1y", interval="1d", **kwargs):
+            return frames[ticker].copy()
+
+        with (
+            patch.object(market_data_agent, "fetch_price_history", side_effect=replay),
+            patch.object(score_engine, "fetch_fundamental_snapshot", side_effect=_offline_fundamentals),
+        ):
+            per_ticker = {ticker: build_score(ticker, "2024-01-02", persist_audit=False) for ticker in tickers}
+
         current_values = {ticker: result.current_time_score for ticker, result in per_ticker.items()}
         long_values = {ticker: result.long_term_score for ticker, result in per_ticker.items()}
         self.assertGreater(len(set(round(value, 2) for value in current_values.values())), 1)
         self.assertGreater(len(set(round(value, 2) for value in long_values.values())), 1)
         self.assertTrue(any(abs(result.current_time_score - result.long_term_score) > 0.05 for result in per_ticker.values()))
+
+    def test_identical_frames_collapse_the_scores(self):
+        """REGRESSION: the exact failure the replay removes.
+
+        Feeding every ticker the SAME frame collapses all five scores to one
+        value. That is what a degraded provider produced, and why the old
+        live-fetch version of the test above went red at random.
+        """
+        shared = _replayed_history("MSFT")
+        if shared is None:
+            self.skipTest("the raw ledger does not cover MSFT")
+
+        with (
+            patch.object(market_data_agent, "fetch_price_history", return_value=shared),
+            patch.object(score_engine, "fetch_fundamental_snapshot", side_effect=_offline_fundamentals),
+        ):
+            scores = {
+                ticker: build_score(ticker, "2024-01-02", persist_audit=False).current_time_score
+                for ticker in ["MSFT", "AAPL", "NVDA", "TSLA", "META"]
+            }
+        self.assertEqual(len(set(round(value, 2) for value in scores.values())), 1)
 
     def test_market_snapshot_reports_point_in_time_and_quality(self):
         snapshot = fetch_market_snapshot("MSFT", "2024-01-02")
