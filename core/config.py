@@ -8546,3 +8546,177 @@ def _validate_event_robustness_config() -> None:
 
 
 _validate_event_robustness_config()
+
+
+# --- X5: feature ablation --------------------------------------------------------
+# "Test removing news, technicals, macro, sentiment, fundamentals to prove which
+# sources add incremental value." MEASURED, FOUR OF THE FIVE NAMED GROUPS HAVE
+# NOTHING TO REMOVE - and unlike X3 and X4, the fifth is genuinely testable, so
+# X5 is PARTIALLY evaluable rather than blocked outright.
+#
+# THE DECIDING MEASUREMENT. Every feature the training pipeline can produce:
+#
+#     change_1d   change_5d   change_20d  change_60d
+#     ma_50       ma_100      ma_150      ma_200
+#     price_vs_ma_50  price_vs_ma_100  price_vs_ma_150  price_vs_ma_200
+#     rsi         trend_vs_20d_mean      volatility     volume_ratio_20d
+#
+# All sixteen are price and volume derivatives. Counting them by the groups the
+# roadmap names:
+#
+#     group           features   ablatable?
+#     technicals            16   YES
+#     news                   0   nothing to remove
+#     macro                  0   nothing to remove
+#     sentiment              0   nothing to remove
+#     fundamentals           0   nothing to remove
+#
+# WHY, STRUCTURALLY. The dataset builder defaults to
+# CURRENT_SCORE_FEATURES | LONG_TERM_SCORE_FEATURES, both hardcoded tuples in
+# score_engine.py holding only price and volume derivatives. The feature
+# REGISTRY declares eight domains - market, fundamental, news, sentiment, macro,
+# regime, technical, event - but data/feature_registry.jsonl DOES NOT EXIST, so
+# zero features are registered and no non-technical feature has a producer a
+# model could consume. An ablation over a group that was never present measures
+# nothing, and reporting "removing news did not change performance" would be a
+# lie told with a straight face.
+#
+# THE ONE ABLATION THE SHIPPED DATA DOES SUPPORT, and it is a real result.
+# Removing ALL technical features leaves a model with no features at all, which
+# is exactly the historical_mean baseline:
+#
+#     with all 16 technical features (best learned)   rmse 0.13192   dir 0.4583
+#     with NO features at all (historical_mean)       rmse 0.12164   dir 0.5500
+#
+#     incremental value of all 16 technical features  +0.01028 rmse - WORSE
+#
+# So the one group that CAN be ablated has NEGATIVE incremental value: the
+# features actively hurt. That is X1's finding re-expressed as an ablation, and
+# it is the answer X5 was asked for, for the only group it can ask about.
+FEATURE_ABLATION_VERSION = "feature-ablation-v1"
+
+# The groups the roadmap names, declared as DATA so a reader sees what must be
+# tested and so dropping one is a deliberate edit here.
+ABLATION_GROUP_TECHNICAL = "technicals"
+ABLATION_GROUP_NEWS = "news"
+ABLATION_GROUP_MACRO = "macro"
+ABLATION_GROUP_SENTIMENT = "sentiment"
+ABLATION_GROUP_FUNDAMENTAL = "fundamentals"
+ABLATION_GROUPS: tuple[str, ...] = (
+    ABLATION_GROUP_TECHNICAL,
+    ABLATION_GROUP_NEWS,
+    ABLATION_GROUP_MACRO,
+    ABLATION_GROUP_SENTIMENT,
+    ABLATION_GROUP_FUNDAMENTAL,
+)
+
+# AN ABSENT GROUP IS NOT A GROUP THAT ADDED NOTHING. The rule this whole task
+# turns on. MEASURED, four of the five groups have zero features, and reporting
+# them as "no incremental value" would present an untested group as a tested
+# one - the exact confusion A6 drew between NOT_EVALUATED and NOT_MET.
+ABLATION_ABSENT_MEANS_NO_VALUE = False
+
+# Minimum features a group must contribute before it can be ablated at all.
+# One is enough to remove; zero is not.
+ABLATION_MIN_GROUP_FEATURES = 1
+
+# The metric ablations are compared on, and its direction. RMSE, lower better,
+# matching X1 so "better" means one thing across the release gate.
+ABLATION_METRIC = "rmse"
+ABLATION_HIGHER_IS_BETTER = False
+
+# THE MARGIN A GROUP MUST CLEAR TO COUNT AS ADDING VALUE. Reused from L7's
+# measured specialization margin rather than invented, so "this change is real"
+# means the same thing whether a regime model or a feature group is being
+# judged.
+ABLATION_MIN_IMPROVEMENT = REGIME_SPECIALIZATION_MARGIN
+
+# A group whose removal IMPROVES the metric is reported as HARMFUL, not merely
+# as adding nothing. MEASURED, the technical group is exactly this case at
+# +0.01028 rmse, and calling that "no value" would understate it.
+ABLATION_REPORTS_HARMFUL = True
+
+# Verdicts, per group.
+ABLATION_ADDS_VALUE = "ADDS_VALUE"
+ABLATION_NO_VALUE = "NO_VALUE"           # present, removed, nothing changed
+ABLATION_HARMFUL = "HARMFUL"             # removing it IMPROVED the metric
+ABLATION_ABSENT = "ABSENT"               # no producer exists; never tested
+ABLATION_NOT_EVALUATED = "NOT_EVALUATED"  # present but the test could not run
+ABLATION_VERDICTS: tuple[str, ...] = (
+    ABLATION_NOT_EVALUATED,
+    ABLATION_ABSENT,
+    ABLATION_HARMFUL,
+    ABLATION_NO_VALUE,
+    ABLATION_ADDS_VALUE,
+)
+
+# X5 reports; the registry promotes.
+ABLATION_BLOCKS_TRADES = False
+
+
+def _validate_feature_ablation_config() -> None:
+    """Import-time guard for the X5 contract."""
+    if len(set(ABLATION_GROUPS)) != len(ABLATION_GROUPS):
+        raise ValueError("duplicate ablation group")
+    for required in (
+        ABLATION_GROUP_TECHNICAL,
+        ABLATION_GROUP_NEWS,
+        ABLATION_GROUP_MACRO,
+        ABLATION_GROUP_SENTIMENT,
+        ABLATION_GROUP_FUNDAMENTAL,
+    ):
+        if required not in ABLATION_GROUPS:
+            raise ValueError(
+                f"the roadmap names {required!r} and it is not tested; a group "
+                f"nobody ablates is a source whose value is never proved"
+            )
+    if ABLATION_ABSENT_MEANS_NO_VALUE:
+        raise ValueError(
+            "an absent group must never be reported as adding no value: "
+            "MEASURED, four of the five named groups have ZERO features, and "
+            "saying 'removing news changed nothing' about a group that was "
+            "never present presents an untested source as a tested one"
+        )
+    if ABLATION_MIN_GROUP_FEATURES < 1:
+        raise ValueError(
+            "a group needs at least one feature to be ablated; removing "
+            "nothing is not an experiment"
+        )
+    if ABLATION_HIGHER_IS_BETTER:
+        raise ValueError(
+            f"{ABLATION_METRIC} is an error metric: lower is better, and "
+            f"inverting it would report harmful features as valuable"
+        )
+    if ABLATION_MIN_IMPROVEMENT != REGIME_SPECIALIZATION_MARGIN:
+        raise ValueError(
+            "the improvement margin must be L7's measured one, or 'this "
+            "change is real' would mean different things in different gates"
+        )
+    if ABLATION_MIN_IMPROVEMENT <= 0.0:
+        raise ValueError(
+            "a zero margin makes any rounding difference look like value"
+        )
+    if not ABLATION_REPORTS_HARMFUL:
+        raise ValueError(
+            "a group whose removal IMPROVES the metric must be reported as "
+            "HARMFUL: MEASURED, the technical group is +0.01028 rmse, and "
+            "calling that 'no value' understates it"
+        )
+    if len(set(ABLATION_VERDICTS)) != len(ABLATION_VERDICTS):
+        raise ValueError("duplicate ablation verdict")
+    if ABLATION_ABSENT == ABLATION_NO_VALUE:
+        raise ValueError(
+            "'this source has no producer' and 'we removed it and nothing "
+            "changed' are different answers; collapsing them is how an "
+            "untested source gets presented as a tested one"
+        )
+    if ABLATION_HARMFUL == ABLATION_NO_VALUE:
+        raise ValueError(
+            "'removing it helped' and 'removing it changed nothing' are "
+            "different findings"
+        )
+    if ABLATION_BLOCKS_TRADES:
+        raise ValueError("X5 reports; the registry promotes")
+
+
+_validate_feature_ablation_config()
