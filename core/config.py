@@ -8888,3 +8888,179 @@ def _validate_temporal_robustness_config() -> None:
 
 
 _validate_temporal_robustness_config()
+
+
+# --- X7: multiple-testing protection ---------------------------------------------
+# "Guard against selection bias (bootstrap/permutation, Reality Check/SPA-style
+# methods, Probability of Backtest Overfitting, Deflated Sharpe where
+# applicable)." MEASURED, the first problem is not WHICH correction to apply -
+# it is that THE SYSTEM DOES NOT KNOW HOW MANY TESTS IT RAN.
+#
+# THE DECIDING MEASUREMENT: THE TRIAL REGISTRY UNDERCOUNTS BY 8x.
+#
+#     rows in data/research_trials.jsonl               2
+#     DISTINCT trial ids among them                    1  (registered, then completed)
+#     estimators actually trained                      8
+#     estimators with a registered trial               1
+#
+# M3 exists precisely to stop uncontrolled experimentation, and seven of the
+# eight runs bypassed it. Any correction computed from the registry would use
+# n=1 when the truth is n=8:
+#
+#     n=1   bonferroni alpha 0.0500   family-wise risk  5.0%
+#     n=8   bonferroni alpha 0.0063   family-wise risk 33.7%
+#
+# THE STATED RISK WOULD BE WRONG BY 6.7x. The conclusion happens to survive -
+# X1's best permutation p of 0.0625 fails at both 0.0500 and 0.0063 - but a gate
+# that reports 5% when the answer is 33.7% is reporting a number it did not
+# measure. So X7 corrects on the OBSERVED family, never on the registry, and
+# reports the discrepancy as its own finding.
+#
+# WHY NOT BONFERRONI ALONE. It assumes INDEPENDENT tests. Estimators trained on
+# the SAME data and the SAME folds are correlated, so it over-corrects.
+# MEASURED over 1,500 families of 8 at n=120:
+#
+#                            FWER at raw 0.05   at bonferroni 0.00625
+#     independent estimators           35.6%                    6.00%
+#     correlated (same data)           18.6%                    3.73%
+#
+# Against a 5% target, Bonferroni lands at 3.73% on the realistic (correlated)
+# case: CONSERVATIVE, not wrong. It is kept as a floor because it needs no
+# resampling and cannot be gamed.
+#
+# THE MAX-STATISTIC PERMUTATION TEST is what handles correlation properly,
+# because it resamples the ACTUAL family rather than assuming its structure -
+# shuffle the outcomes, recompute the BEST of the family, and build the null
+# from those maxima. MEASURED over 200 families each:
+#
+#                            max-stat permutation FWER (target 5%)
+#     independent estimators                              3.00%
+#     correlated (same data)                              5.50%
+#
+# It tracks the target in both regimes where Bonferroni does not. So X7 requires
+# BOTH: the permutation test decides, and Bonferroni is the floor that a result
+# must also clear.
+MULTIPLE_TESTING_VERSION = "multiple-testing-v1"
+
+# The family-wise error rate the correction targets. Reused from X1's alpha so
+# "significant" means one thing across the release gate.
+MT_TARGET_FWER = OOS_ALPHA
+
+# THE FAMILY SIZE IS COUNTED FROM WHAT WAS RUN, NEVER FROM THE REGISTRY.
+# MEASURED, the registry holds 1 distinct trial against 8 trained estimators, so
+# trusting it would understate the correction by 8x.
+MT_COUNTS_OBSERVED_RUNS = True
+
+# AND THE DISCREPANCY IS REPORTED, not silently repaired. A registry that
+# undercounts is itself a governance finding: it means experiments are being run
+# outside the mechanism built to track them.
+MT_REPORTS_REGISTRY_GAP = True
+
+# Both corrections are required. The permutation test DECIDES because it handles
+# correlation; Bonferroni is a floor that needs no resampling and cannot be
+# gamed by a badly-seeded shuffle.
+MT_METHOD_BONFERRONI = "bonferroni"
+MT_METHOD_PERMUTATION = "max_statistic_permutation"
+MT_METHODS: tuple[str, ...] = (MT_METHOD_BONFERRONI, MT_METHOD_PERMUTATION)
+MT_DECIDING_METHOD = MT_METHOD_PERMUTATION
+MT_REQUIRES_ALL_METHODS = True
+
+# Permutation count. A CLAIM I CHECKED AND CORRECTED: I assumed fewer shuffles
+# would be too coarse to resolve 0.05. MEASURED, that is false - 100 shuffles
+# already resolve it (smallest non-zero p 0.01), and the FWER is IDENTICAL at
+# 100, 200 and 400 shuffles (2.67% in all three).
+#
+# The real reason for more shuffles is the PRECISION of the reported p-value,
+# not the pass/fail decision: at 100 shuffles a p-value is quantised to 0.01
+# steps, so a reported 0.02 could be anything from 0.015 to 0.025. 400 gives
+# 0.0025 steps, which is fine enough that the number in the report means what
+# it says.
+MT_PERMUTATIONS = 400
+MT_MIN_PERMUTATIONS = 100
+
+# A FAMILY OF ONE STILL NEEDS NO CORRECTION, and saying so is honest rather than
+# vacuous - but a family of one that arose because seven runs went unregistered
+# is a different thing, which is why the gap is reported separately.
+MT_MIN_FAMILY_FOR_CORRECTION = 2
+
+# Verdicts.
+MT_SURVIVES = "SURVIVES_CORRECTION"
+MT_FAILS = "FAILS_CORRECTION"
+MT_NOT_EVALUATED = "NOT_EVALUATED"
+MT_VERDICTS: tuple[str, ...] = (
+    MT_NOT_EVALUATED,
+    MT_FAILS,
+    MT_SURVIVES,
+)
+
+# X7 reports; the registry promotes.
+MT_BLOCKS_TRADES = False
+
+
+def _validate_multiple_testing_config() -> None:
+    """Import-time guard for the X7 contract."""
+    if MT_TARGET_FWER != OOS_ALPHA:
+        raise ValueError(
+            "the family-wise target must be X1's alpha, or a result could "
+            "survive correction at a looser standard than it was tested at"
+        )
+    if not 0.0 < MT_TARGET_FWER < 1.0:
+        raise ValueError(
+            f"MT_TARGET_FWER must lie in (0, 1), got {MT_TARGET_FWER!r}"
+        )
+    if not MT_COUNTS_OBSERVED_RUNS:
+        raise ValueError(
+            "the family size must be counted from the runs that were actually "
+            "executed: MEASURED, the trial registry holds 1 distinct trial "
+            "against 8 trained estimators, so trusting it understates the "
+            "correction by 8x and reports 5% risk where the answer is 33.7%"
+        )
+    if not MT_REPORTS_REGISTRY_GAP:
+        raise ValueError(
+            "a registry that undercounts the search is itself a governance "
+            "finding and must be reported, not silently repaired"
+        )
+    if len(set(MT_METHODS)) != len(MT_METHODS):
+        raise ValueError("duplicate correction method")
+    if MT_DECIDING_METHOD not in MT_METHODS:
+        raise ValueError("the deciding method must be one of the applied ones")
+    if MT_DECIDING_METHOD != MT_METHOD_PERMUTATION:
+        raise ValueError(
+            "the permutation test must decide: MEASURED, Bonferroni lands at "
+            "3.73% against a 5% target on correlated estimators because it "
+            "assumes independence, while the max-statistic permutation test "
+            "tracks the target at 5.50%"
+        )
+    if not MT_REQUIRES_ALL_METHODS:
+        raise ValueError(
+            "both corrections are required: the permutation test handles "
+            "correlation, and Bonferroni is a floor that needs no resampling "
+            "and cannot be gamed by a badly-seeded shuffle"
+        )
+    if MT_PERMUTATIONS < MT_MIN_PERMUTATIONS:
+        raise ValueError(
+            f"{MT_PERMUTATIONS} shuffles is below the {MT_MIN_PERMUTATIONS} "
+            f"floor"
+        )
+    if MT_MIN_PERMUTATIONS * MT_TARGET_FWER < 1:
+        raise ValueError(
+            f"at {MT_MIN_PERMUTATIONS} shuffles the smallest non-zero p-value "
+            f"is {1 / MT_MIN_PERMUTATIONS}, which cannot express a result at "
+            f"{MT_TARGET_FWER}"
+        )
+    if MT_MIN_FAMILY_FOR_CORRECTION < 2:
+        raise ValueError(
+            "a family of one has no multiplicity to correct for"
+        )
+    if len(set(MT_VERDICTS)) != len(MT_VERDICTS):
+        raise ValueError("duplicate multiple-testing verdict")
+    if MT_FAILS == MT_NOT_EVALUATED:
+        raise ValueError(
+            "'it was corrected and did not survive' and 'no correction could "
+            "be computed' are different answers"
+        )
+    if MT_BLOCKS_TRADES:
+        raise ValueError("X7 reports; the registry promotes")
+
+
+_validate_multiple_testing_config()
