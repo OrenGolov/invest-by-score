@@ -9064,3 +9064,159 @@ def _validate_multiple_testing_config() -> None:
 
 
 _validate_multiple_testing_config()
+
+
+# --- X8: sealed holdout ----------------------------------------------------------
+# "Maintain an untouched final period; once opened, never use it for further model
+# selection." MEASURED, the good news first: A TAIL HOLDOUT EXISTS AND WAS NEVER
+# OPENED. The bad news is that nothing makes that a fact about the system rather
+# than a fact about what happened to be run.
+#
+# THE GEOMETRY THAT PRODUCED THE EIGHT SHIPPED RUNS, recomputed exactly
+# (406-row dataset d18d5e5e, pre-F2 geometry: fold 120, embargo 60, holdout 60):
+#
+#     fold 0   train      rows [  0, 119]   120 rows
+#              validation rows [180, 299]   120 rows
+#     declared holdout    rows [346, 405]    60 rows
+#     last row validation touched            299
+#     UNTOUCHED TAIL                         106 rows  (300..405)
+#
+# No run record carries any holdout, seal or final key; the metrics are
+# directional_accuracy, folds, mae, observations and rmse. So the holdout is
+# genuinely UNOPENED. Three things are nevertheless wrong.
+#
+# FINDING 1 - "ONCE" IS A STRING, NOT A MECHANISM. core/training.py iterates
+# geometry["folds"] and never reads geometry["holdout"]; the backtest engine
+# labels its result {"evaluation": "holdout_once"}. Nothing RECORDS that a
+# holdout was opened, so nothing can REFUSE a second opening. An unenforced
+# "once" is an assertion about discipline, and discipline is exactly what a
+# release gate is not allowed to assume.
+#
+# FINDING 2 - THE SEAL BOUNDARY CANNOT BE RECOMPUTED. The embargo floor is
+# max(LABEL_HORIZON_SESSIONS). F2 (2026-09-19) added the 252d horizon; the runs
+# were written at Sprint C (2026-09-18), when the floor was 60. So the current
+# code REFUSES the geometry that produced the shipped runs:
+#
+#     ValueError: embargo (60) must be >= the max label horizon (252)
+#
+# and over 406 rows fold_sessions=120 forces embargo+holdout <= 166 < 252, so NO
+# current geometry reproduces that boundary. A seal whose boundary is DERIVED
+# from live config silently moves when config moves. Therefore X8 requires the
+# boundary to be RECORDED at seal time and verified against the record, never
+# recomputed from whatever the config says today.
+#
+# FINDING 3 - AND THE SEAL IS TOO SMALL TO DECIDE ANYTHING. MEASURED against the
+# bars this repo already set:
+#
+#     untouched tail                106 rows
+#     declared holdout window        60 rows
+#     OOS_MIN_OBSERVATIONS          120  -> both FAIL
+#     CALIBRATION_GATE_MIN_HOLDOUT  200  -> both FAIL
+#
+#     sampling band 1.96*sqrt(0.25/n):  n=60  -> +/-0.1265
+#                                       n=106 -> +/-0.0952
+#
+# At 60 rows a fair coin posts up to 62.6% directional accuracy inside the band.
+# A holdout that cannot separate an edge from a coin flip is not a release gate,
+# so opening this one would spend the only unopened evidence the project has and
+# buy nothing. X8 therefore reports the seal as INSUFFICIENT and keeps it SEALED,
+# which is the honest answer and also the useful one.
+SEALED_HOLDOUT_VERSION = "sealed-holdout-v1"
+
+# States. UNOPENED is not a pass and OPENED is not a failure - they are facts
+# about the evidence. INSUFFICIENT is the separate, load-bearing verdict: a seal
+# too small to decide is neither an approval nor a rejection of the model.
+HOLDOUT_UNOPENED = "UNOPENED"
+HOLDOUT_OPENED = "OPENED"
+HOLDOUT_INSUFFICIENT = "INSUFFICIENT"
+HOLDOUT_ABSENT = "ABSENT"
+HOLDOUT_STATES: tuple[str, ...] = (
+    HOLDOUT_ABSENT,
+    HOLDOUT_INSUFFICIENT,
+    HOLDOUT_OPENED,
+    HOLDOUT_UNOPENED,
+)
+
+# THE BOUNDARY IS RECORDED, NEVER DERIVED. MEASURED (finding 2), the config that
+# produced the shipped seal no longer validates, so a derived boundary would move
+# under the seal without anyone touching the data.
+HOLDOUT_BOUNDARY_IS_RECORDED = True
+
+# An opening is an append-only event carrying who opened it and why. Opening is
+# permitted exactly once; a second opening is refused rather than logged as a
+# second data point, because the second look is where selection bias enters.
+HOLDOUT_MAX_OPENINGS = 1
+
+# After an opening, the holdout may never inform model selection again. This is
+# the whole point of X8: a sealed period spent on selection is not a holdout, it
+# is a validation fold with a more impressive name.
+HOLDOUT_FORBIDS_SELECTION_AFTER_OPENING = True
+
+# The floor for a seal to be able to DECIDE anything. Reused from X1 so "enough
+# observations" means one thing across the release gate rather than being
+# re-litigated per module.
+HOLDOUT_MIN_OBSERVATIONS = OOS_MIN_OBSERVATIONS
+
+# A seal below the floor is reported INSUFFICIENT and stays SEALED. Opening it
+# would consume the evidence and return a number inside the noise band.
+HOLDOUT_INSUFFICIENT_STAYS_SEALED = True
+
+# X8 reports; the registry promotes.
+SEALED_HOLDOUT_BLOCKS_TRADES = False
+
+
+def _validate_sealed_holdout_config() -> None:
+    """Import-time guard for the X8 contract."""
+    if len(set(HOLDOUT_STATES)) != len(HOLDOUT_STATES):
+        raise ValueError("duplicate holdout state")
+    for state in (HOLDOUT_UNOPENED, HOLDOUT_OPENED, HOLDOUT_INSUFFICIENT, HOLDOUT_ABSENT):
+        if state not in HOLDOUT_STATES:
+            raise ValueError(f"{state!r} must be a declared holdout state")
+    if HOLDOUT_INSUFFICIENT in (HOLDOUT_UNOPENED, HOLDOUT_OPENED):
+        raise ValueError(
+            "'too small to decide' is not the same answer as 'unopened' or "
+            "'opened': a seal below the floor neither approves nor rejects"
+        )
+    if HOLDOUT_ABSENT == HOLDOUT_UNOPENED:
+        raise ValueError(
+            "'no holdout exists' and 'a holdout exists and is untouched' are "
+            "opposite facts and must never share a value"
+        )
+    if not HOLDOUT_BOUNDARY_IS_RECORDED:
+        raise ValueError(
+            "the seal boundary must be RECORDED, not derived: MEASURED, the "
+            "embargo floor rose from 60 to 252 when F2 added the 252d horizon, "
+            "so build_walk_forward_folds now refuses the very geometry that "
+            "produced the shipped runs and no current geometry reproduces that "
+            "boundary over 406 rows"
+        )
+    if HOLDOUT_MAX_OPENINGS != 1:
+        raise ValueError(
+            f"a sealed holdout is opened exactly once, got "
+            f"{HOLDOUT_MAX_OPENINGS!r} - the second look is where selection "
+            f"bias enters"
+        )
+    if not HOLDOUT_FORBIDS_SELECTION_AFTER_OPENING:
+        raise ValueError(
+            "a holdout reused for model selection after opening is not a "
+            "holdout, it is a validation fold with a more impressive name"
+        )
+    if HOLDOUT_MIN_OBSERVATIONS != OOS_MIN_OBSERVATIONS:
+        raise ValueError(
+            "the holdout floor must be X1's observation floor, or 'enough "
+            "evidence' would mean two different things in one release gate"
+        )
+    if HOLDOUT_MIN_OBSERVATIONS < 1:
+        raise ValueError("HOLDOUT_MIN_OBSERVATIONS must be positive")
+    if not HOLDOUT_INSUFFICIENT_STAYS_SEALED:
+        raise ValueError(
+            "a seal below the floor must stay sealed: MEASURED, at 60 rows the "
+            "sampling band is +/-0.1265, so a fair coin posts up to 62.6% "
+            "directional accuracy and opening it would spend the only unopened "
+            "evidence the project has to buy a number inside the noise"
+        )
+    if SEALED_HOLDOUT_BLOCKS_TRADES:
+        raise ValueError("X8 reports; the registry promotes")
+
+
+_validate_sealed_holdout_config()
