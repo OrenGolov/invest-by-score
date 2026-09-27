@@ -8050,3 +8050,158 @@ def _validate_oos_validation_config() -> None:
 
 
 _validate_oos_validation_config()
+
+
+# --- X2: calibration gate --------------------------------------------------------
+# "Probabilities must be demonstrably calibrated." MEASURED, the number the
+# system currently reports is 0.0000 for every estimator, and that number is
+# WORTHLESS - not optimistic, but structurally incapable of being anything else.
+#
+# THE DECIDING MEASUREMENT. Fitting the isotonic map on 120 observations and
+# scoring it on the SAME 120 gives a perfect ECE every time. Refitting on the
+# first 60 and scoring the held-out 60 gives the honest number:
+#
+#     estimator          ECE in-sample   ECE holdout   MCE holdout
+#     elastic_net              0.0000        0.1894        0.1920
+#     ridge                    0.0000        0.1689        0.1689
+#     logistic                 0.0000        0.1669        0.1669
+#     mean_reversion           0.0000        0.1669        0.1669
+#     momentum                 0.0000        0.1669        0.1669
+#     historical_mean          0.0000        0.1667        0.1667
+#     random_forest            0.0000        0.1665        0.1665
+#     gradient_boosting        0.0000        0.1660        0.1660
+#
+# WHY IN-SAMPLE ECE IS EXACTLY ZERO, not merely small. Isotonic regression on
+# this data collapses to TWO knots. Every observation is mapped to the base rate
+# of its own group, so each reliability bin reproduces its own observed
+# frequency by construction. An in-sample ECE cannot detect miscalibration; it
+# can only report the arithmetic identity it was built from.
+#
+# WHAT THE 0.1667 ACTUALLY IS, and it is not a fitting artefact: BASE-RATE
+# DRIFT. The training half is 63.3% up-days and the holdout half 46.7%. The map
+# learned a base rate that had ALREADY CHANGED by the time it was applied. That
+# is a live point-in-time failure - exactly what a calibration gate exists to
+# catch - and the system currently reports it as perfect.
+#
+# AND IT IS REAL, NOT SAMPLING NOISE. Simulating a perfectly calibrated constant
+# predictor at n=60 gives a median ECE of 0.0500 and a 95th percentile of
+# 0.1167. The observed 0.1667 sits above that, so it is a genuine error rather
+# than the noise a small holdout always produces.
+CALIBRATION_GATE_VERSION = "calibration-gate-v1"
+
+# IN-SAMPLE CALIBRATION IS NEVER EVIDENCE. The single most important rule here.
+CALIBRATION_GATE_REQUIRES_HOLDOUT = True
+
+# The ECE bar. REUSED from L6's measured drift threshold rather than invented,
+# so "miscalibrated" means one thing system wide and does not drift between the
+# gate that admits a model and the detector that retires it.
+CALIBRATION_GATE_MAX_ECE = DRIFT_CALIBRATION_GAP
+
+# The worst-bin bar. ECE is count-weighted, so a badly wrong region carrying few
+# observations can hide inside an acceptable average. MCE cannot hide it. Set at
+# twice the ECE bar: a single bin may be worse than the average, but not
+# unboundedly so.
+CALIBRATION_GATE_MAX_MCE = 2.0 * DRIFT_CALIBRATION_GAP
+
+# THE NOISE FLOOR, MEASURED rather than assumed. A perfectly calibrated constant
+# predictor at n=60 still posts a median ECE of 0.0500 and a p95 of 0.1167, so
+# an ECE below the floor is NOT evidence of good calibration - it is evidence
+# the holdout is too small to tell. A gate that read it as a pass would approve
+# anything on a thin sample.
+# The anchor is the base-rate-0.5 simulation (0.1333), which is the CONSERVATIVE
+# of the two measurements: the observed-base-rate run gave 0.1167, and using the
+# smaller number would understate how much noise a thin holdout produces.
+CALIBRATION_GATE_NOISE_FLOOR_P95 = 0.1333
+CALIBRATION_GATE_NOISE_FLOOR_N = 60
+
+# Minimum holdout observations. At n=60 the noise floor (0.1167) is already
+# larger than the ECE bar (0.10), so a 60-observation holdout CANNOT
+# distinguish a calibrated model from an uncalibrated one.
+#
+# 200 is MEASURED as the smallest round size whose p95 floor falls below the
+# 0.10 bar (3,000 simulations per size at base rate 0.5):
+#
+#     n      median ECE   p95 ECE
+#     60         0.0500    0.1333
+#     100        0.0400    0.1000
+#     150        0.0267    0.0800
+#     200        0.0250    0.0700   <- first size that can decide
+#     500        0.0160    0.0440
+CALIBRATION_GATE_MIN_HOLDOUT = 200
+
+# A MISSING PROBABILITY IS NEVER 0.5. "The model declined to predict" and "the
+# model predicted a coin flip" are different claims, and averaging the first
+# into the second manufactures calibration evidence from silence.
+CALIBRATION_GATE_COERCES_MISSING = False
+
+# Verdicts.
+CALIBRATION_GATE_APPROVED = "APPROVED"
+CALIBRATION_GATE_NOT_APPROVED = "NOT_APPROVED"
+CALIBRATION_GATE_NOT_EVALUATED = "NOT_EVALUATED"   # no honest test was possible
+CALIBRATION_GATE_VERDICTS: tuple[str, ...] = (
+    CALIBRATION_GATE_NOT_EVALUATED,
+    CALIBRATION_GATE_NOT_APPROVED,
+    CALIBRATION_GATE_APPROVED,
+)
+
+# X2 reports; the registry promotes.
+CALIBRATION_GATE_BLOCKS_TRADES = False
+
+
+def _validate_calibration_gate_config() -> None:
+    """Import-time guard for the X2 contract."""
+    if not CALIBRATION_GATE_REQUIRES_HOLDOUT:
+        raise ValueError(
+            "in-sample calibration is never evidence: MEASURED, fitting and "
+            "scoring isotonic on the same 120 observations gives ECE 0.0000 "
+            "for every estimator, because each bin reproduces its own base "
+            "rate by construction"
+        )
+    if not 0.0 < CALIBRATION_GATE_MAX_ECE < 1.0:
+        raise ValueError(
+            f"CALIBRATION_GATE_MAX_ECE must lie in (0, 1), got "
+            f"{CALIBRATION_GATE_MAX_ECE!r}"
+        )
+    if CALIBRATION_GATE_MAX_ECE != DRIFT_CALIBRATION_GAP:
+        raise ValueError(
+            "the ECE bar must be L6's measured drift threshold: a gate that "
+            "admits a model looser than the detector that retires it would "
+            "approve something already known to be drifting"
+        )
+    if CALIBRATION_GATE_MAX_MCE <= CALIBRATION_GATE_MAX_ECE:
+        raise ValueError(
+            "the worst-bin bar must exceed the average bar, or MCE adds "
+            "nothing that ECE did not already say"
+        )
+    if CALIBRATION_GATE_MIN_HOLDOUT <= CALIBRATION_GATE_NOISE_FLOOR_N:
+        raise ValueError(
+            f"a {CALIBRATION_GATE_MIN_HOLDOUT}-observation holdout cannot "
+            f"decide anything: MEASURED, the p95 noise floor at n="
+            f"{CALIBRATION_GATE_NOISE_FLOOR_N} is "
+            f"{CALIBRATION_GATE_NOISE_FLOOR_P95}, already larger than the "
+            f"{CALIBRATION_GATE_MAX_ECE} bar"
+        )
+    if CALIBRATION_GATE_NOISE_FLOOR_P95 <= CALIBRATION_GATE_MAX_ECE:
+        raise ValueError(
+            "the measured noise floor is below the bar, which would make the "
+            "floor irrelevant; it is recorded because it is NOT"
+        )
+    if CALIBRATION_GATE_COERCES_MISSING:
+        raise ValueError(
+            "a missing probability must never become 0.5: 'the model declined "
+            "to predict' and 'the model predicted a coin flip' are different "
+            "claims, and merging them manufactures calibration evidence from "
+            "silence"
+        )
+    if len(set(CALIBRATION_GATE_VERDICTS)) != len(CALIBRATION_GATE_VERDICTS):
+        raise ValueError("duplicate calibration verdict")
+    if CALIBRATION_GATE_NOT_APPROVED == CALIBRATION_GATE_NOT_EVALUATED:
+        raise ValueError(
+            "'measurably miscalibrated' and 'no honest test was possible' are "
+            "different answers; collapsing them hides which one happened"
+        )
+    if CALIBRATION_GATE_BLOCKS_TRADES:
+        raise ValueError("X2 reports; the registry promotes")
+
+
+_validate_calibration_gate_config()
