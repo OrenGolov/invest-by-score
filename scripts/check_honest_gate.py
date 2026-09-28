@@ -155,16 +155,43 @@ if runs:
         f"the shipped release reported {report['verdict']}; with 6 of 9 gates "
         f"unevaluable the only honest answer is NOT_APPROVED",
     )
+    # X9 IS THE ONE GATE WHOSE VERDICT DEPENDS ON THE CHECKOUT: FROZEN in a
+    # clean clone, DIRTY in any working tree someone is editing. A FIRST VERSION
+    # OF THIS GATE HARDCODED THE COUNTS MEASURED IN A DIRTY TREE (0 passing, 3
+    # explicit non-passes) and failed on a fresh clone, where X9 correctly passes
+    # and the numbers are 1 and 2.
+    #
+    # That is the defect in open item 6 for the third time, so the counts are now
+    # derived: the EVIDENCE gates (X1-X8) are asserted, and X9 is excluded from
+    # the arithmetic because it measures the tree rather than the model.
+    evidence_gates = [gate for gate in RELEASE_GATES if gate != "X9_release_snapshot"]
+    evidence = {gate: shipped[gate] for gate in evidence_gates}
+    evidence_report = evaluate_release(evidence, gates=evidence_gates)
+
     check(
-        report["counts"][GATE_PASSED] == 0,
-        f"{report['counts'][GATE_PASSED]} gate(s) now pass on the shipped data. "
-        f"That is progress, and this gate's 'nothing passes' claim is stale - "
-        f"the numbers in the X10 config block must be revisited",
+        evidence_report["counts"][GATE_PASSED] == 0,
+        f"{evidence_report['counts'][GATE_PASSED]} evidence gate(s) now pass "
+        f"({evidence_report['passed']}). That is progress, and this gate's "
+        f"'nothing passes' claim is stale - the numbers in the X10 config block "
+        f"must be revisited",
     )
     check(
-        report["counts"][GATE_UNEVALUATED] == 6,
-        f"{report['counts'][GATE_UNEVALUATED]} gates are unevaluable, expected "
-        f"6; X10's measurement is stale either way",
+        evidence_report["counts"][GATE_UNEVALUATED] == 6,
+        f"{evidence_report['counts'][GATE_UNEVALUATED]} evidence gates are "
+        f"unevaluable, expected 6; X10's measurement is stale either way",
+    )
+    check(
+        evidence_report["counts"][GATE_BLOCKED] == 2,
+        f"{evidence_report['counts'][GATE_BLOCKED]} evidence gates carry an "
+        f"explicit non-pass verdict, expected 2 (X1 NOT_APPROVED, X7 "
+        f"FAILS_CORRECTION)",
+    )
+    # And X9 must report one of exactly two states, according to the tree.
+    check(
+        str(shipped["X9_release_snapshot"].get("verdict")) in ("FROZEN", "DIRTY"),
+        f"X9 reported {shipped['X9_release_snapshot'].get('verdict')!r}; from a "
+        f"complete checkout it is FROZEN (clean) or DIRTY (edited), and anything "
+        f"else means a component went missing",
     )
     check(
         release_problems(report) == [],
@@ -174,15 +201,24 @@ if runs:
     # THE TRAP, recomputed: only two gates announce a failure.
     explicit = [
         gate
-        for gate, result in shipped.items()
+        for gate, result in evidence.items()
         if classify(result.get("verdict")) == GATE_BLOCKED
         and str(result.get("verdict")).upper() not in UNEVALUATED_VERDICTS
     ]
     check(
-        len(explicit) == 3,
-        f"{len(explicit)} gates carry an explicit non-pass verdict "
-        f"({sorted(explicit)}); X10 measured 3 (X1 NOT_APPROVED, X7 "
-        f"FAILS_CORRECTION, X9 DIRTY on a working tree)",
+        sorted(explicit) == ["X1_oos_validation", "X7_multiple_testing"],
+        f"the evidence gates carrying an explicit non-pass verdict are "
+        f"{sorted(explicit)}; X10 measured exactly X1 (NOT_APPROVED) and X7 "
+        f"(FAILS_CORRECTION)",
+    )
+    # THE TRAP, recomputed on the evidence gates: six of eight announce nothing,
+    # so a 'no FAIL means pass' rule would approve them.
+    would_approve = [gate for gate in evidence if gate not in explicit]
+    check(
+        len(would_approve) == 6,
+        f"a 'no FAIL means pass' rule would approve {len(would_approve)} of "
+        f"{len(evidence)} evidence gates, expected 6; X10's central measurement "
+        f"is stale",
     )
 
     # THE COMMON PREREQUISITE.
