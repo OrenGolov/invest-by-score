@@ -292,6 +292,45 @@ one sprint suggests a third is coming.
 
 ---
 
+## 11. `scripts/train.py` cannot regenerate its own ledger — OPEN
+
+**Raised:** Sprint X8 (2026-09-28). **Found by:** the sealed-holdout gate,
+while trying to establish where the holdout fell.
+
+**MEASURED.** F2 (`34bd464`, 2026-09-19) set the longest label horizon to 252
+sessions. `build_walk_forward_folds` requires `embargo >= max label horizon`.
+`data/training_runs.jsonl` was written 2026-09-18, under a max horizon of 60,
+and `scripts/train.py` still ships `--embargo-sessions 60` as its default. Both
+are now rejected:
+
+    ledger geometry (406 rows, fold=120, embargo=60, holdout=60)   REJECTED
+    scripts/train.py defaults (fold=80, embargo=60, holdout=60)    REJECTED
+
+**And no legal geometry fits the data.** With the embargo pinned at 252, the
+cheapest walk-forward layout that still reserves a holdout needs 432 rows
+against the 406 the dataset has — short by 26. The current default geometry
+(252/252/126) needs 882, short by 476.
+
+**Why it matters.** The 8 shipped baselines cannot be retrained by the script
+that produced them, so every number they carry is unreproducible in the strict
+sense X9 checks. X8 reports this honestly (`NOT_EVALUATED`, shortfall named)
+rather than papering over it, but the underlying condition stands.
+
+**What would settle it:** one of three, and the choice is a modelling decision
+rather than a bug fix —
+1. extend the dataset past 432 rows (26 more prediction times at the cheapest
+   legal geometry, ~500 for comfort), then retrain and reseal;
+2. drop the 252-session horizon from `LABEL_HORIZON_SESSIONS` if a one-year
+   label is not actually wanted, which returns the embargo floor to 120;
+3. keep both and accept that the 252d horizon is not trainable on this dataset,
+   documenting which horizons a run may legitimately claim.
+
+Option 1 is the only one that preserves what F2 set out to do. Until then
+`scripts/train.py --embargo-sessions 60` is a default that cannot run, which is
+worth fixing on its own regardless of which option is chosen.
+
+---
+
 ## Closed
 
 - ~~**Live runs must use today's chart state.**~~ Fixed in `ad75f48`. The

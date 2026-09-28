@@ -9232,3 +9232,159 @@ def _validate_sealed_holdout_config() -> None:
 
 
 _validate_sealed_holdout_config()
+
+
+# --- X9: release snapshot --------------------------------------------------------
+# "Freeze code, data, features, models, weights, calibration, configuration,
+# validation results." MEASURED, every component is present and deterministically
+# hashable - except the one the whole snapshot rests on. THE RECORDED CODE
+# IDENTITY CANNOT TELL A FROZEN TREE FROM A THAWED ONE.
+#
+# THE DECIDING MEASUREMENT. `_code_commit()` (core/backtest/manifest.py) returns
+# `git rev-parse --short HEAD`. Appending a line to `core/config.py` and asking
+# again:
+#
+#     commit before the edit    ea29e33
+#     commit after the edit     ea29e33
+#     identical                 True      <- the code changed, the identity did not
+#     tree dirty                True
+#
+# A snapshot recording `ea29e33` is claiming a reproducibility it cannot deliver:
+# the code that ran was not the code at that commit, and nothing in the record
+# says so. Every other component is fine - 1050 config constants, 40 registered
+# features, 8 training runs with artifact hashes, versioned ensemble weights and
+# the calibration modules all hash deterministically and repeatably - so the code
+# digest is the single point where a freeze silently stops being a freeze.
+#
+# AN OBVIOUS FIX THAT DOES NOT WORK, CHECKED BEFORE USING IT. `git ls-files -s`
+# looks like a cheap tracked-content digest (339 files, 18 ms). It reports the
+# STAGED blob hashes, so an UNSTAGED edit leaves it unchanged:
+#
+#     tracked-content digest              cd1aa1f3...
+#     after an unstaged edit              cd1aa1f3...   changed: False
+#
+# It is dirt-blind in exactly the same way as the commit hash, and would have
+# shipped the same defect wearing a digest's clothes.
+#
+# WHAT DOES WORK is hashing the WORKTREE contents via `git hash-object`:
+#
+#     clean tree              e7b84424...
+#     after an edit           d5a911af...   changed: True
+#     after reverting         e7b84424...   equals clean: True
+#
+# Stable when clean, moves on any edit, and returns to exactly the prior value on
+# revert. Cost 0.4 s over 339 files, which a release snapshot can afford because
+# it is taken once per release, not per forecast.
+#
+# SO A SNAPSHOT RECORDS BOTH: the commit for provenance (where this came from)
+# and the worktree digest for integrity (whether it is still that). They answer
+# different questions, and MEASURED the commit alone answers neither reliably.
+RELEASE_SNAPSHOT_VERSION = "release-snapshot-v1"
+
+# The components a release snapshot must freeze. Named as data so the gate and
+# the builder cannot drift apart about what "complete" means, and so a component
+# added later cannot be silently omitted.
+RELEASE_COMPONENTS: tuple[str, ...] = (
+    "code",
+    "configuration",
+    "features",
+    "models",
+    "weights",
+    "calibration",
+    "data",
+    "validation",
+)
+
+# THE WORKTREE DIGEST IS REQUIRED, not just the commit. MEASURED, the commit hash
+# is identical before and after an edit, so a snapshot carrying only a commit
+# cannot detect that the frozen tree has thawed.
+RELEASE_REQUIRES_WORKTREE_DIGEST = True
+
+# ...and the commit is still recorded, because the digest says WHETHER the tree
+# changed while the commit says WHERE it came from. Neither substitutes for the
+# other.
+RELEASE_RECORDS_COMMIT = True
+
+# A snapshot taken from a DIRTY tree is not a release. It may still be recorded -
+# refusing to describe reality would be worse - but it is marked, because its
+# digest matches no commit anyone else can check out.
+RELEASE_DIRTY_IS_NOT_RELEASABLE = True
+
+# Every component must state PRESENT or ABSENT explicitly. A component omitted
+# from the manifest is indistinguishable from one that was checked and found
+# missing, and the second is a release blocker while the first is a bug in the
+# snapshot builder.
+RELEASE_REQUIRES_EXPLICIT_ABSENCE = True
+
+# Verdicts, weakest to strongest. The order IS the precedence.
+RELEASE_NOT_EVALUATED = "NOT_EVALUATED"   # the snapshot could not be taken
+RELEASE_INCOMPLETE = "INCOMPLETE"         # a required component is absent
+RELEASE_DIRTY = "DIRTY"                   # complete, but the tree is not frozen
+RELEASE_FROZEN = "FROZEN"                 # complete, clean, digested
+RELEASE_SNAPSHOT_VERDICTS: tuple[str, ...] = (
+    RELEASE_NOT_EVALUATED,
+    RELEASE_INCOMPLETE,
+    RELEASE_DIRTY,
+    RELEASE_FROZEN,
+)
+
+# X9 reports; the registry promotes. Consistent with X1-X8.
+RELEASE_BLOCKS_TRADES = False
+
+
+def _validate_release_snapshot_config() -> None:
+    """Import-time guard for the X9 contract."""
+    if not RELEASE_REQUIRES_WORKTREE_DIGEST:
+        raise ValueError(
+            "a release snapshot must record a worktree digest: MEASURED, "
+            "`git rev-parse HEAD` returns the SAME commit before and after an "
+            "edit, so a snapshot carrying only a commit cannot detect that the "
+            "tree it claims to freeze has changed"
+        )
+    if not RELEASE_RECORDS_COMMIT:
+        raise ValueError(
+            "the commit is still required: the digest says WHETHER the tree "
+            "changed, the commit says WHERE it came from, and neither answers "
+            "the other's question"
+        )
+    if not RELEASE_DIRTY_IS_NOT_RELEASABLE:
+        raise ValueError(
+            "a snapshot taken from a dirty tree is not releasable: its digest "
+            "matches no commit anyone else can check out"
+        )
+    if not RELEASE_REQUIRES_EXPLICIT_ABSENCE:
+        raise ValueError(
+            "every component must state PRESENT or ABSENT: an omitted component "
+            "is indistinguishable from one found missing, and only the second "
+            "is a release blocker"
+        )
+    if len(set(RELEASE_COMPONENTS)) != len(RELEASE_COMPONENTS):
+        raise ValueError("duplicate snapshot component")
+    for required in ("code", "configuration", "models", "validation"):
+        if required not in RELEASE_COMPONENTS:
+            raise ValueError(
+                f"{required!r} is part of what X9 freezes and cannot be dropped "
+                f"from the component list"
+            )
+    if len(set(RELEASE_SNAPSHOT_VERDICTS)) != len(RELEASE_SNAPSHOT_VERDICTS):
+        raise ValueError("duplicate release-snapshot verdict")
+    if RELEASE_SNAPSHOT_VERDICTS[0] != RELEASE_NOT_EVALUATED:
+        raise ValueError("NOT_EVALUATED must be the weakest verdict")
+    if RELEASE_SNAPSHOT_VERDICTS[-1] != RELEASE_FROZEN:
+        raise ValueError("FROZEN must be the strongest verdict")
+    if RELEASE_DIRTY == RELEASE_FROZEN:
+        raise ValueError(
+            "'complete but unfrozen' and 'frozen' are different states: "
+            "MEASURED, the commit hash cannot tell them apart, which is the "
+            "defect X9 exists to close"
+        )
+    if RELEASE_INCOMPLETE == RELEASE_NOT_EVALUATED:
+        raise ValueError(
+            "'a component is missing' and 'no snapshot could be taken' are "
+            "different facts with different fixes"
+        )
+    if RELEASE_BLOCKS_TRADES:
+        raise ValueError("X9 reports; the registry promotes")
+
+
+_validate_release_snapshot_config()
