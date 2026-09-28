@@ -142,6 +142,24 @@ inside the loop I was using.
 3. A gate or test that needs gitignored data must either tolerate its absence
    or generate what it needs.
 
+**RECURRED 2026-09-28, inverted, in X4.** `check_event_robustness.py` and
+`test_there_are_no_event_memories` asserted `len(load_memories()) == 0`. That
+is TRUE on a fresh clone and FALSE here (2084 rows), so this pair **passed in
+CI and failed locally** — the exact mirror of the original. Practice item 2
+alone would never have caught it: a clean-clone run reports green.
+
+So the rule is stronger than "verify against a clean clone". **A check keyed to
+gitignored data is wrong in both directions, and neither environment alone
+reveals it.** The fix was not to tolerate the absence but to find the invariant
+that does not depend on the untracked store: X4's blocker is that no training
+fold carries per-observation event attribution, measured from the TRACKED
+`data/training_runs.jsonl`. The memory count is now reported as context and
+decides nothing.
+
+4. A check must assert an invariant of the REPOSITORY. If the deciding
+   measurement reads a gitignored path, the check is measuring the checkout —
+   test it with that data both PRESENT and ABSENT before trusting it.
+
 ## 7. Collection cadence is manual — DECISION
 
 **Raised:** Sprint L (2026-09). **Owner:** operator.

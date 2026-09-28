@@ -115,15 +115,24 @@ def viral_book(share, seed=0):
     return predictions, actuals, ids
 
 
-# --- 1. THE BLOCKING MEASUREMENT: there is no event data at all -------------------
+# --- 1. THE BLOCKING MEASUREMENT: no fold carries event attribution --------------
+#
+# THE MEASUREMENT IS TAKEN FROM THE TRAINING RUNS, NOT THE MEMORY STORE.
+# `data/event_memory.jsonl` is GITIGNORED - 2084 rows on the machine that
+# collected them, absent on a fresh clone - so a gate keyed to its length
+# measures whose checkout it is running in. THIS ONE FAILED LOCALLY AND PASSED
+# IN CI for exactly that reason, the mirror image of the live-chart bug in
+# `docs/open-decisions.md` item 6.
+#
+# X4's blocker was never "the store is empty". It is that NO TRAINING FOLD
+# CARRIES PER-OBSERVATION EVENT ATTRIBUTION, so there is nothing to leave out
+# in a leave-one-out test. `data/training_runs.jsonl` is TRACKED, so that
+# measurement recomputes identically everywhere. The memory count is reported
+# as CONTEXT - collecting events is progress toward the fix - but it is the
+# attribution that decides, because memories that never reach a fold cannot
+# make the robustness test runnable.
 
 memories = load_memories()
-check(
-    len(memories) == 0,
-    f"{len(memories)} event memories now exist. That is part of the fix X4 "
-    f"asks for, and this gate's 'no event data' claim is stale - the real "
-    f"robustness test must now be wired to them",
-)
 
 runs = load_training_runs()
 check(bool(runs), "no training runs are available; X4 cannot state its blocker")
@@ -393,8 +402,8 @@ if failures:
     sys.exit(1)
 
 print("X4 event robustness gate: OK")
-print(f"  event memories on disk            {len(memories)}  -> NOT_EVALUATED")
-print(f"  shipped runs with attribution     0 of {len(runs)}")
+print(f"  event memories on disk            {len(memories)}  (context; gitignored)")
+print(f"  shipped runs with attribution     0 of {len(runs)}  -> NOT_EVALUATED")
 print(f"  viral event                       CARRIED at 20/30/50/60% share")
 print(f"  uniform book                      {broad['verdict']}"
       f" (ratio {broad['worst_ratio']:.3f})")
