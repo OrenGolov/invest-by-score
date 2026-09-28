@@ -121,7 +121,19 @@ def attribution_of(
         raise EventRobustnessError(
             f"fold {key} must be a sequence, got {type(values).__name__}"
         )
-    return [str(value) for value in values]
+    # AN UNOBSERVED ENTRY IS NOT AN ID. A1 records None where the provider gave
+    # nothing for that observation, and `str(None)` would make "None" a single
+    # event covering the whole fold — leave-one-out over one group leaves
+    # nothing to leave, and the gate would report a verdict having tested
+    # nothing. That is the exact failure the docstring above refuses to commit
+    # by deriving an id.
+    resolved = [
+        None if value is None or not str(value).strip() else str(value)
+        for value in values
+    ]
+    if not any(value is not None for value in resolved):
+        return None
+    return resolved
 
 
 def group_by_item(

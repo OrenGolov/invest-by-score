@@ -260,12 +260,42 @@ else:
         "nobody checked"
     )
 
-try:
-    group_by_regime([1.0], [1.0], [None])
-except RegimeRobustnessError:
-    pass
-else:
-    failures.append("an observation with no regime label was scored")
+# AN UNLABELLED OBSERVATION IS EXCLUDED, NEVER SCORED.
+#
+# CONTRACT CHANGED BY A1: this previously required a raise. A1 records
+# per-observation regime labels and a classifier can fail on a single day, so
+# raising would throw away an otherwise usable fold. What must still hold is that
+# the observation is not scored under any label — checked here directly rather
+# than via the exception it used to produce.
+partial = group_by_regime([1.0, 2.0], [1.0, 2.0], [None, "bullish"])
+if "None" in partial or "none" in partial:
+    failures.append(
+        "an unlabelled observation became its own regime cell; assigning one "
+        "manufactures the attribution this gate tests"
+    )
+if partial.get("bullish", {}).get("observations") != 1:
+    failures.append(
+        "excluding the unlabelled observation also dropped the labelled one; "
+        "partial context must keep the evidence it has"
+    )
+if group_by_regime([1.0], [1.0], [None]) != {}:
+    failures.append(
+        "a wholly unlabelled fold produced cells; with nothing classified there "
+        "is nothing to compare and the caller must report NOT_EVALUATED"
+    )
+
+# ...and the reader reports absence as absence, so the caller can tell the two
+# apart without inspecting every entry.
+if fold_regime_labels({"regimes": [None, None]}) is not None:
+    failures.append(
+        "a wholly unobserved regime list did not read as absent; str(None) would "
+        "make 'None' a regime and hide an edge in a bucket nobody checked"
+    )
+if fold_regime_labels({"regimes": [None, "bullish"]}) != [None, "bullish"]:
+    failures.append(
+        "partial regime labels were not preserved; the observed half is still "
+        "evidence"
+    )
 
 try:
     leave_one_out(group_by_regime([1.0] * 2, [1.0] * 2, ["bullish"] * 2))

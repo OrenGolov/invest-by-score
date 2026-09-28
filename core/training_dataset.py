@@ -84,6 +84,96 @@ class TrainingDatasetError(ValueError):
     """Raised when a dataset request or a built row violates the contract."""
 
 
+def context_snapshot_of(score_result: Any) -> dict[str, Any]:
+    """The per-observation context available in a point-in-time score result.
+
+    A1. Pulled from the SCORE RESULT rather than recomputed, so the context a
+    training row records is the same context the live path saw at that
+    timestamp. Recomputing it later would risk using information published
+    after `prediction_time`, which is the one thing a PIT system may not do.
+    """
+    payload = score_result if isinstance(score_result, dict) else getattr(
+        score_result, "__dict__", {}
+    )
+    return {
+        "regime": payload.get("market_regime_snapshot") or {},
+        "news": payload.get("news_snapshot") or {},
+        "sentiment": payload.get("sentiment_snapshot") or {},
+    }
+
+
+def observed_regime(context_snapshot: dict | None) -> str | None:
+    """The regime label at prediction time, or None when none was classified.
+
+    None, NEVER a default label. A regime of "unknown" would become its own
+    bucket in X3's per-regime comparison, and a bucket of unclassified
+    observations tells you nothing about how the model behaves in a regime.
+    """
+    regime = ((context_snapshot or {}).get("regime") or {})
+    if not isinstance(regime, dict):
+        return None
+    label = str(regime.get("regime") or "").strip()
+    if not label:
+        return None
+    # A regime snapshot that failed still carries a status; only a classified
+    # one counts.
+    status = str(regime.get("status") or "").strip().upper()
+    if status and status not in ("OK", "PRESENT"):
+        return None
+    return label.lower()
+
+
+def observed_event(context_snapshot: dict | None) -> str | None:
+    """The dominant news event id at prediction time, or None.
+
+    X4 leaves one event out at a time, so it needs an id that identifies WHICH
+    event — not a count and not a polarity. When the provider was unavailable
+    there is no event, and that must read as absent rather than as "no news",
+    which are different facts: the first is ignorance, the second is evidence.
+    """
+    news = ((context_snapshot or {}).get("news") or {})
+    if not isinstance(news, dict):
+        return None
+    if str(news.get("status") or "").strip().upper() != "OK":
+        return None
+    articles = news.get("articles")
+    if not isinstance(articles, (list, tuple)) or not articles:
+        return None
+    first = articles[0] if isinstance(articles[0], dict) else {}
+    for key in ("event_id", "id", "url", "title"):
+        value = str(first.get(key) or "").strip()
+        if value:
+            return value
+    return None
+
+
+def observed_source(context_snapshot: dict | None) -> str | None:
+    """The news source id at prediction time, or None.
+
+    The SOURCE axis of X4, and the join L4 needs. Recorded only when the
+    provider actually answered: `source_id` is present on an UNAVAILABLE
+    snapshot too (it names who failed), and recording that would make every
+    failed fetch look like an observation from that source.
+    """
+    news = ((context_snapshot or {}).get("news") or {})
+    if not isinstance(news, dict):
+        return None
+    if str(news.get("status") or "").strip().upper() != "OK":
+        return None
+    articles = news.get("articles")
+    if isinstance(articles, (list, tuple)) and articles:
+        first = articles[0] if isinstance(articles[0], dict) else {}
+        for key in ("source_id", "source", "source_name"):
+            value = first.get(key)
+            if isinstance(value, dict):
+                value = value.get("id") or value.get("name")
+            value = str(value or "").strip()
+            if value:
+                return value
+    value = str(news.get("source_id") or "").strip()
+    return value or None
+
+
 @dataclass
 class TrainingRow:
     """One supervised example. Immutable once built."""
@@ -100,9 +190,44 @@ class TrainingRow:
     label_version: str
     label_record_hash: str
     schema_version: str = TRAINING_DATASET_SCHEMA_VERSION
+    # A1: PER-OBSERVATION CONTEXT, for the robustness gates.
+    #
+    # X3 could not compare per-regime performance, X4 had nothing to leave out
+    # in a leave-one-out test, and neither could be fixed by a better estimator
+    # — the information was never recorded. These fields carry it from the
+    # point-in-time score result that produced the row.
+    #
+    # DELIBERATELY OUTSIDE `identity()`. The dataset hash is M8's
+    # reproducibility anchor; adding fields to it would invalidate every
+    # existing `dataset_hash` and every model artifact keyed to one. Context
+    # describes a row's provenance, it does not define which example the row
+    # IS, so two rows differing only in recorded context are the same training
+    # example and must hash alike.
+    #
+    # None means NOT OBSERVED, never a default. A regime of "unknown" or a
+    # source of "" would be a synthetic bucket, and X4's module refuses derived
+    # attribution for exactly that reason: bucketing every observation under
+    # one label leaves leave-one-out nothing to leave, and the gate would
+    # return ROBUST having tested nothing.
+    regime: str | None = None
+    event_id: str | None = None
+    source_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+    def context(self) -> dict[str, Any]:
+        """The per-observation context, with absences explicit.
+
+        Separate from `to_dict` so a consumer asking "what do we know about the
+        conditions of this observation" gets only that, and can tell an absence
+        from a value.
+        """
+        return {
+            "regime": self.regime,
+            "event_id": self.event_id,
+            "source_id": self.source_id,
+        }
 
     def identity(self) -> dict[str, Any]:
         """The fields that define this row for hashing purposes.
@@ -110,6 +235,10 @@ class TrainingRow:
         Feature CONTRACTS are included, not just values: two rows with the
         same number produced under different calculation versions or from
         different sources are different training data.
+
+        CONTEXT IS EXCLUDED — see the note on the context fields above. It is
+        provenance, not identity, and including it would break every existing
+        dataset hash.
         """
         return {
             "ticker": self.ticker,
@@ -291,6 +420,7 @@ def build_training_row(
     label_set: dict,
     feature_names: Iterable[str],
     target_horizon: str = TRAINING_DEFAULT_TARGET_HORIZON,
+    context_snapshot: dict | None = None,
 ) -> tuple[TrainingRow | None, str]:
     """Assemble one row, or explain why it cannot exist.
 
@@ -339,6 +469,9 @@ def build_training_row(
         adverse_excursion=_numeric(outcome.get("adverse_excursion")),
         label_version=str(label_set.get("label_version", OUTCOME_LABEL_VERSION)),
         label_record_hash=str(outcome.get("record_hash", "")),
+        regime=observed_regime(context_snapshot),
+        event_id=observed_event(context_snapshot),
+        source_id=observed_source(context_snapshot),
     )
     return row, ""
 
@@ -418,7 +551,16 @@ def build_training_dataset(
                     continue
 
                 row, reason = build_training_row(
-                    ticker, prediction_time, surface, label_set, declared, target_horizon
+                    ticker,
+                    prediction_time,
+                    surface,
+                    label_set,
+                    declared,
+                    target_horizon,
+                    # A1: the context the LIVE path saw at this timestamp, so
+                    # the recorded regime/event/source is PIT-correct by
+                    # construction rather than by a later lookup.
+                    context_snapshot=context_snapshot_of(score_result),
                 )
                 if row is None:
                     excluded.append({

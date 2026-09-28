@@ -105,7 +105,18 @@ def fold_regime_labels(fold: Mapping[str, Any] | None) -> list[str] | None:
         raise RegimeRobustnessError(
             f"fold regimes must be a sequence of labels, got {type(labels).__name__}"
         )
-    return [str(label) for label in labels]
+    # AN UNOBSERVED ENTRY IS NOT A LABEL. A1 records None where no regime was
+    # classified for that observation, and `str(None)` would make "None" its own
+    # regime — the synthetic bucket this module refuses to derive. If nothing was
+    # classified at all, there are no labels, which the caller reports as
+    # NOT_EVALUATED rather than scoring a bucket nobody checked.
+    resolved = [
+        None if label is None or not str(label).strip() else str(label)
+        for label in labels
+    ]
+    if not any(label is not None for label in resolved):
+        return None
+    return resolved
 
 
 def group_by_regime(
@@ -121,11 +132,16 @@ def group_by_regime(
         )
     cells: dict[str, dict[str, Any]] = {}
     for predicted, actual, label in zip(predictions, actuals, labels):
+        # AN UNOBSERVED OBSERVATION IS EXCLUDED, NOT ASSIGNED AND NOT FATAL.
+        #
+        # Before A1 a fold either carried every label or none, so raising here
+        # was right. A1 makes PARTIAL context possible — a regime classifier
+        # that could not classify one day — and raising would throw away an
+        # otherwise usable fold over a single gap. Assigning a label would
+        # manufacture the attribution this gate tests, so the observation is
+        # dropped and the count is reported by the caller.
         if label is None:
-            raise RegimeRobustnessError(
-                "an observation carries no regime label; assigning one would "
-                "manufacture the attribution this gate tests"
-            )
+            continue
         key = str(label)
         if key not in REGIME_ROBUSTNESS_LABELS:
             raise RegimeRobustnessError(

@@ -121,9 +121,57 @@ class FoldResult:
     # is exactly the mistake calibration exists to avoid.
     predictions: list[float] = field(default_factory=list)
     actuals: list[float] = field(default_factory=list)
+    # A1: WHERE the fold sat, and under WHAT CONDITIONS its observations fell.
+    #
+    # `train_rows`/`validation_rows` say HOW MANY, never WHERE. X8 needs
+    # position to prove a fold stopped short of the sealed holdout, and a count
+    # cannot express that — a fold of 120 rows could sit anywhere.
+    #
+    # `regimes`/`events`/`sources` are one entry PER VALIDATION OBSERVATION,
+    # aligned index-for-index with `predictions` and `actuals`, so X3 can slice
+    # per regime and X4 can leave one event or source out at a time.
+    #
+    # An empty list means NO CONTEXT WAS RECORDED, which is why X3 and X4 report
+    # NOT_EVALUATED rather than inventing a single bucket. A list of the right
+    # length with `None` entries means the context was looked for and absent for
+    # those observations — a different and more useful fact.
+    train: list[int] = field(default_factory=list)
+    validation: list[int] = field(default_factory=list)
+    regimes: list[str | None] = field(default_factory=list)
+    events: list[str | None] = field(default_factory=list)
+    sources: list[str | None] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+    def context_problems(self) -> list[str]:
+        """Why this fold's recorded context cannot be trusted. Empty means clean.
+
+        THE ALIGNMENT IS THE WHOLE CONTRACT. A context list shorter than
+        `predictions` would silently misalign every observation after the gap,
+        and a per-regime comparison built on a misaligned slice is worse than no
+        comparison at all — it looks like evidence.
+        """
+        problems: list[str] = []
+        width = len(self.predictions)
+        for name in ("regimes", "events", "sources"):
+            values = getattr(self, name)
+            if values and len(values) != width:
+                problems.append(
+                    f"{name} has {len(values)} entries against {width} "
+                    f"predictions; a misaligned slice reads as evidence while "
+                    f"describing the wrong observations"
+                )
+        for name in ("train", "validation"):
+            window = getattr(self, name)
+            if window and len(window) != 2:
+                problems.append(
+                    f"{name} must be [start, end] absolute row indices, got "
+                    f"{len(window)} values"
+                )
+            if len(window) == 2 and window[0] > window[1]:
+                problems.append(f"{name} window {window} runs backwards")
+        return problems
 
 
 @dataclass
@@ -144,6 +192,20 @@ class TrainingRun:
     artifact_hash_basis: str = TRAINING_ARTIFACT_HASH_BASIS
     pipeline_version: str = TRAINING_PIPELINE_VERSION
     environment: dict[str, str] = field(default_factory=dict)
+    # A1/X8: THE SEAL, RECORDED RATHER THAN INFERRED.
+    #
+    # `build_walk_forward_folds` computed `holdout: [start, end]` and this class
+    # discarded it, so recovering where the sealed tail fell required a second
+    # file plus a guessed geometry. X8 measured that none of the four facts a
+    # seal needs were on disk; these are those four.
+    #
+    # NOT part of `run_hash()` — the hash identifies the MODEL (data, features,
+    # seed, hyperparameters, metrics), and recording where the holdout sat does
+    # not change which model was fitted. Adding it would invalidate every
+    # existing artifact hash for no gain in identity.
+    dataset_rows: int | None = None
+    geometry: dict[str, int] = field(default_factory=dict)
+    holdout: list[int] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -415,6 +477,9 @@ def train_baseline(
         parameters_by_fold.append(parameters)
         all_actual.append(validation_y)
         all_predicted.append(predicted)
+        # A1: the validation rows THEMSELVES, so the recorded context is aligned
+        # with the predictions by construction rather than by a later join.
+        validation_rows_slice = rows[validation_start:validation_end + 1]
         fold_results.append(FoldResult(
             fold_id=int(fold["fold_id"]),
             train_rows=int(train_x.shape[0]),
@@ -424,6 +489,11 @@ def train_baseline(
             metrics=_metrics(validation_y, predicted),
             predictions=[round(float(value), 10) for value in predicted],
             actuals=[round(float(value), 10) for value in validation_y],
+            train=[int(train_start), int(train_end)],
+            validation=[int(validation_start), int(validation_end)],
+            regimes=[getattr(row, "regime", None) for row in validation_rows_slice],
+            events=[getattr(row, "event_id", None) for row in validation_rows_slice],
+            sources=[getattr(row, "source_id", None) for row in validation_rows_slice],
         ))
 
     if not fold_results:
@@ -465,6 +535,14 @@ def train_baseline(
         metrics=pooled,
         artifact_hash=artifact_hash,
         environment=_environment(),
+        # A1/X8: the seal, recorded so it need never be guessed again.
+        dataset_rows=len(rows),
+        geometry={
+            "fold_sessions": int(geometry["fold_sessions"]),
+            "embargo_sessions": int(geometry["embargo_sessions"]),
+            "holdout_sessions": int(geometry["holdout_sessions"]),
+        },
+        holdout=[int(geometry["holdout"][0]), int(geometry["holdout"][1])],
     )
 
 

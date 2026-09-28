@@ -115,9 +115,27 @@ class GroupingTests(unittest.TestCase):
         with self.assertRaises(RegimeRobustnessError):
             group_by_regime([1.0], [1.0], ["euphoria"])
 
-    def test_a_missing_label_raises(self):
-        with self.assertRaises(RegimeRobustnessError):
-            group_by_regime([1.0], [1.0], [None])
+    def test_an_unobserved_label_is_excluded_not_fatal(self):
+        """CONTRACT CHANGED BY A1, deliberately.
+
+        This used to raise, and that was right when a fold either carried every
+        label or none. A1 records per-observation context, so PARTIAL context is
+        now possible — a classifier that could not classify one day — and raising
+        would discard an otherwise usable fold over a single gap.
+
+        The observation is EXCLUDED rather than assigned: assigning one would
+        manufacture the attribution this gate exists to test, which is the
+        synthetic-bucket failure A1 was designed to avoid.
+        """
+        cells = group_by_regime([1.0, 2.0], [1.0, 2.0], [None, "bullish"])
+        self.assertNotIn("None", cells)
+        self.assertIn("bullish", cells)
+        self.assertEqual(cells["bullish"]["observations"], 1)
+
+    def test_a_wholly_unobserved_fold_yields_no_cells(self):
+        # And with nothing classified there is nothing to compare, which the
+        # caller reports as NOT_EVALUATED rather than as agreement.
+        self.assertEqual(group_by_regime([1.0], [1.0], [None]), {})
 
     def test_mismatched_lengths_raise(self):
         with self.assertRaises(RegimeRobustnessError):
