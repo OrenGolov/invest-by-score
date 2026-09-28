@@ -9388,3 +9388,197 @@ def _validate_release_snapshot_config() -> None:
 
 
 _validate_release_snapshot_config()
+
+
+# --- X10: honest gate report -----------------------------------------------------
+# "If evidence is insufficient, report FORECASTING RELEASE: NOT APPROVED with the
+# reason and the next action. 'Gate not met' is a valid, successful engineering
+# outcome."
+#
+# THE DECIDING MEASUREMENT. Running X1-X9 against the shipped data:
+#
+#     X1  OOS validation        NOT_APPROVED
+#     X2  calibration           NOT_EVALUATED    IN_SAMPLE_ONLY
+#     X3  regime robustness     NOT_EVALUATED    NO_REGIME_LABELS
+#     X4  event robustness      NOT_EVALUATED    NO_EVENT_ATTRIBUTION
+#     X5  feature ablation      NOT_EVALUATED
+#     X6  temporal robustness   NOT_EVALUATED    HORIZONS_MISSING
+#     X7  multiple testing      FAILS_CORRECTION
+#     X8  sealed holdout        NOT_EVALUATED    NO_RECORDED_BOUNDS
+#     X9  release snapshot      FROZEN
+#
+# SIX OF NINE GATES COULD NOT RUN AT ALL. One pass-like verdict exists (X9
+# FROZEN), and it says only that the tree is frozen - not that anything in it
+# works. So the release verdict is NOT_APPROVED, and X10's job is to say so in a
+# way that cannot be misread as "nearly there".
+#
+# THE TRAP X10 EXISTS TO CLOSE. Only TWO gates carry an explicit failure verdict.
+# A reading of "no FAIL means ship it" would approve SEVEN OF NINE:
+#
+#     gates with an explicit failure verdict            2 of 9
+#     gates a 'no FAIL = pass' rule would approve       7 of 9   (78%)
+#     gates that could not run at all                   6 of 9
+#
+# 78% GREEN ON A SYSTEM WHERE TWO THIRDS OF THE EVIDENCE DOES NOT EXIST. This is
+# the NOT_EVALUATED-as-pass error the whole project treats as load-bearing, and at
+# the release gate it is the most expensive place to make it. So X10 counts
+# NOT_EVALUATED as a BLOCKER, never as a pass, and requires every gate to reach a
+# genuine pass before approval.
+#
+# THE SECOND FINDING: FIVE OF THE SIX BLOCKERS ARE ONE DEFECT. The training fold
+# is a thin record. MEASURED, it carries exactly these keys:
+#
+#     actuals, fold_id, metrics, predictions, train_end_time, train_rows,
+#     validation_rows, validation_start_time
+#
+# and none of what the gates need:
+#
+#     regime labels (X3)              'regimes'      absent
+#     event ids (X4)                  'events'       absent
+#     sources (X4)                    'sources'      absent
+#     absolute fold indices (X8)      'validation'   absent
+#     per-feature-set scores (X5)     'ablation'     absent
+#
+# X6 is the same defect at run level: all 8 runs train the SINGLE horizon '20d',
+# so there is no horizon spread to compare. Only X2's blocker is different in
+# kind - it needs a holdout split, which X8 measured is not currently
+# constructible on 406 rows.
+#
+# So X10 reports the RICHER FOLD RECORD as the common prerequisite AND each gate's
+# own blocker. A report naming one fix would understate the work; one naming six
+# independent fixes would overstate it.
+#
+# X10 IS A REPORT, NOT A PROMOTION. It states what the evidence supports. Nothing
+# here blocks a trade, because nothing in this system trades - the execution path
+# does not exist, which is itself part of the honest answer.
+HONEST_GATE_VERSION = "honest-gate-v1"
+
+# The gates a forecasting release must clear, in roadmap order. Named as data so a
+# gate cannot be quietly dropped from the release criteria: MEASURED, the CI gate
+# list fell eight behind when it was maintained by hand (see the workflow note).
+RELEASE_GATES: tuple[str, ...] = (
+    "X1_oos_validation",
+    "X2_calibration",
+    "X3_regime_robustness",
+    "X4_event_robustness",
+    "X5_feature_ablation",
+    "X6_temporal_robustness",
+    "X7_multiple_testing",
+    "X8_sealed_holdout",
+    "X9_release_snapshot",
+)
+
+# NOT_EVALUATED IS A BLOCKER, NOT A PASS. The single most important line in X10.
+# MEASURED, treating it as a pass would approve 7 of 9 gates on a system where 6
+# could not run.
+GATE_UNEVALUATED_BLOCKS_RELEASE = True
+
+# Every gate must reach a genuine pass. No quorum, no weighting, no "most of them
+# are fine": a release gate that can be satisfied by a majority is not a gate.
+GATE_REQUIRES_ALL = True
+
+# A NOT_APPROVED report must name, per blocking gate, WHY it blocks and WHAT WOULD
+# SETTLE IT. "Not approved" without a next action is a verdict nobody can act on,
+# and X10's whole point is that a negative result is a useful one.
+GATE_REQUIRES_NEXT_ACTION = True
+
+# ...and the report must state the COMMON prerequisite where one exists. MEASURED,
+# five of six blockers are the same thin-fold defect, so six independent action
+# items would overstate the work by 5x.
+GATE_REPORTS_COMMON_BLOCKER = True
+
+# "Gate not met" is a SUCCESSFUL outcome of the reporting machinery. The script
+# exits 0 having correctly reported NOT_APPROVED; it exits non-zero only when the
+# report itself is malformed. Conflating "the release is not approved" with "the
+# check crashed" would make an honest negative indistinguishable from a bug.
+GATE_NOT_MET_IS_A_VALID_OUTCOME = True
+
+# Verdicts. Only two, deliberately: a release is approved or it is not, and every
+# gradation ("nearly", "provisionally") is a place for a negative to be read as a
+# positive.
+RELEASE_APPROVED = "APPROVED"
+RELEASE_NOT_APPROVED = "NOT_APPROVED"
+HONEST_GATE_VERDICTS: tuple[str, ...] = (
+    RELEASE_NOT_APPROVED,
+    RELEASE_APPROVED,
+)
+
+# Per-gate states in the report. PASSED / BLOCKED / UNEVALUATED are distinct
+# because they need different work: BLOCKED means the gate ran and said no,
+# UNEVALUATED means it could not run, and the second is the shipped majority.
+GATE_PASSED = "PASSED"
+GATE_BLOCKED = "BLOCKED"
+GATE_UNEVALUATED = "UNEVALUATED"
+GATE_STATES: tuple[str, ...] = (GATE_UNEVALUATED, GATE_BLOCKED, GATE_PASSED)
+
+# X10 reports; the registry promotes. Consistent with X1-X9.
+HONEST_GATE_BLOCKS_TRADES = False
+
+
+def _validate_honest_gate_config() -> None:
+    """Import-time guard for the X10 contract."""
+    if not GATE_UNEVALUATED_BLOCKS_RELEASE:
+        raise ValueError(
+            "NOT_EVALUATED must block a release: MEASURED, only 2 of 9 gates "
+            "carry an explicit failure verdict, so counting the unevaluated as "
+            "passes would approve 7 of 9 on a system where 6 gates could not "
+            "run at all. Absence of evidence is not evidence of safety"
+        )
+    if not GATE_REQUIRES_ALL:
+        raise ValueError(
+            "every release gate must pass: a gate satisfiable by a majority of "
+            "gates is not a gate"
+        )
+    if not GATE_REQUIRES_NEXT_ACTION:
+        raise ValueError(
+            "a NOT_APPROVED report must name what would settle each blocker; "
+            "'not approved' with no next action is a verdict nobody can act on"
+        )
+    if not GATE_REPORTS_COMMON_BLOCKER:
+        raise ValueError(
+            "the report must name a common prerequisite where one exists: "
+            "MEASURED, five of six blockers are the same thin-fold defect, so "
+            "six independent action items would overstate the work by 5x"
+        )
+    if not GATE_NOT_MET_IS_A_VALID_OUTCOME:
+        raise ValueError(
+            "'gate not met' is a successful engineering outcome: conflating it "
+            "with a crash makes an honest negative indistinguishable from a bug"
+        )
+    if len(set(RELEASE_GATES)) != len(RELEASE_GATES):
+        raise ValueError("duplicate release gate")
+    if len(RELEASE_GATES) < 9:
+        raise ValueError(
+            f"only {len(RELEASE_GATES)} release gates are declared; X1-X9 all "
+            f"gate a forecasting release and a hand-maintained list is exactly "
+            f"what fell eight behind in CI"
+        )
+    if len(set(HONEST_GATE_VERDICTS)) != len(HONEST_GATE_VERDICTS):
+        raise ValueError("duplicate honest-gate verdict")
+    if HONEST_GATE_VERDICTS[0] != RELEASE_NOT_APPROVED:
+        raise ValueError(
+            "NOT_APPROVED must be the weakest verdict, and the default: a "
+            "release gate that defaults to approved is not fail-closed"
+        )
+    if RELEASE_APPROVED == RELEASE_NOT_APPROVED:
+        raise ValueError("the two release verdicts must stay distinct")
+    if len(set(GATE_STATES)) != len(GATE_STATES):
+        raise ValueError("duplicate gate state")
+    if GATE_STATES[0] != GATE_UNEVALUATED:
+        raise ValueError(
+            "UNEVALUATED must be the weakest gate state: it is the shipped "
+            "majority and must never outrank a genuine pass"
+        )
+    if GATE_UNEVALUATED == GATE_BLOCKED:
+        raise ValueError(
+            "'the gate ran and said no' and 'the gate could not run' are "
+            "different facts needing different work, and MEASURED six of nine "
+            "gates are the second"
+        )
+    if GATE_PASSED in (GATE_BLOCKED, GATE_UNEVALUATED):
+        raise ValueError("a pass must be distinguishable from a non-pass")
+    if HONEST_GATE_BLOCKS_TRADES:
+        raise ValueError("X10 reports; the registry promotes")
+
+
+_validate_honest_gate_config()
