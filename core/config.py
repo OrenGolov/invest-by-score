@@ -9064,3 +9064,171 @@ def _validate_multiple_testing_config() -> None:
 
 
 _validate_multiple_testing_config()
+
+
+# --- X8: sealed holdout ----------------------------------------------------------
+# "Maintain an untouched final period. Once opened, do not use it for further
+# model selection." MEASURED, the final period IS untouched - and that is an
+# accident of arithmetic, not a seal. Nothing records where the seal is, nothing
+# records whether it was opened, and the run that respected it CANNOT BE
+# REPRODUCED.
+#
+# THE FIRST MEASUREMENT: THE SEAL IS NOT RECORDED ANYWHERE.
+# `build_walk_forward_folds` computes `holdout: [start, end]` and
+# `train_baseline` DISCARDS IT. Of the four facts needed to verify a seal, the
+# run ledger carries none:
+#
+#     run records holdout bounds           NO
+#     run records dataset row count        NO
+#     run records fold geometry            NO
+#     fold records absolute row indices    NO
+#
+# Reconstructing the seal for the 8 shipped runs took the row count from a
+# SECOND file (`training_datasets.jsonl`: 406 rows) plus GUESSING the geometry
+# from `train_rows`. It resolves to fold=120, embargo=60, holdout=60, which
+# reproduces the ledger's single fold exactly:
+#
+#     dataset rows                    406
+#     fold 0   train rows   0..119    validation rows 180..299
+#     HOLDOUT               rows 346..405   (60 rows, 14.8% of the data)
+#     gap between validation and holdout      46 rows
+#
+# So the tail was never read. But a seal that can only be recovered by guessing
+# the geometry is not auditable, and "we think nothing touched it" is not the
+# claim X8 is supposed to support.
+#
+# THE SECOND MEASUREMENT, AND THE REASON X8 CANNOT PASS: THE SHIPPED RUNS ARE
+# UNREPRODUCIBLE. F2 (34bd464, 2026-09-19) added the 252-session horizon. The
+# ledger was written 2026-09-18, under a max horizon of 60.
+# `build_walk_forward_folds` requires `embargo >= max label horizon`, so the
+# geometry that MADE the ledger is now ILLEGAL:
+#
+#     ledger geometry (406 rows, fold=120, embargo=60, holdout=60)
+#         -> REJECTED: embargo (60) must be >= the max label horizon (252)
+#     scripts/train.py shipped defaults (fold=80, embargo=60, holdout=60)
+#         -> REJECTED for the same reason
+#
+# `scripts/train.py` cannot regenerate its own ledger, and its defaults were
+# never updated when F2 moved the horizon. An immutable holdout whose run cannot
+# be re-executed is a record of a measurement nobody can check.
+#
+# THE THIRD MEASUREMENT: NO LEGAL GEOMETRY FITS THE DATA AT ALL. With the
+# embargo pinned at >= 252, every candidate exceeds the 406 rows available:
+#
+#     fold= 60  embargo=252  holdout= 60  -> needs  432 rows   short by  26
+#     fold= 60  embargo=252  holdout=126  -> needs  498 rows   short by  92
+#     fold=120  embargo=252  holdout= 60  -> needs  552 rows   short by 146
+#     fold=252  embargo=252  holdout=126  -> needs  882 rows   short by 476
+#
+# The last line is the CURRENT DEFAULT geometry. The 252-session horizon makes a
+# walk-forward fit WITH a sealed holdout impossible on the present dataset. The
+# honest X8 verdict is therefore NOT_EVALUATED with a named shortfall, not
+# SEALED. Reporting SEALED because the tail happens to be untouched would credit
+# the system for a property it cannot demonstrate and cannot re-establish.
+SEALED_HOLDOUT_VERSION = "sealed-holdout-v1"
+
+# THE SEAL MUST BE RECORDED, not inferred. A holdout whose bounds live only in a
+# discarded local variable cannot be audited: MEASURED, recovering it for the
+# shipped runs required a second file and a guessed geometry.
+HOLDOUT_RECORDS_BOUNDS = True
+
+# ...and the geometry that produced it, because the bounds alone do not say
+# whether they were legal. MEASURED, the shipped geometry is illegal TODAY and
+# nothing on disk revealed which geometry was used.
+HOLDOUT_RECORDS_GEOMETRY = True
+
+# OPENING THE HOLDOUT IS A ONE-WAY EVENT. Once read, the period stops being a
+# clean estimate of out-of-sample performance, so the count of openings is part
+# of the record. Zero openings is the only state in which a holdout result may
+# be quoted as unseen.
+HOLDOUT_MAX_OPENINGS = 1
+
+# An opening must name WHO opened it and WHY. "Once opened, do not use it for
+# further model selection" is unenforceable if the opening is anonymous.
+HOLDOUT_OPENING_REQUIRES_REASON = True
+
+# A holdout read more than once, or read and then used for selection, is
+# BURNED: the number it produces is no longer an unseen estimate. This state
+# exists so the system can say so rather than quietly continuing to quote it.
+HOLDOUT_BURNED_IS_TERMINAL = True
+
+# The embargo between the last validation row and the holdout must still cover
+# the longest label horizon, or a label inside the holdout was computed from
+# prices the final fold trained on. MEASURED, the shipped gap is 46 rows
+# against a 252-session horizon - the seal leaks by 206 sessions even though the
+# tail itself was never read.
+HOLDOUT_REQUIRES_EMBARGO = True
+
+# Verdicts, weakest to strongest. The order IS the precedence.
+HOLDOUT_NOT_EVALUATED = "NOT_EVALUATED"   # the seal cannot be established
+HOLDOUT_BURNED = "BURNED"                 # opened twice, or used for selection
+HOLDOUT_OPENED = "OPENED"                 # read once, legitimately, now spent
+HOLDOUT_SEALED = "SEALED"                 # recorded, embargoed, never read
+HOLDOUT_VERDICTS: tuple[str, ...] = (
+    HOLDOUT_NOT_EVALUATED,
+    HOLDOUT_BURNED,
+    HOLDOUT_OPENED,
+    HOLDOUT_SEALED,
+)
+
+# X8 reports; the registry promotes. Consistent with X1-X7.
+HOLDOUT_BLOCKS_TRADES = False
+
+
+def _validate_sealed_holdout_config() -> None:
+    """Import-time guard for the X8 contract."""
+    if not HOLDOUT_RECORDS_BOUNDS:
+        raise ValueError(
+            "the holdout bounds must be recorded: MEASURED, the 8 shipped runs "
+            "carry none of the four facts needed to verify the seal, and "
+            "recovering it required a second file plus a guessed geometry"
+        )
+    if not HOLDOUT_RECORDS_GEOMETRY:
+        raise ValueError(
+            "the geometry must be recorded alongside the bounds: MEASURED, the "
+            "geometry that produced the ledger is ILLEGAL today (embargo 60 "
+            "against a 252-session horizon) and nothing on disk revealed it"
+        )
+    if HOLDOUT_MAX_OPENINGS != 1:
+        raise ValueError(
+            f"a sealed holdout may be opened exactly once, got "
+            f"{HOLDOUT_MAX_OPENINGS}; a period read twice is no longer an "
+            f"unseen estimate of anything"
+        )
+    if not HOLDOUT_OPENING_REQUIRES_REASON:
+        raise ValueError(
+            "'once opened, do not use it for further model selection' is "
+            "unenforceable if the opening is anonymous"
+        )
+    if not HOLDOUT_BURNED_IS_TERMINAL:
+        raise ValueError(
+            "a burned holdout cannot be un-burned: the number it produces has "
+            "already informed selection and is no longer out-of-sample"
+        )
+    if not HOLDOUT_REQUIRES_EMBARGO:
+        raise ValueError(
+            "the holdout needs an embargo covering the longest label horizon, "
+            "or a label inside it was computed from prices the last fold "
+            "trained on: MEASURED, the shipped gap is 46 rows against 252"
+        )
+    if len(set(HOLDOUT_VERDICTS)) != len(HOLDOUT_VERDICTS):
+        raise ValueError("duplicate holdout verdict")
+    if HOLDOUT_VERDICTS[0] != HOLDOUT_NOT_EVALUATED:
+        raise ValueError("NOT_EVALUATED must be the weakest verdict")
+    if HOLDOUT_VERDICTS[-1] != HOLDOUT_SEALED:
+        raise ValueError("SEALED must be the strongest verdict")
+    if HOLDOUT_BURNED == HOLDOUT_NOT_EVALUATED:
+        raise ValueError(
+            "'the seal was broken' and 'the seal could not be established' are "
+            "different facts: the first is a spent holdout, the second is an "
+            "unverifiable one, and MEASURED the shipped runs are the second"
+        )
+    if HOLDOUT_SEALED == HOLDOUT_OPENED:
+        raise ValueError(
+            "a holdout that has been read once is spent, not sealed"
+        )
+    if HOLDOUT_BLOCKS_TRADES:
+        raise ValueError("X8 reports; the registry promotes")
+
+
+_validate_sealed_holdout_config()
