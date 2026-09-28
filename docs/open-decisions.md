@@ -160,6 +160,30 @@ decides nothing.
    measurement reads a gitignored path, the check is measuring the checkout —
    test it with that data both PRESENT and ABSENT before trusting it.
 
+**RECURRED A THIRD TIME 2026-09-28, in X10** — and this one had nothing to do
+with gitignored data, which is what makes it the useful instance.
+`check_honest_gate.py` asserted the gate counts measured in my working tree:
+
+    working tree (edited)   X9 DIRTY   -> 0 gates pass, 3 explicit non-passes
+    fresh clone (clean)     X9 FROZEN  -> 1 gate passes,  2 explicit non-passes
+
+X9 is the one gate whose verdict depends on the checkout rather than the model —
+that is exactly what it was built to detect — so any count including it asserts a
+property of the working directory. The clean-clone run caught it before CI did,
+one commit after it was pushed.
+
+**So the rule generalises past its original cause.** The pattern is not
+"gitignored data"; it is ASSERTING ANYTHING THAT VARIES BETWEEN CHECKOUTS —
+untracked files, a dirty tree, local caches, machine state. Three instances in
+two days (`9e7852d`, `2aa15f2`, `755e94b`), each with a different surface and one
+root:
+
+5. Before asserting a count or a verdict, ask WHAT WOULD CHANGE THIS NUMBER ON
+   ANOTHER MACHINE. If the answer is anything other than the tracked contents of
+   the repository, assert the checkout-independent part and handle the rest
+   separately. X10 now asserts the eight EVIDENCE gates (which read only tracked
+   ledgers) and checks X9 only against its two legitimate states.
+
 ## 7. Collection cadence is manual — DECISION
 
 **Raised:** Sprint L (2026-09). **Owner:** operator.
