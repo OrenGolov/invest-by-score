@@ -27,6 +27,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from core.config import (  # noqa: E402
+    LABEL_HORIZON_SESSIONS,
     OUTCOME_LABEL_VERSION,
     TRAINING_DEFAULT_SEED,
 )
@@ -52,15 +53,39 @@ def _load_frame(ticker: str) -> pd.DataFrame:
     return frame
 
 
+# A2: derived from the label horizons, so a horizon change cannot strand the
+# defaults again. One fold plus a sealed tail needs 2*fold + embargo + holdout
+# rows; `--rows` is set above that with room for a second fold.
+_MAX_HORIZON = max(LABEL_HORIZON_SESSIONS.values())
+# 1,464 rows is the SMALLEST count that yields TWO walk-forward folds AND a
+# holdout embargoed against the 252-session horizon at this geometry. Below it
+# the gap to the tail is a remainder short of the horizon and X8 reports
+# NOT_EVALUATED; at 1,164 one fold seals, and 1,464 buys the second fold.
+# MEASURED by sweeping the fold loop, not guessed.
+_DEFAULT_ROWS = 1464
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ticker", default="NVDA")
     parser.add_argument("--estimator", default="ridge", choices=BASELINE_ESTIMATORS)
     parser.add_argument("--all", action="store_true", help="train every baseline")
     parser.add_argument("--seed", type=int, default=TRAINING_DEFAULT_SEED)
-    parser.add_argument("--rows", type=int, default=600, help="prediction times to use")
-    parser.add_argument("--fold-sessions", type=int, default=80)
-    parser.add_argument("--embargo-sessions", type=int, default=60)
+    # A2: THE DEFAULTS ARE DERIVED FROM THE HORIZON, NOT HARDCODED.
+    #
+    # These were fold=80 / embargo=60 / holdout=60, set when the longest label
+    # horizon was 60 sessions. F2 raised it to 252 and
+    # `build_walk_forward_folds` requires `embargo >= max horizon`, so the
+    # script HAS BEEN UNABLE TO RUN WITH ITS OWN DEFAULTS since 2026-09-19.
+    #
+    # Deriving them means the next horizon change cannot strand them again.
+    # `fold > horizon` is required for a sealed holdout, not merely preferred:
+    # A1 measured that the gap the walk-forward loop leaves before the tail is a
+    # remainder bounded by `fold_sessions - 4`, so a fold at or below the horizon
+    # can never embargo the holdout.
+    parser.add_argument("--rows", type=int, default=_DEFAULT_ROWS, help="prediction times to use")
+    parser.add_argument("--fold-sessions", type=int, default=_MAX_HORIZON + 48)
+    parser.add_argument("--embargo-sessions", type=int, default=_MAX_HORIZON)
     parser.add_argument("--holdout-sessions", type=int, default=60)
     parser.add_argument("--persist", action="store_true", help="append to the run ledger")
     parser.add_argument("--register-trial", action="store_true")

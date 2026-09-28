@@ -48,11 +48,12 @@ import json
 import platform
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 
 from core.config import (
+    LABEL_HORIZON_SESSIONS,
     BACKTEST_EMBARGO_SESSIONS,
     BACKTEST_FOLD_SESSIONS,
     BACKTEST_HOLDOUT_SESSIONS,
@@ -407,6 +408,107 @@ def training_request_problems(
     return problems
 
 
+def rows_per_date(rows: Sequence[Any]) -> float:
+    """Average rows per distinct prediction time. 1.0 for a single-ticker series.
+
+    THE CONVERSION FACTOR between the geometry (rows) and the horizon (sessions).
+    A panel with 14 tickers packs 14 rows into each date, so a row count means
+    one fourteenth of the calendar distance it appears to.
+    """
+    if not rows:
+        return 1.0
+    dates = {getattr(row, "prediction_time", None) for row in rows}
+    dates.discard(None)
+    if not dates:
+        return 1.0
+    return len(rows) / len(dates)
+
+
+def required_embargo_rows(rows: Sequence[Any], horizon: str) -> int:
+    """The embargo, IN ROWS, that covers `horizon` for this dataset's density.
+
+    MEASURED, the scaling is stark and is the reason the default cannot simply be
+    raised once:
+
+        tickers   20d horizon   60d        252d
+              1        20 rows    60       252
+             14       280 rows   840     3,528
+             50     1,000 rows 3,000    12,600
+
+    A panel therefore needs an embargo proportional to BOTH the horizon and the
+    universe size, which is why this is computed rather than configured.
+    """
+    sessions = LABEL_HORIZON_SESSIONS.get(horizon)
+    if sessions is None:
+        raise TrainingError(
+            f"unknown label horizon {horizon!r}; its embargo cannot be computed"
+        )
+    density = rows_per_date(rows)
+    return int(-(-sessions * density // 1))  # ceil
+
+
+def minimum_rows_for(rows: Sequence[Any], horizon: str, fold_rows: int, holdout_rows: int) -> int:
+    """Rows needed for one fold plus a sealed tail at this density and horizon."""
+    return 2 * int(fold_rows) + required_embargo_rows(rows, horizon) + int(holdout_rows)
+
+
+def embargo_problems(
+    rows: Sequence[Any],
+    folds: Sequence[Mapping[str, Any]],
+    horizon: str,
+) -> list[str]:
+    """Whether each fold's train/validation separation covers the label horizon.
+
+    **THE GEOMETRY COUNTS ROWS; THE HORIZON IS IN SESSIONS.** A panel dataset has
+    one row per (ticker, prediction_time), so an embargo of N rows spans only
+    N/tickers distinct dates. MEASURED, with 14 tickers a 252-ROW embargo is 18
+    DATES — short of even the 20d horizon.
+
+    This checks the separation that actually matters: the CALENDAR distance
+    between the last training observation and the first validation observation,
+    against the horizon's session count. A label computed from prices inside the
+    training window is leakage however the geometry was specified.
+    """
+    # pandas imported lazily, as elsewhere in this module, so importing
+    # core.training does not pull the pandas/provider surface.
+    import pandas as pd
+
+    problems: list[str] = []
+    needed = LABEL_HORIZON_SESSIONS.get(horizon)
+    if needed is None:
+        return [f"unknown label horizon {horizon!r}; its separation cannot be checked"]
+    for fold in folds or []:
+        train_end = fold.get("train", [None, None])[1]
+        validation_start = fold.get("validation", [None, None])[0]
+        if train_end is None or validation_start is None:
+            continue
+        if not (0 <= train_end < len(rows)) or not (0 <= validation_start < len(rows)):
+            continue
+        try:
+            end = pd.Timestamp(rows[train_end].prediction_time)
+            start = pd.Timestamp(rows[validation_start].prediction_time)
+        except Exception:
+            problems.append(
+                f"fold {fold.get('fold_id')}: prediction times are not timestamps, "
+                f"so the embargo cannot be verified"
+            )
+            continue
+        # Sessions are ~252/year, so a session is ~1.45 calendar days. Using
+        # CALENDAR days with that conversion is conservative in the right
+        # direction: it demands at least as much separation as the horizon.
+        separation_days = (start - end).days
+        needed_days = int(needed * 365.0 / 252.0)
+        if separation_days < needed_days:
+            problems.append(
+                f"fold {fold.get('fold_id')}: {separation_days} calendar days "
+                f"separate the last training row from the first validation row, "
+                f"against the {needed} sessions (~{needed_days} days) the "
+                f"{horizon} label needs. The geometry's embargo is counted in "
+                f"ROWS, and a panel dataset packs many tickers into one date"
+            )
+    return problems
+
+
 def train_baseline(
     dataset,
     estimator: str = "ridge",
@@ -457,6 +559,19 @@ def train_baseline(
             f"rows at this geometry — a recent listing or a short cached frame "
             f"will not have them."
         ) from exc
+
+    # A2: THE EMBARGO IS VERIFIED IN DATES BEFORE ANY FOLD IS FITTED.
+    #
+    # The geometry's embargo is counted in ROWS while the horizon is in SESSIONS,
+    # and a panel dataset packs many tickers into one date. Fitting first and
+    # checking later would produce metrics from leaked labels and then discard
+    # them, which is slower and invites someone to read the numbers anyway.
+    leakage = embargo_problems(rows, geometry["folds"], dataset.target_horizon)
+    if leakage:
+        raise TrainingError(
+            "the walk-forward embargo does not cover the label horizon in "
+            "calendar terms: " + "; ".join(leakage)
+        )
 
     fold_results: list[FoldResult] = []
     parameters_by_fold: list[dict[str, Any]] = []
