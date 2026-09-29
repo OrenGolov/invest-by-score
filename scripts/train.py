@@ -28,11 +28,15 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from core.config import (  # noqa: E402
     LABEL_HORIZON_SESSIONS,
+    TEMPORAL_HORIZONS,
     OUTCOME_LABEL_VERSION,
     TRAINING_DEFAULT_SEED,
 )
+from core.temporal_robustness import evaluate_temporal_robustness  # noqa: E402
 from core.training import (  # noqa: E402
     BASELINE_ESTIMATORS,
+    horizon_metrics,
+    train_across_horizons,
     persist_training_run,
     train_baseline,
 )
@@ -65,6 +69,59 @@ _MAX_HORIZON = max(LABEL_HORIZON_SESSIONS.values())
 _DEFAULT_ROWS = 1464
 
 
+def _train_horizons(args, frame, folds) -> int:
+    """A3: one run per X6 horizon, then the temporal-robustness verdict.
+
+    ONE DATASET PER HORIZON. The label decides which rows have a MATURED
+    outcome, so a 120d horizon must drop 120 more sessions of tail than a 1d
+    one. Sharing rows would either reuse an unmatured label or silently trim the
+    short horizons to the longest one's usable window.
+    """
+    ticker = args.ticker.upper()
+    datasets = {}
+    print(f"building {len(TEMPORAL_HORIZONS)} datasets, one per horizon")
+    for horizon in TEMPORAL_HORIZONS:
+        sessions = LABEL_HORIZON_SESSIONS[horizon]
+        usable = frame.iloc[: -(sessions + 5)]
+        times = [
+            stamp.strftime("%Y-%m-%d %H:%M:%S")
+            for stamp in usable.index[-args.rows:]
+        ]
+        dataset = build_training_dataset({ticker: times}, {ticker: frame}, target_horizon=horizon)
+        datasets[horizon] = dataset
+        print(f"  {horizon:5s} {len(dataset):5d} rows  excluded {len(dataset.excluded):3d}")
+
+    outcome = train_across_horizons(
+        datasets, estimator=args.estimator, seed=args.seed, **folds
+    )
+    for horizon, reason in sorted(outcome["failed"].items()):
+        print(f"  FAILED {horizon}: {reason[:120]}")
+
+    metrics = horizon_metrics(outcome["runs"])
+    print()
+    print(f"{'horizon':10} {'dir_acc':>8} {'observations':>13}")
+    for horizon in TEMPORAL_HORIZONS:
+        entry = metrics.get(horizon)
+        if entry is None:
+            print(f"{horizon:10} {'MISSING':>8} {'—':>13}")
+        else:
+            print(
+                f"{horizon:10} {entry['directional_accuracy']:>8.3f} "
+                f"{entry['observations']:>13d}"
+            )
+
+    if args.persist:
+        for run in outcome["runs"].values():
+            persist_training_run(run)
+
+    report = evaluate_temporal_robustness(metrics)
+    print()
+    print(f"X6 temporal robustness: {report['verdict']}")
+    if report.get("reason"):
+        print(f"  {report['reason']}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ticker", default="NVDA")
@@ -87,6 +144,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--fold-sessions", type=int, default=_MAX_HORIZON + 48)
     parser.add_argument("--embargo-sessions", type=int, default=_MAX_HORIZON)
     parser.add_argument("--holdout-sessions", type=int, default=60)
+    parser.add_argument(
+        "--horizons",
+        action="store_true",
+        help=(
+            "train one run per X6 horizon (1d/5d/20d/60d/120d) and report "
+            "temporal robustness; each horizon gets its OWN dataset, because a "
+            "horizon's label decides which rows have a matured outcome"
+        ),
+    )
     parser.add_argument("--persist", action="store_true", help="append to the run ledger")
     parser.add_argument("--register-trial", action="store_true")
     parser.add_argument("--hypothesis", default="")
@@ -113,6 +179,9 @@ def main(argv: list[str] | None = None) -> int:
         "embargo_sessions": args.embargo_sessions,
         "holdout_sessions": args.holdout_sessions,
     }
+
+    if args.horizons:
+        return _train_horizons(args, frame, folds)
 
     trial_id = ""
     if args.register_trial:

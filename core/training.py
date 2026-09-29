@@ -661,6 +661,86 @@ def train_baseline(
     )
 
 
+def horizon_metrics(runs_by_horizon: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    """Pooled out-of-sample metrics per horizon, in the shape X6 consumes.
+
+    A3. X6 asks whether an edge holds ACROSS horizons, and reported
+    HORIZONS_MISSING because every run in the ledger trained the single `20d`
+    target. It needs `{horizon: {"directional_accuracy": x, "observations": n}}`.
+
+    Directional accuracy is horizon-agnostic — computed from the SIGN of the
+    forward return, not from `label_up`, which the label builder only emits for
+    `20d`. So a horizon needs no special label support to be compared.
+
+    A horizon whose run FAILED is omitted rather than recorded as zero: X6
+    distinguishes MISSING from "showed no edge", and a 0.0 accuracy would claim
+    the second where the truth is the first.
+    """
+    metrics: dict[str, dict[str, Any]] = {}
+    for horizon, run in (runs_by_horizon or {}).items():
+        if run is None:
+            continue
+        pooled = run.metrics if hasattr(run, "metrics") else (run or {}).get("metrics")
+        if not pooled:
+            continue
+        accuracy = pooled.get("directional_accuracy")
+        observations = pooled.get("observations")
+        if accuracy is None or observations is None:
+            continue
+        metrics[str(horizon)] = {
+            "directional_accuracy": float(accuracy),
+            "observations": int(observations),
+        }
+    return metrics
+
+
+def train_across_horizons(
+    datasets_by_horizon: Mapping[str, Any],
+    estimator: str = "ridge",
+    seed: int = TRAINING_DEFAULT_SEED,
+    *,
+    fold_sessions: int | None = None,
+    embargo_sessions: int | None = None,
+    holdout_sessions: int | None = None,
+    registry: FeatureRegistry | None = None,
+) -> dict[str, Any]:
+    """Train one run per horizon on that horizon's own dataset.
+
+    ONE DATASET PER HORIZON, not one dataset scored several ways: the label — and
+    therefore which rows have a MATURED outcome — differs per horizon. A 252d
+    label needs 252 more sessions of future than a 1d label, so sharing rows
+    across horizons would either leak (reusing an unmatured label) or silently
+    drop the longest horizon's newest rows from the others.
+
+    Returns `{horizon: TrainingRun}` for the horizons that trained, and records
+    the failures separately under `"failed"`. A horizon that could not train is
+    NOT the same as one that trained and showed nothing.
+    """
+    trained: dict[str, Any] = {}
+    failed: dict[str, str] = {}
+    for horizon in sorted(datasets_by_horizon or {}):
+        dataset = datasets_by_horizon[horizon]
+        if dataset is None:
+            failed[horizon] = "no dataset was built for this horizon"
+            continue
+        try:
+            trained[horizon] = train_baseline(
+                dataset,
+                estimator=estimator,
+                seed=seed,
+                fold_sessions=fold_sessions,
+                embargo_sessions=embargo_sessions,
+                holdout_sessions=holdout_sessions,
+                registry=registry,
+            )
+        except TrainingError as error:
+            # An expected, ordinary outcome: a long horizon may not fit the
+            # available history at this geometry. Recording WHY keeps that
+            # distinguishable from "trained and found no edge".
+            failed[horizon] = str(error)
+    return {"runs": trained, "failed": failed}
+
+
 def _hyperparameters(estimator: str, seed: int) -> dict[str, Any]:
     """The hyperparameters a run used, recorded for the trial registry."""
     if estimator in _PURE_BASELINES:
