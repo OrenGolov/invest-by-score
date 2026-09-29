@@ -135,7 +135,7 @@ Sep 18, so a longer horizon has not matured. That is PIT behaviour, not a defect
 classifier problem rather than a join problem. A hit rate built on a lexicon that
 is wrong one time in six has a noise floor no amount of extra data will lower.
 
-## 5. Cluster exposure is not measured — PARKED
+## 5. Cluster exposure — BUILT in B4 (was PARKED)
 
 **Raised:** Sprint R1 (2026-09). **Blocked on:** a later R task.
 
@@ -160,6 +160,48 @@ one holding 40% NVDA outright (1.741%).
 own evidence — by sector, by correlation clustering, or by factor loading —
 and each choice is a measurement, not a preference. Widening R1's scope to
 guess at one would be the kind of unmeasured decision this project avoids.
+
+### BUILT 2026-09-29 in B4 — and the definition was chosen by measurement
+
+`core/cluster_exposure.py`. **Correlation clustering**, because it catches what
+sector labels cannot: SOXX is an ETF, and the correlation binding these four
+names is not a label. Both linkage rules were swept across 13 thresholds on the
+real book before choosing:
+
+```
+thr    single   average
+0.450   100.0%    84.5%
+0.500   100.0%    52.6%   <- average finds exactly the four semis
+0.550   100.0%    36.3%
+0.600    52.6%    36.3%   <- single finds them only here
+0.650    36.3%    36.3%
+```
+
+**A first reading of this was wrong.** I took average linkage to be the more
+*stable* rule; the swept spreads are nearly identical (63.7% vs 62.3%). The real
+discriminator is **degeneracy**: single linkage merges on one qualifying pair, and
+SOXX correlates 0.55–0.76 with everything while MSFT–GOOGL is 0.59, so it chains
+the semis to the non-semis and reports the **whole book as one cluster at 5 of 13
+thresholds**. A cluster containing every holding cannot distinguish a concentrated
+book from a diversified one. Average linkage degenerated at 0 of 13.
+
+**Shipped result, recomputed by the gate from tracked price frames:**
+
+```
+worst single position       16.3%   (R1 level 40%) -> no flag
+the four semis TOGETHER     52.6% of variance on 40.0% of weight
+mean pairwise correlation    0.62
+verdict                     CONCENTRATED
+```
+
+**Three defects the sabotage test found, all fixed:** a ragged covariance raised
+`IndexError` and *crashed* instead of reporting `NOT_EVALUATED` — an unreachable
+fail-closed path, which is worse than an untested one because it looks like a
+guarantee; and two gaps where only one of the gate/tests pair caught a mutation.
+The synthetic test fixture also needed a deliberate *bridge* asset before it could
+exhibit degeneracy at all — absent one, the two linkage rules are genuinely
+equivalent, and a test sweeping a bridgeless fixture would have concluded exactly
+that.
 
 ## 6. Verify against a CLEAN CLONE, not the working directory — CLOSED-AS-PROCESS
 

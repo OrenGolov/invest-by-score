@@ -9680,3 +9680,104 @@ def _validate_source_outcome_config() -> None:
 
 
 _validate_source_outcome_config()
+
+
+# --- B4: cluster exposure --------------------------------------------------------
+# R1 flags exposure per POSITION. A CLUSTER of correlated holdings is a different
+# question, and open item 5 parked it because "defining a cluster needs its own
+# evidence - by sector, by correlation clustering, or by factor loading - and each
+# choice is a measurement, not a preference."
+#
+# THE MEASUREMENT, on 3,771 sessions of real returns. A book of 10% each in
+# NVDA/AMD/AVGO/SOXX plus 20% each in MSFT/GOOGL/CAT raises ZERO R1 flags:
+#
+#     AMD 16.3%  GOOGL 16.1%  MSFT 15.8%  CAT 15.5%  NVDA 14.1%  AVGO/SOXX 11.1%
+#
+# while the four semiconductors TOGETHER hold 52.6% of portfolio variance at a
+# mean pairwise correlation of 0.62. Sector labels do not catch it either: SOXX is
+# an ETF, and the correlation binding these four is not a label.
+#
+# WHY AVERAGE LINKAGE. Both rules swept across 13 thresholds:
+#
+#     thr    single   average
+#     0.450   100.0%    84.5%
+#     0.500   100.0%    52.6%   <- average finds exactly the four semis
+#     0.550   100.0%    36.3%
+#     0.600    52.6%    36.3%   <- single finds them only here
+#     0.650    36.3%    36.3%
+#
+# A FIRST READING OF THIS WAS WRONG. I took average linkage to be the more STABLE
+# of the two, but the spreads are nearly identical (63.7% vs 62.3%). The real
+# discriminator is DEGENERACY: single linkage merges on ONE qualifying pair, and
+# SOXX correlates 0.55-0.76 with everything while MSFT-GOOGL is 0.59, so it chains
+# the semis to the non-semis and reports the WHOLE BOOK as one cluster at 5 of 13
+# thresholds. A cluster containing every holding cannot distinguish a concentrated
+# book from a diversified one. Average linkage degenerated at 0 of 13.
+CLUSTER_EXPOSURE_VERSION = "cluster-exposure-v1"
+
+# Average linkage: a merge requires the MEAN cross-correlation to clear the bar,
+# not a single qualifying pair.
+CLUSTER_EXPOSURE_LINKAGE = "average"
+
+# The correlation a group must average to count as one bet. 0.50 under average
+# linkage recovers exactly the four semis on the measured book; 0.55 splits AMD
+# out and 0.45 pulls in a fifth name at 84.5%.
+CLUSTER_EXPOSURE_MIN_CORRELATION = 0.50
+
+# A CLUSTER OF ONE IS A POSITION, and R1 already flags those. Reporting it here
+# would double-count the same concentration under a second name.
+CLUSTER_EXPOSURE_MIN_MEMBERS = 2
+
+# The share of portfolio variance in one cluster that warrants review. Set at the
+# same level R1 uses for a single position, because the point of B4 is that a
+# basket acting as one bet deserves the same scrutiny as one holding of that size.
+CLUSTER_EXPOSURE_RISK_REVIEW = EXPOSURE_RISK_REVIEW
+
+# Verdicts, weakest to strongest. The order IS the precedence.
+CLUSTER_NOT_EVALUATED = "NOT_EVALUATED"   # no cluster could be located
+CLUSTER_CONCENTRATED = "CONCENTRATED"     # one cluster is above the review level
+CLUSTER_DIFFUSE = "DIFFUSE"               # no cluster carries that much risk
+CLUSTER_VERDICTS: tuple[str, ...] = (
+    CLUSTER_NOT_EVALUATED,
+    CLUSTER_CONCENTRATED,
+    CLUSTER_DIFFUSE,
+)
+
+# B4 reports; the risk gate blocks. Consistent with R1.
+CLUSTER_EXPOSURE_BLOCKS_TRADES = False
+
+
+def _validate_cluster_exposure_config() -> None:
+    """Import-time guard for the B4 contract."""
+    if CLUSTER_EXPOSURE_LINKAGE != "average":
+        raise ValueError(
+            "average linkage is required: MEASURED, single linkage reports the "
+            "WHOLE BOOK as one cluster at 5 of 13 swept thresholds because a "
+            "broadly-correlated ETF chains unrelated holdings together, and a "
+            "cluster containing every holding cannot distinguish a concentrated "
+            "book from a diversified one"
+        )
+    if not -1.0 < CLUSTER_EXPOSURE_MIN_CORRELATION < 1.0:
+        raise ValueError("the correlation threshold must lie inside (-1, 1)")
+    if CLUSTER_EXPOSURE_MIN_MEMBERS < 2:
+        raise ValueError(
+            "a cluster of one is a POSITION and R1 already flags it; reporting "
+            "it here would double-count the same concentration"
+        )
+    if not 0.0 < CLUSTER_EXPOSURE_RISK_REVIEW < 1.0:
+        raise ValueError("the risk review level is a fraction inside (0, 1)")
+    if len(set(CLUSTER_VERDICTS)) != len(CLUSTER_VERDICTS):
+        raise ValueError("duplicate cluster verdict")
+    if CLUSTER_VERDICTS[0] != CLUSTER_NOT_EVALUATED:
+        raise ValueError(
+            "NOT_EVALUATED must be the weakest verdict: a portfolio whose "
+            "covariance is unavailable has an UNKNOWN cluster exposure, and "
+            "reporting 0% would make the least-understood book look the safest"
+        )
+    if CLUSTER_CONCENTRATED == CLUSTER_DIFFUSE:
+        raise ValueError("the two measured verdicts must stay distinct")
+    if CLUSTER_EXPOSURE_BLOCKS_TRADES:
+        raise ValueError("B4 reports; the risk gate blocks")
+
+
+_validate_cluster_exposure_config()
