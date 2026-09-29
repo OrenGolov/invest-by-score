@@ -9582,3 +9582,35 @@ def _validate_honest_gate_config() -> None:
 
 
 _validate_honest_gate_config()
+
+
+# --- B1: the paper engine is wired -----------------------------------------------
+# MEASURED, `core/paper_engine.py` was 259 tested lines imported by its own test
+# and NOTHING ELSE, while the system published a governance mode meaning
+# "paper-trading ready". The modes already agreed - the orchestrator emits
+# mode == "PAPER" and the engine gates on exactly that - so the only thing missing
+# was the call.
+#
+# A flag rather than an unconditional call, because a paper intent is a SIDE
+# EFFECT of a research decision: an operator replaying history to inspect a score
+# should be able to do so without appending to the order log.
+PAPER_ENGINE_WIRED = True
+
+
+def _validate_paper_engine_wiring() -> None:
+    """Import-time guard for the B1 contract."""
+    if PAPER_TRADABLE_MODE != "PAPER":
+        raise ValueError(
+            f"the paper engine gates on mode {PAPER_TRADABLE_MODE!r} while the "
+            f"orchestrator emits 'PAPER'; a mismatch here means the engine is "
+            f"wired but can never accept an intent"
+        )
+    if not PAPER_ENGINE_WIRED:
+        raise ValueError(
+            "the paper engine must stay wired: an unwired engine makes the "
+            "published PAPER posture a claim nothing can act on, which is the "
+            "defect B1 closed"
+        )
+
+
+_validate_paper_engine_wiring()

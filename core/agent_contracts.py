@@ -86,6 +86,11 @@ class OrchestrationDecision:
     # The governed weight set behind the score. Surfaced so an operator can
     # see WHICH agent carried the decision, not just the number it produced.
     ensemble_breakdown: dict[str, Any] = field(default_factory=dict)
+    # B1: the paper intent this decision produced, or None when the engine is
+    # not wired. An ACCEPTED intent requires mode == "PAPER"; every other
+    # posture records a REJECTED intent naming the governing rule ids, because a
+    # paper log that stays silent cannot say why nothing happened.
+    paper_order: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

@@ -5,7 +5,7 @@ from agents.technical_agent import score_technical
 from core.agent_contracts import AgentContract, OrchestrationDecision
 from core.audit_store import AUDIT_SCHEMA_VERSION, persist_decision_audit
 from core.audit_policy import evaluate_audit_policy, stable_hash
-from core.config import RISK_POLICY_V2
+from core.config import PAPER_ENGINE_WIRED, RISK_POLICY_V2
 from core.model_registry import build_default_model_registry, require_live_model
 from core.risk_policy import evaluate_risk_policy
 from core.schemas import AgentStatus, status_posture, worst_status
@@ -542,4 +542,45 @@ def orchestrate_score(ticker: str, as_of: str, timestamp: str | None = None) -> 
         source_record_ids=source_record_ids,
         ensemble_breakdown=score_result.ensemble_breakdown,
     )
+
+    # B1: THE PAPER ENGINE IS NOW REACHABLE.
+    #
+    # `core/paper_engine.py` was 259 tested lines imported by its own test and
+    # NOTHING ELSE, while the system published a governance mode meaning
+    # "paper-trading ready". V's paper engine is a real roadmap deliverable, and
+    # the governance plumbing to gate it already existed — only the call was
+    # missing.
+    #
+    # THE ORDER INTENT IS RECORDED EITHER WAY. `submit_order_intent` yields an
+    # ACCEPTED intent only when `mode == "PAPER"`, which requires zero triggered
+    # veto-severity rules AND a passed risk gate; every other posture yields a
+    # REJECTED record naming the governing rule ids. A silent refusal would leave
+    # the paper log unable to say why nothing happened, so the refusal is the
+    # record.
+    #
+    # It never raises into the decision path: a decision is a research artifact
+    # and must not fail because a downstream log could not be written.
+    if PAPER_ENGINE_WIRED:
+        decision.paper_order = _submit_paper_intent(decision)
+
     return decision
+
+
+def _submit_paper_intent(decision) -> dict[str, Any] | None:
+    """Record the paper intent for a decision, or None when it could not be.
+
+    Deliberately non-fatal. The intent is a CONSEQUENCE of the decision, not a
+    precondition of it, and an unwritable paper log must not invalidate the
+    research output that governance already produced.
+    """
+    from core.paper_engine import PaperEngineError, submit_order_intent
+
+    try:
+        return submit_order_intent(decision, side="buy")
+    except (PaperEngineError, OSError, ValueError) as error:
+        # Recorded on the decision rather than swallowed, so a broken paper log
+        # is visible instead of looking like "no order was ever wanted".
+        return {
+            "status": "UNRECORDED",
+            "reason": f"the paper intent could not be recorded: {error}",
+        }
