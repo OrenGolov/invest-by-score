@@ -336,7 +336,7 @@ little and remove the ambiguity.
 
 ---
 
-## 10. F7's structured assessment has no declared consumer contract — OPEN
+## 10. F7's structured assessment — ACCESSOR EXPORTED in B3 (was OPEN)
 
 **Raised:** Sprint A (2026-09-23). **Owner:** unassigned.
 
@@ -356,6 +356,31 @@ Every future consumer re-derives the same handling, and the third one may guess.
 scalar is read one way everywhere), or a named field carrying the scalar
 alongside the assessment. Two independent consumers hitting the same shape in
 one sprint suggests a third is coming.
+
+### SETTLED 2026-09-29 in B3 — the first option
+
+F7 now exports `confidence_of`, `band_of`, `binding_factor_of` and
+`summarise_assessment`. Both existing consumers were converted to them, so the
+reading convention is shared rather than re-derived:
+
+* **A6** (`confidence_alert._read`) hand-rolled the field names and the `[0, 1]`
+  check; it now calls the accessors and translates F7's error into its own, so a
+  caller catching `ConfidenceAlertError` still sees a malformed assessment.
+* **D1** (`research_view._scalar`) is a GENERIC table-cell renderer, so it was
+  not converted wholesale — that would couple the renderer to F7. It now detects
+  an F7 assessment by F7's own `assessed_object` marker (not by shape, since
+  guessing is the defect) and reads through the accessor, falling back to the
+  generic path for any other mapping. A malformed assessment renders
+  `{invalid}` rather than crashing a view whose job is to show state.
+
+`summarise_assessment` is the short form D1 lacked: under 300 characters against
+the ~4,000-character cell that started this, counting the measured and
+unmeasurable factors instead of listing them.
+
+**The trap is pinned by a test.** The assessment carries `binding_value` (0.42)
+and `weighted_sum` (0.91) beside `confidence` (0.83), and the test asserts the
+accessor returns none of the wrong ones — so a future "simplification" to "take
+the first number" fails rather than silently thresholding on a factor score.
 
 ---
 

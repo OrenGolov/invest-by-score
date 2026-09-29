@@ -52,6 +52,7 @@ that would drift from the first.
 from __future__ import annotations
 
 import logging
+from typing import Any, Mapping
 
 from core.config import (
     CONDITIONAL_MAX_INTERVAL_WIDTH,
@@ -414,6 +415,89 @@ def aggregate(factors: dict) -> dict:
 # ---------------------------------------------------------------------------
 # The assessment
 # ---------------------------------------------------------------------------
+
+
+def confidence_of(assessment: Mapping[str, Any] | None) -> float | None:
+    """The confidence SCALAR from an assessment, or None when unmeasured.
+
+    B3. F7 returns a mapping carrying SEVERAL unrelated floats — `binding_value`,
+    `weighted_sum` and every factor's own value — so a consumer that guesses
+    ("take the first number") silently thresholds on a factor score instead of
+    the confidence.
+
+    MEASURED: two independent consumers hit this in one sprint and each had to
+    special-case it. D1's renderer dumped the ~4,000-character mapping into a
+    table cell, and A6 raised on it before learning which field named the
+    quantity. Exporting the accessor means the third consumer reads it the same
+    way as the first two.
+
+    Raises rather than coercing on a malformed value: a confidence outside [0, 1]
+    is a contract breach, and returning None for it would make a broken producer
+    indistinguishable from an honest absence.
+    """
+    if assessment is None:
+        return None
+    if not isinstance(assessment, Mapping):
+        raise ForecastConfidenceError(
+            "a confidence assessment must be a mapping; a bare float has no "
+            "band, no binding factor and no record of what was unmeasurable"
+        )
+    value = assessment.get("confidence")
+    if value is None:
+        return None
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        raise ForecastConfidenceError(
+            f"confidence {value!r} is not a number"
+        ) from None
+    if not 0.0 <= value <= 1.0:
+        raise ForecastConfidenceError(
+            f"confidence {value!r} lies outside [0, 1]"
+        )
+    return value
+
+
+def band_of(assessment: Mapping[str, Any] | None) -> str | None:
+    """The confidence BAND, or None when unmeasured."""
+    if assessment is None:
+        return None
+    if not isinstance(assessment, Mapping):
+        raise ForecastConfidenceError("a confidence assessment must be a mapping")
+    band = assessment.get("band")
+    return str(band) if band else None
+
+
+def binding_factor_of(assessment: Mapping[str, Any] | None) -> str | None:
+    """WHICH factor bound the confidence, or None when unmeasured.
+
+    Distinct from `binding_value`, which is a float and is exactly the number a
+    guessing consumer picks up by mistake.
+    """
+    if assessment is None:
+        return None
+    if not isinstance(assessment, Mapping):
+        raise ForecastConfidenceError("a confidence assessment must be a mapping")
+    factor = assessment.get("binding_factor")
+    return str(factor) if factor else None
+
+
+def summarise_assessment(assessment: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The few fields a consumer normally wants, without the factor detail.
+
+    D1's renderer dumped the whole mapping into a table cell because nothing
+    offered a short form. This is that short form: SMALL by design, so rendering
+    it cannot produce a 4,000-character cell.
+    """
+    measured = (assessment or {}).get("measured") if assessment else None
+    unmeasurable = (assessment or {}).get("unmeasurable") if assessment else None
+    return {
+        "confidence": confidence_of(assessment),
+        "band": band_of(assessment),
+        "binding_factor": binding_factor_of(assessment),
+        "measured_count": len(measured) if measured is not None else None,
+        "unmeasurable_count": len(unmeasurable) if unmeasurable is not None else None,
+    }
 
 
 def assess_confidence(

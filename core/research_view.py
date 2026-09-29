@@ -576,7 +576,23 @@ def _scalar(value: Any) -> str:
     if isinstance(value, float):
         return f"{value:.4g}"
     if isinstance(value, Mapping):
-        # Prefer the quantity a reader is looking for, then its band/label.
+        # B3: an F7 assessment reads through F7's OWN accessor, so this renderer
+        # and A6 agree on which of the mapping's several floats is the
+        # confidence. Identified by F7's declared marker rather than by shape,
+        # because guessing is the defect being closed.
+        if value.get("assessed_object") and "confidence" in value:
+            from core.forecast_confidence import ForecastConfidenceError, confidence_of
+
+            try:
+                scalar = confidence_of(value)
+            except ForecastConfidenceError:
+                # A malformed assessment must not crash a view whose job is to
+                # show state; it renders as unreadable instead.
+                return "{invalid}"
+            if scalar is not None:
+                return _scalar(scalar)
+        # Otherwise: a generic mapping. Prefer the quantity a reader is looking
+        # for, then its band/label.
         for key in ("confidence", "band", "value", "label", "verdict"):
             if key in value and not isinstance(value[key], (Mapping, list)):
                 return _scalar(value[key])

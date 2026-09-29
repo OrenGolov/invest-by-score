@@ -71,22 +71,34 @@ def _read(assessment: Mapping[str, Any] | None) -> dict:
     if not isinstance(assessment, Mapping):
         raise ConfidenceAlertError("a confidence assessment must be a mapping")
 
-    value = assessment.get("confidence")
-    if value is not None:
-        try:
-            value = float(value)
-        except (TypeError, ValueError):
-            raise ConfidenceAlertError(
-                f"confidence {value!r} is not a number"
-            ) from None
-        if not 0.0 <= value <= 1.0:
-            raise ConfidenceAlertError(f"confidence {value!r} lies outside [0, 1]")
+    # B3: read through F7's EXPORTED accessors rather than re-deriving them.
+    #
+    # This function used to hand-roll the field names and the [0, 1] check, and
+    # D1's renderer hand-rolled its own handling of the same mapping. Two
+    # consumers, two implementations, and the mapping carries several unrelated
+    # floats (`binding_value`, `weighted_sum`, every factor score) that a third
+    # consumer could easily pick up by mistake. One accessor, read one way.
+    from core.forecast_confidence import (
+        ForecastConfidenceError,
+        band_of,
+        binding_factor_of,
+        confidence_of,
+    )
+
+    try:
+        value = confidence_of(assessment)
+        band = band_of(assessment)
+        binding = binding_factor_of(assessment)
+    except ForecastConfidenceError as error:
+        # Re-raised as this module's own error, so a caller catching
+        # ConfidenceAlertError still sees a malformed assessment.
+        raise ConfidenceAlertError(str(error)) from None
 
     measured = assessment.get("measured")
     return {
         "confidence": value,
-        "band": assessment.get("band"),
-        "binding": assessment.get("binding_factor"),
+        "band": band,
+        "binding": binding,
         "measured": sorted(measured) if measured is not None else None,
     }
 
