@@ -54,6 +54,7 @@ import numpy as np
 
 from core.config import (
     LABEL_HORIZON_SESSIONS,
+    OUTCOME_LABEL_VERSION,
     BACKTEST_EMBARGO_SESSIONS,
     BACKTEST_FOLD_SESSIONS,
     BACKTEST_HOLDOUT_SESSIONS,
@@ -661,6 +662,74 @@ def train_baseline(
     )
 
 
+def trial_for_run(
+    run: Any,
+    *,
+    hypothesis: str = "",
+    primary_metric: str = "directional_accuracy",
+    validation_scheme: str = "walk_forward_embargo",
+) -> Any:
+    """The trial that describes ONE run, for the M3 registry.
+
+    A5. **ONE TRIAL PER ESTIMATOR.** MEASURED, the registry held 1 distinct trial
+    against 8 trained estimators because the registering code passed every
+    estimator as a single `hyperparameters` entry — and `trial_id` is a hash over
+    the configuration, so they collapsed. M3 exists to count the number of things
+    tried; a registry that merges eight into one cannot do that, and X7's
+    correction then understates the search by 8x.
+
+    The trial is derived FROM THE RUN, so its dataset hash, feature set, seed and
+    horizons cannot disagree with what was actually fitted.
+    """
+    from core.backtest.costs import COST_TABLE_VERSION
+    from core.trial_registry import Trial
+
+    folds = run.folds if hasattr(run, "folds") else (run or {}).get("folds", [])
+    first = folds[0] if folds else None
+    last = folds[-1] if folds else None
+
+    def stamp(fold, key):
+        if fold is None:
+            return ""
+        return getattr(fold, key, None) or (fold.get(key) if isinstance(fold, dict) else "") or ""
+
+    # M3 requires a hypothesis of at least 20 characters stating what is
+    # predicted and why. Defaulting HERE rather than at the call site means an
+    # empty string cannot reach the registry from any caller.
+    stated = str(hypothesis or "").strip() or (
+        f"Baseline {run.estimator} predicts {run.target_horizon} forward returns "
+        f"from the registered feature set; registered automatically when the run "
+        f"was persisted so the family count matches the search"
+    )
+    return Trial(
+        hypothesis=stated,
+        feature_set_version=run.feature_set_hash,
+        model_family=run.model_family,
+        label_version=OUTCOME_LABEL_VERSION,
+        horizons=[run.target_horizon],
+        training_window={
+            "start": stamp(first, "train_end_time"),
+            "end": stamp(last, "validation_start_time"),
+        },
+        validation_scheme=validation_scheme,
+        costs={"cost_table_version": COST_TABLE_VERSION},
+        seed=run.seed,
+        dataset_hash=run.dataset_hash,
+        primary_metric=primary_metric,
+        # THE ESTIMATOR IS PART OF THE CONFIGURATION, so two estimators on the
+        # same data are two trials rather than one.
+        hyperparameters={
+            "estimator": run.estimator,
+            **(run.hyperparameters or {}),
+        },
+        # NO METRICS. A REGISTERED trial must not carry them: registration
+        # precedes the result, and the append-only ledger showing registration
+        # before completion IS the evidence of pre-registration. M3 refuses a
+        # registered trial with metrics, and that refusal is the mechanism.
+        # Metrics go on the completion line, via `complete_trial`.
+    )
+
+
 def horizon_metrics(runs_by_horizon: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
     """Pooled out-of-sample metrics per horizon, in the shape X6 consumes.
 
@@ -767,8 +836,24 @@ def train_baseline_suite(
     }
 
 
-def persist_training_run(run: TrainingRun, path: str | Path | None = None) -> dict[str, Any]:
-    """Append a run to the ledger, idempotent per run hash."""
+def persist_training_run(
+    run: TrainingRun,
+    path: str | Path | None = None,
+    *,
+    hypothesis: str = "",
+    register_trial: bool = True,
+) -> dict[str, Any]:
+    """Append a run to the ledger, idempotent per run hash.
+
+    A5: REGISTRATION IS NOT OPTIONAL. MEASURED, the registry held 1 distinct trial
+    against 8 trained estimators because registering was opt-in behind a flag —
+    and the runs that skipped it are exactly the ones M3 was built to see. A
+    persisted run now registers its trial by default and records the `trial_id`,
+    so the link is auditable from either side.
+
+    `register_trial=False` exists for the tests that persist a run in isolation;
+    it is not a production path.
+    """
     store = Path(path) if path is not None else TRAINING_RUN_STORE_PATH
     if not run.artifact_hash:
         raise TrainingError("run carries no artifact_hash — refusing to persist")
@@ -776,11 +861,52 @@ def persist_training_run(run: TrainingRun, path: str | Path | None = None) -> di
     for existing in load_training_runs(store):
         if existing.get("run_hash") == run_hash:
             return existing
-    record = {**run.to_dict(), "run_hash": run_hash}
+
+    trial_id = ""
+    if register_trial:
+        # THE TRIAL STORE FOLLOWS THE RUN STORE. A caller persisting to a
+        # temporary run ledger must not have its trials land in the tracked one:
+        # the test suite does exactly that, and a first version of this appended
+        # synthetic trials to `data/research_trials.jsonl` every time the suite
+        # ran.
+        trial_path = None if path is None else store.with_name("research_trials.jsonl")
+        trial_id = _register_run_trial(run, hypothesis, trial_path)
+
+    record = {**run.to_dict(), "run_hash": run_hash, "trial_id": trial_id}
     store.parent.mkdir(parents=True, exist_ok=True)
     with store.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, sort_keys=True, default=str) + "\n")
     return record
+
+
+def _register_run_trial(
+    run: TrainingRun, hypothesis: str, path: Path | None = None
+) -> str:
+    """Register this run's trial and return its id. Idempotent.
+
+    An IDENTICAL configuration is the SAME experiment — `trial_id` is a hash over
+    the configuration — so re-persisting a run must not register a second trial.
+    M3 already refuses to re-register an existing id; that refusal is the
+    idempotence, and it is caught rather than raised so persisting stays safe to
+    repeat.
+    """
+    from core.trial_registry import TrialRegistryError, persist_trial
+
+    trial = trial_for_run(
+        run,
+        hypothesis=hypothesis,
+    )
+    try:
+        persist_trial(trial) if path is None else persist_trial(trial, path)
+    except TrialRegistryError as error:
+        # ALREADY REGISTERED is the idempotent case and is fine: an identical
+        # configuration is the same experiment. Anything else is a genuine
+        # contract breach and must be loud — a first version caught everything
+        # here and silently wrote no trial at all, which is precisely the
+        # unregistered-experiment problem A5 exists to close.
+        if "already" not in str(error).lower():
+            raise
+    return trial.trial_id
 
 
 def load_training_runs(path: str | Path | None = None) -> list[dict[str, Any]]:

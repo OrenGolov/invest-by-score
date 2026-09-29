@@ -112,7 +112,7 @@ def _train_horizons(args, frame, folds) -> int:
 
     if args.persist:
         for run in outcome["runs"].values():
-            persist_training_run(run)
+            persist_training_run(run, hypothesis=args.hypothesis.strip())
 
     report = evaluate_temporal_robustness(metrics)
     print()
@@ -183,12 +183,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.horizons:
         return _train_horizons(args, frame, folds)
 
-    trial_id = ""
-    if args.register_trial:
-        if not args.hypothesis.strip():
-            raise SystemExit("--register-trial requires --hypothesis")
-        trial_id = _register_trial(args, dataset, estimators)
-        print(f"trial registered: {trial_id}")
+    # A5: registration is no longer opt-in, and no longer one trial for the whole
+    # batch. `persist_training_run` registers ONE TRIAL PER ESTIMATOR, because
+    # `trial_id` hashes the configuration and passing every estimator as one
+    # hyperparameter collapsed eight experiments into one id. --hypothesis is
+    # still honoured; without it a generated one naming the estimator and target
+    # is recorded.
+    if args.register_trial and not args.hypothesis.strip():
+        raise SystemExit("--register-trial requires --hypothesis")
 
     print()
     print(f"{'estimator':20} {'folds':>5} {'rmse':>11} {'dir_acc':>8}  artifact")
@@ -202,7 +204,7 @@ def main(argv: list[str] | None = None) -> int:
             f"{metrics['directional_accuracy']:>8.3f}  {run.artifact_hash[:12]}"
         )
         if args.persist:
-            persist_training_run(run)
+            persist_training_run(run, hypothesis=args.hypothesis.strip())
 
     best = max(results.values(), key=lambda run: run.metrics["directional_accuracy"])
     print()
@@ -218,31 +220,11 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _register_trial(args, dataset, estimators: list[str]) -> str:
-    """Pre-register the experiment before its metrics exist (M3-TR)."""
-    from core.backtest.costs import COST_TABLE_VERSION
-    from core.trial_registry import Trial, TrialRegistry, persist_trial
-
-    trial = Trial(
-        hypothesis=args.hypothesis.strip(),
-        feature_set_version=dataset.feature_set_hash,
-        model_family="linear" if args.estimator in ("ridge", "elastic_net") else "tree",
-        label_version=OUTCOME_LABEL_VERSION,
-        horizons=[dataset.target_horizon],
-        training_window={
-            "start": dataset.rows[0].prediction_time,
-            "end": dataset.rows[-1].prediction_time,
-        },
-        validation_scheme="walk_forward_embargo",
-        costs={"cost_table_version": COST_TABLE_VERSION},
-        seed=args.seed,
-        dataset_hash=dataset.dataset_hash,
-        primary_metric=args.primary_metric,
-        hyperparameters={"estimators": sorted(estimators)},
-    )
-    TrialRegistry().register(trial)
-    persist_trial(trial)
-    return trial.trial_id
+# `_register_trial` REMOVED in A5. It registered ONE trial for the whole batch by
+# passing every estimator as a single `hyperparameters` entry — and `trial_id` is
+# a hash over the configuration, so eight experiments collapsed into one id. That
+# is why the registry held 1 distinct trial against 8 trained estimators.
+# `persist_training_run` now registers one trial per estimator instead.
 
 
 if __name__ == "__main__":
