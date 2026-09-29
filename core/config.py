@@ -9614,3 +9614,69 @@ def _validate_paper_engine_wiring() -> None:
 
 
 _validate_paper_engine_wiring()
+
+
+# --- B2: the source -> outcome join ----------------------------------------------
+# Open item 4 parked this as unbuildable: "0 of 2650 stored articles carry a
+# ticker, so no article joins to a price outcome."
+#
+# THAT READING WAS INCOMPLETE. Re-measuring the tracked raw store:
+#
+#     articles total                3,753
+#     with an article-level ticker       0   <- the parked measurement, correct
+#     with a request_key ticker     3,753   <- and every one is attributable
+#     distinct outlets                 58
+#
+# Every raw news envelope carries a `request_key` of the form `MSFT_2026-09-17`
+# naming the ticker the fetch was made FOR. So the join is buildable from data
+# already tracked, with no re-ingestion.
+#
+# The ticker is INFERRED FROM THE REQUEST, which is weaker than resolving the
+# entity from the article text. That weakness is recorded on every observation
+# (`attribution`) rather than hidden, so a consumer can tell the two apart and
+# discount accordingly.
+SOURCE_OUTCOME_VERSION = "source-outcome-join-v1"
+
+# The smallest absolute tone that counts as a DIRECTIONAL CLAIM.
+#
+# An article inside this band makes no claim about direction, so it cannot be
+# right or wrong about one and is DROPPED rather than scored. Scoring it would
+# make every neutral article a miss against any non-zero move, which penalises an
+# outlet for the system's own missing classification - the same rule
+# `observation_records` already applies to a missing outlet.
+SOURCE_OUTCOME_MIN_TONE_ABS = 0.05
+
+# The attribution recorded when a ticker came from the fetch rather than from the
+# article text. Named in config so the weaker provenance cannot be silently
+# relabelled as the stronger one.
+SOURCE_OUTCOME_ATTRIBUTION_REQUEST_KEY = "request_key"
+
+# A HIT IS AGREEMENT, NOT CAUSATION. The join reports the forward return that
+# FOLLOWED publication - an event-associated return (E5) - and a hit means the
+# outlet's stated tone agreed with the direction the price then took. Nothing here
+# claims the article moved the price.
+SOURCE_OUTCOME_IS_ASSOCIATION_ONLY = True
+
+
+def _validate_source_outcome_config() -> None:
+    """Import-time guard for the B2 contract."""
+    if not 0.0 < SOURCE_OUTCOME_MIN_TONE_ABS < 1.0:
+        raise ValueError(
+            "the neutral tone band must lie inside (0, 1): it separates an "
+            "article that made a directional claim from one that did not"
+        )
+    if not SOURCE_OUTCOME_IS_ASSOCIATION_ONLY:
+        raise ValueError(
+            "the join reports an event-ASSOCIATED return, never a causal one: "
+            "an article that preceded a move did not thereby cause it, and E5 "
+            "owns the attribution methodology that could say otherwise"
+        )
+    if SOURCE_OUTCOME_ATTRIBUTION_REQUEST_KEY == "entity_resolution":
+        raise ValueError(
+            "a ticker inferred from the fetch must not be labelled as resolved "
+            "from the article text; the two have different trustworthiness and "
+            "a consumer must be able to tell them apart"
+        )
+
+
+_validate_source_outcome_config()

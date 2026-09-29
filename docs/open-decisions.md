@@ -60,7 +60,7 @@ from price, volume or technical indicators — inferring it from today's
 constituents is survivorship bias by construction. Held open by 18 tests in
 `tests/test_deferred_features.py`, including the placeholder itself.
 
-## 4. The source → outcome join does not exist — PARKED
+## 4. The source → outcome join — BUILT in B2 (was PARKED)
 
 **Raised:** Sprint L4 (2026-09). **Blocks:** everything L4 can actually learn.
 
@@ -91,6 +91,49 @@ the estimator degrades correctly, it is simply not yet learning.
 **Scale note:** the full conditional scheme is 19,800 cells needing ~7.5M
 source-linked outcomes to populate. Even with the join built, the useful
 near-term output is per-source global rates, not the full cross-product.
+
+### BUILT 2026-09-29 in B2 — and the parked measurement was right while its conclusion was wrong
+
+`core/source_outcome_join.py`. The article-level `ticker` field is indeed `None`
+for every stored article, exactly as measured. But **every raw envelope carries a
+`request_key` of the form `MSFT_2026-09-17`**, naming the ticker the fetch was
+made for:
+
+```
+articles total                3,753
+with an article-level ticker      0   <- the parked measurement, correct
+with a request_key ticker     3,753   <- and every one is attributable
+distinct outlets                 58
+```
+
+So no re-ingestion was needed. **The actual missing link was the CLASSIFICATION,
+not the ticker:** `tone` is `None` for all 3,753 articles, so the first run of the
+join dropped every one of them. `news_adapter.resolve_tone` derives a tone from
+the headline, and the derivation is now stamped on each observation.
+
+**MEASURED RESULT, at the 1d horizon:**
+
+```
+1,026 observations across 13 outlets   (join rate 27.3%)
+L4 accepted 1,026 of 1,026
+per-outlet hit rates 0.256 -> 0.836
+```
+
+L4 is learning for the first time. At 5d the join yields 48 observations and at
+20d none — correctly, because the news spans Aug 24–Sep 21 while prices end
+Sep 18, so a longer horizon has not matured. That is PIT behaviour, not a defect.
+
+**Two weaknesses recorded on every observation rather than hidden:**
+1. `attribution` is `request_key`, not `entity_resolution` — the ticker is
+   inferred from the fetch, which is weaker than resolving it from the text.
+2. `tone_derivation` names the v1 lexicon, which **agreed with the obvious
+   reading on only 5 of 6 hand probes** (it scored "Stocks Settle Sharply Higher
+   as Bond Yields Fall" as −1.00, catching "Fall" and missing "Higher"). An
+   outlet's measured hit rate therefore partly measures the lexicon.
+
+**What remains open:** weakness 2 is the one worth closing, and it is a
+classifier problem rather than a join problem. A hit rate built on a lexicon that
+is wrong one time in six has a noise floor no amount of extra data will lower.
 
 ## 5. Cluster exposure is not measured — PARKED
 
