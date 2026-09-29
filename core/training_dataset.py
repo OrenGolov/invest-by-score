@@ -496,6 +496,10 @@ def build_training_dataset(
     # and importing it at module scope makes the dependency cycle explicit
     # rather than load-order-dependent.
     from core.backtest.engine import _exposed_feature_surface, offline_replay_seam
+    from core.contract_verification import (
+        contextual_feature_surface,
+        fundamental_feature_surface,
+    )
     from core.labels import build_outcome_labels
     from core.score_engine import CURRENT_SCORE_FEATURES, LONG_TERM_SCORE_FEATURES, build_score
 
@@ -538,7 +542,24 @@ def build_training_dataset(
                     })
                     continue
 
+                # A4: THE TECHNICAL SURFACE IS NOT THE WHOLE SURFACE.
+                #
+                # `_exposed_feature_surface` returns only what the current-time
+                # and long-term SCORE views consumed — 16 price/volume
+                # derivatives. MEASURED, 24 of the 40 registered features never
+                # reached a model, and among them was every fundamental, news,
+                # sentiment and macro feature. The project's central claim, that
+                # this evidence predicts returns, had never been tested because
+                # the features were never in a training row.
+                #
+                # `contextual_feature_surface` already built exactly these
+                # contracts, fail-closed, for the AUDITOR to check (M1b). It was
+                # simply never merged in here. A non-OK agent yields no feature
+                # rather than a neutral one, so an unavailable provider still
+                # cannot fabricate evidence.
                 surface = _exposed_feature_surface(score_result)
+                surface.update(contextual_feature_surface(score_result))
+                surface.update(fundamental_feature_surface(score_result))
                 try:
                     label_set = build_outcome_labels(ticker, prediction_time)
                 except Exception as exc:

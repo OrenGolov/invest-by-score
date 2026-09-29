@@ -192,6 +192,146 @@ def contextual_feature_surface(score_result) -> dict:
     return surface
 
 
+# The five registered FUNDAMENTAL features and the key each is published under
+# in `fundamental_features`. Registered since M1 with `fundamental_agent` as
+# producer; MEASURED, none had ever entered a training row.
+# The only status meaning the fundamental numbers were OBSERVED rather than
+# imputed from defaults.
+_FUNDAMENTAL_LIVE_STATUSES = frozenset({"live_provider", "ok"})
+
+# Each registered fundamental feature and the RAW metric it derives from.
+#
+# THE RAW INPUT IS THE GATE, NOT THE STATUS. MEASURED on VOO, `source_status` is
+# "live_provider" while every entry in `valuation_metrics` is None, and the
+# derived scores are still 5.0 / 5.0 / 7.0 / 3.0 / 10.0 — the default ladder in
+# `_build_fundamental_features`. Those values are CONSTANT for every ticker
+# without fundamentals, so admitting them would let a model learn "this row is an
+# ETF" and let X5 call the family incremental on the strength of a survivorship
+# marker.
+_FUNDAMENTAL_FEATURE_INPUTS = (
+    ("revenue_growth", "revenue_growth"),
+    ("margin_quality", "gross_margin"),
+    ("free_cash_flow_quality", "free_cash_flow"),
+    ("balance_sheet_quality", "debt_to_equity"),
+    ("valuation_quality", "price_to_book"),
+)
+
+# Raw inputs whose "value" is a substituted default that
+# `_build_fundamental_features` then republishes as though observed. A feature
+# derived from one of these is excluded until the provider returns a real number.
+#
+# MEASURED: price_to_book is 4.0 for VOO, NVDA and MSFT alike — three companies
+# whose actual price-to-book differs by multiples. score_engine.py:502 reads it
+# with `metrics.get("price_to_book", 4.0) or 4.0` and line 541 writes the result
+# back into `valuation_metrics`, so provenance is lost in transit.
+_FUNDAMENTAL_LAUNDERED_DEFAULTS = {"price_to_book": 4.0}
+_FUNDAMENTAL_FEATURE_KEYS = tuple(name for name, _ in _FUNDAMENTAL_FEATURE_INPUTS)
+
+
+def fundamental_feature_surface(score_result) -> dict:
+    """Build the feature surface for the fundamental agent.
+
+    A4. The fundamental scores were computed and published but never exposed as
+    registry-conformant contracts, so they could not enter a dataset.
+
+    **THE FAIL-CLOSED RULE IS LOAD-BEARING HERE, MORE THAN ELSEWHERE.**
+    `_build_fundamental_features` coalesces missing inputs to defaults — a
+    missing `revenue_growth` becomes a growth score of 5.0, a missing
+    `price_to_book` becomes 4.0. Those are *imputed* numbers wearing a
+    measurement's clothes, and admitting them would train a model on the
+    imputation rather than on the business.
+
+    So a feature is emitted ONLY when the fundamental source itself reports OK.
+    When it does not, no feature is emitted at all and the row is excluded by the
+    dataset builder's `TRAINING_REQUIRE_COMPLETE_FEATURES` rule — the same
+    posture the contextual agents take.
+    """
+    from core.feature_registry import build_default_registry
+
+    features = getattr(score_result, "fundamental_features", None)
+    if not isinstance(features, dict):
+        return {}
+    # The fundamental layer is only actionable when its source passes. MEASURED,
+    # the statuses this field takes are "live_provider" (the provider answered),
+    # "provider_key_required" (no key configured) and "unknown". Only the first
+    # means the numbers below are OBSERVATIONS; the others mean
+    # `_build_fundamental_features` coalesced its defaults, and admitting those
+    # would train a model on the imputation.
+    if str(features.get("source_status", "unknown")).strip().lower() not in _FUNDAMENTAL_LIVE_STATUSES:
+        return {}
+
+    contract = features.get("source_contract")
+    contract = contract if isinstance(contract, dict) else {}
+    as_of = contract.get("as_of") or getattr(score_result, "as_of", None)
+    published = contract.get("published_time") or as_of
+
+    # THE PROVIDER'S OWN PAYLOAD, not the republished view.
+    #
+    # `_build_fundamental_features` applies DEFAULTS while reading
+    # (`price_to_book` -> 4.0) and then writes those same defaults back into
+    # `valuation_metrics`, so the republished view cannot distinguish an observed
+    # 4.0 from an absent one. MEASURED, it reports price_to_book 4.0 and
+    # valuation_quality 7.0 identically for VOO, NVDA and MSFT.
+    #
+    # A constant dressed as a measurement is worse than a missing value: it
+    # survives every downstream null check, and a model trained on it learns the
+    # default rather than the business. So the gate reads the raw snapshot the
+    # provider returned.
+    raw = getattr(score_result, "fundamental_snapshot", None)
+    if isinstance(raw, dict):
+        metrics = raw.get("valuation_metrics")
+    else:
+        metrics = features.get("valuation_metrics")
+    metrics = metrics if isinstance(metrics, dict) else {}
+
+    registry = build_default_registry()
+    surface: dict = {}
+    for name, raw_key in _FUNDAMENTAL_FEATURE_INPUTS:
+        value = features.get(name)
+        if value is None:
+            continue
+        # THE IMPUTATION GUARD. A derived score whose raw input is absent is the
+        # default ladder, not a measurement.
+        raw_value = metrics.get(raw_key)
+        if raw_value is None:
+            continue
+        # ...and a raw input equal to its own substituted default is
+        # indistinguishable from an absent one, because the default is written
+        # back into the published view.
+        laundered = _FUNDAMENTAL_LAUNDERED_DEFAULTS.get(raw_key)
+        if laundered is not None and float(raw_value) == float(laundered):
+            continue
+        spec = registry.get(name)
+        surface[name] = {
+            "name": name,
+            "value": value,
+            "as_of": as_of,
+            "source_id": contract.get("source_id"),
+            "published_time": published,
+            "calculation_version": contract.get("calculation_version"),
+            "lookback_period": spec.lookback if spec is not None else None,
+        }
+    return surface
+
+
+def fundamental_feature_problems(score_result) -> list[str]:
+    """Enforce the registry contract on the fundamental surface.
+
+    An empty surface conforms — it means the fundamental source is not OK, which
+    is the ordinary offline posture. What this refuses is a LIVE fundamental
+    contribution that is unregistered, PIT-violating or version-drifted.
+    """
+    from core.feature_registry import (
+        build_default_registry,
+        feature_contract_problems as _fr_problems,
+    )
+
+    surface = fundamental_feature_surface(score_result)
+    if not surface:
+        return []
+    return _fr_problems({"features": surface}, build_default_registry())
+
+
 def contextual_feature_problems(score_result) -> list[str]:
     """Enforce the registry contract on the contextual agents' surface.
 
