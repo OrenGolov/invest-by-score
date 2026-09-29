@@ -1,0 +1,409 @@
+MAX_SCORE = 10.0
+MIN_SCORE = 0.0
+DEFAULT_ACTION = "ANALYSIS_ONLY"
+DEFAULT_CONFIDENCE = 0.5
+
+MARKET_FEATURE_VERSION = "market-feature-v1"
+# v3: the embedded news term was removed from the current-time view (Sprint N1);
+# news enters the published score exclusively through its own ensemble line.
+CURRENT_SCORE_VERSION = "current-score-v3"
+LONG_TERM_SCORE_VERSION = "long-term-score-v2"
+NEWS_CONTRACT_VERSION = "news-contract-v1"
+SENTIMENT_CONTRACT_VERSION = "sentiment-contract-v1"
+# N2 anti-proxying rule: a news-derived sentiment design is permitted only as
+# an explicit, labeled feature (`derivation: "derived_from_news"`); its
+# confidence MUST be scaled by this factor relative to the news evidence it
+# consumed, so the dependency is reflected in every downstream confidence read.
+SENTIMENT_DERIVED_CONFIDENCE_SCALE = 0.5
+
+# --- Ensemble wiring (W1) ------------------------------------------------------
+# The published score is the weighted product of agent contributions, not an
+# independent hand-built blend. Both weight sets share an identical key set,
+# must each sum to 1.0 (validated at import time), and intentionally differ
+# per horizon: business quality matters more to the structural view than to
+# the tactical one. Agents without a live implementation hold an explicit 0.0
+# weight — presence in the dict is the contract; absence fails at import.
+# v3: macroeconomic is born wired (N3) with a dedicated weight in BOTH
+# horizons; while its status is not OK (no FRED key, failed/empty fetch,
+# partial coverage) the weight renormalizes across eligible agents.
+ENSEMBLE_VERSION = "ensemble-v3"
+
+ENSEMBLE_WEIGHTS_CURRENT = {
+    "market_data": 0.0,          # informational only: feeds confidence/gates
+    "technical_analysis": 0.70,  # current-time technical view
+    "fundamental_analysis": 0.10,
+    "news_intelligence": 0.10,   # N1: live whenever the news contract reads OK
+    "sentiment": 0.0,            # N2 typed placeholder; no legitimate provider yet
+    "macroeconomic": 0.10,       # N3: live whenever the macro contract reads OK
+    "market_regime": 0.0,        # not implemented; regime gates via risk policy
+}
+
+ENSEMBLE_WEIGHTS_LONG = {
+    "market_data": 0.0,
+    "technical_analysis": 0.70,  # long-term structural technical view
+    "fundamental_analysis": 0.20,
+    "news_intelligence": 0.0,    # tactical-only: news never enters the structural view
+    "sentiment": 0.0,
+    "macroeconomic": 0.10,       # macro state is horizon-agnostic evidence
+    "market_regime": 0.0,
+}
+
+
+def _validate_ensemble_weights(name: str, weights: dict[str, float]) -> None:
+    """Import-time guard: complete key set, non-negative, summing to 1.0."""
+    if not weights:
+        raise ValueError(f"{name} must not be empty")
+    if set(weights) != set(ENSEMBLE_WEIGHTS_CURRENT):
+        raise ValueError(
+            f"{name} keys must match ENSEMBLE_WEIGHTS_CURRENT exactly: "
+            f"missing={sorted(set(ENSEMBLE_WEIGHTS_CURRENT) - set(weights))} "
+            f"extra={sorted(set(weights) - set(ENSEMBLE_WEIGHTS_CURRENT))}"
+        )
+    negative = {agent: weight for agent, weight in weights.items() if float(weight) < 0.0}
+    if negative:
+        raise ValueError(f"{name} weights must be non-negative, got {negative}")
+    total = float(sum(weights.values()))
+    if abs(total - 1.0) > 1e-9:
+        raise ValueError(f"{name} must sum to 1.0 (tolerance 1e-9), got {total!r}")
+
+
+_validate_ensemble_weights("ENSEMBLE_WEIGHTS_CURRENT", ENSEMBLE_WEIGHTS_CURRENT)
+_validate_ensemble_weights("ENSEMBLE_WEIGHTS_LONG", ENSEMBLE_WEIGHTS_LONG)
+
+# --- Narrative vs fundamental attribution (N5) ----------------------------------
+# Decomposes the blended score into three governed buckets so the system can
+# state whether a thesis is supported by business reality, market narrative,
+# or both. The evaluator lives in core/score_engine.py::build_attribution and
+# only classifies/aggregates the ensemble breakdown's per-agent contributions
+# — the ensemble remains the single source of contribution math, so the
+# attribution can never contradict the published score.
+#
+# Bucket semantics (versioned): operational = fundamental + technical
+# (the long-horizon technical view anchors the bucket; its current-horizon
+# component is tactical but still technical evidence); narrative = news +
+# sentiment ONLY — with news at zero weight the bucket reads exactly 0.0
+# (no phantom narrative, the N5 acceptance criterion); macro_shock = macro
+# + regime. market_data is an informational zero-weight line and sits
+# outside the buckets by design.
+ATTRIBUTION_VERSION = "score-attribution-v1"
+
+ATTRIBUTION_BUCKETS = {
+    "operational": ("fundamental_analysis", "technical_analysis"),
+    "narrative": ("news_intelligence", "sentiment"),
+    "macro_shock": ("macroeconomic", "market_regime"),
+}
+
+# Zero-weight informational lines that stay outside every bucket.
+ATTRIBUTION_INFORMATIONAL_LINES = ("market_data",)
+
+# A bucket "supports" the thesis above this many score points, "opposes"
+# below the negated threshold, and is "neutral" in between (0-10 scale).
+ATTRIBUTION_SUPPORT_THRESHOLD = 0.25
+
+
+def _validate_attribution_buckets() -> None:
+    """Import-time guard: the buckets partition the ensemble lines exactly."""
+    assigned = [
+        agent
+        for members in ATTRIBUTION_BUCKETS.values()
+        for agent in members
+    ]
+    if len(assigned) != len(set(assigned)):
+        raise ValueError("ATTRIBUTION_BUCKETS: an agent line appears in more than one bucket")
+    covered = set(assigned) | set(ATTRIBUTION_INFORMATIONAL_LINES)
+    ensemble_lines = set(ENSEMBLE_WEIGHTS_CURRENT)
+    if covered != ensemble_lines:
+        raise ValueError(
+            "ATTRIBUTION_BUCKETS must partition the ensemble lines exactly: "
+            f"missing={sorted(ensemble_lines - covered)}, unknown={sorted(covered - ensemble_lines)}"
+        )
+    if not 0.0 < ATTRIBUTION_SUPPORT_THRESHOLD <= MAX_SCORE:
+        raise ValueError(
+            f"ATTRIBUTION_SUPPORT_THRESHOLD must be within (0, {MAX_SCORE}], "
+            f"got {ATTRIBUTION_SUPPORT_THRESHOLD!r}"
+        )
+
+
+_validate_attribution_buckets()
+
+# --- Risk policy (W2) -----------------------------------------------------------
+# Single source of truth for every governance threshold. The evaluator lives in
+# core/risk_policy.py and is the only consumer; nothing else may hard-code these
+# limits. severity "veto" blocks PAPER posture; "warning" is visible but does
+# not block. Missing/None inputs evaluate to triggered rules — fail-closed.
+RISK_POLICY_VERSION = "risk-policy-v2"
+
+# --- Audit policy (W3) ----------------------------------------------------------
+# The auditor independently verifies that a decision is provable: evidence
+# sufficiency, hash integrity, determinism, calibration sanity, and ensemble
+# consistency. Its evaluator lives in core/audit_policy.py; a failed veto-
+# severity check appends the "auditor_veto" reason and blocks PAPER posture.
+AUDIT_POLICY_VERSION = "audit-policy-v1"
+
+RISK_POLICY_V2 = {
+    "data_quality_below_threshold": {
+        "severity": "veto",
+        "minimum_market_data_quality": 60.0,
+    },
+    "market_source_confidence_below_threshold": {
+        "severity": "veto",
+        "minimum_market_source_confidence": 0.7,
+    },
+    "future_dated_market_data": {
+        "severity": "veto",
+    },
+    "future_dated_fundamental_payload": {
+        "severity": "veto",
+    },
+    "fundamental_source_confidence_below_threshold": {
+        "severity": "veto",
+        "minimum_fundamental_source_confidence": 0.7,
+    },
+    "score_below_threshold": {
+        "severity": "veto",
+        "minimum_score": 5.5,
+    },
+    # N4 governance coupling: the STRESS regime forces NO_TRADE. A missing or
+    # unknown regime label also triggers (fail-closed) — a decision without
+    # market-risk context must not trade.
+    "market_regime_stress": {
+        "severity": "veto",
+    },
+    "analysis_only_mode": {
+        "severity": "veto",
+    },
+    "confidence_below_minimum": {
+        "severity": "veto",
+        "minimum_confidence": 0.35,
+    },
+    "confidence_penalty_budget_exceeded": {
+        "severity": "warning",
+        "maximum_total_penalty": 0.15,
+    },
+    "freshness_degraded": {
+        "severity": "warning",
+        "minimum_freshness_factor": 0.5,
+    },
+    "volatility_regime_elevated": {
+        "severity": "warning",
+        "minimum_volatility_regime_factor": 0.3,
+    },
+}
+
+
+def _validate_risk_policy() -> None:
+    """Import-time guard: every rule is a non-empty spec with valid severity."""
+    if not RISK_POLICY_V2:
+        raise ValueError("RISK_POLICY_V2 must contain at least one rule")
+    for rule_id, spec in RISK_POLICY_V2.items():
+        if not isinstance(spec, dict) or not spec:
+            raise ValueError(f"RISK_POLICY_V2 rule {rule_id!r} must be a non-empty spec")
+        if spec.get("severity") not in {"veto", "warning"}:
+            raise ValueError(
+                f"RISK_POLICY_V2 rule {rule_id!r} severity must be 'veto' or 'warning', "
+                f"got {spec.get('severity')!r}"
+            )
+
+
+_validate_risk_policy()
+
+# Evidence-based confidence model (see core.score_engine._compute_confidence).
+# Each factor produces a value in [0, 1]; the confidence is the weighted sum
+# minus explicit risk penalties, clamped to [CONFIDENCE_FLOOR, CONFIDENCE_CAP].
+# Weights sum to 1.0 so the baseline stays interpretable as a percentage.
+CONFIDENCE_VERSION = "evidence-confidence-v2"
+
+CONFIDENCE_WEIGHT_DATA_QUALITY = 0.25
+CONFIDENCE_WEIGHT_SOURCE_RELIABILITY = 0.20
+CONFIDENCE_WEIGHT_SIGNAL_AGREEMENT = 0.20
+CONFIDENCE_WEIGHT_FRESHNESS = 0.15
+CONFIDENCE_WEIGHT_HISTORY_COVERAGE = 0.10
+CONFIDENCE_WEIGHT_VOLATILITY_REGIME = 0.10
+
+# Calendar-age gap between the newest bar used and as_of before freshness decays,
+# and how many calendar days after that grace window reach zero freshness credit.
+CONFIDENCE_FRESHNESS_GRACE_DAYS = 4
+CONFIDENCE_FRESHNESS_DECAY_DAYS = 26
+
+# Minimum number of valid daily bars for full long-window (200d MA) coverage.
+CONFIDENCE_FULL_COVERAGE_BARS = 230
+
+# Daily-return standard deviation treated as fully calm versus fully chaotic.
+CONFIDENCE_VOL_CALM_DAILY_STD = 0.015
+CONFIDENCE_VOL_CHAOTIC_DAILY_STD = 0.060
+
+# Dead-zone half-width used when reading factor directions so tiny moves do not
+# flip a signal between bullish/bearish arbitrarily.
+CONFIDENCE_SIGNAL_DEADZONE_RATIO = 0.002
+
+# Named penalties applied once per condition, replacing the previous flat -0.20
+# per category. Scaled to reflect how much each condition undermines the result.
+RISK_FLAG_CONFIDENCE_PENALTIES = {
+    "Weak momentum": 0.10,
+    "Low volume": 0.08,
+    "Downtrend": 0.12,
+    "RSI extreme": 0.06,
+}
+FUNDAMENTAL_SOURCE_PENALTY = 0.10
+GOVERNANCE_RISK_GATE_PENALTY = 0.05
+
+CONFIDENCE_FLOOR = 0.10
+CONFIDENCE_CAP = 0.95
+
+# --- News intelligence adapter (N1) ---------------------------------------------
+# Pipeline: NEWS -> PIT FILTER -> ENTITY RESOLUTION -> EVENT CLASSIFICATION ->
+# SOURCE QUALITY -> RELEVANCE/NOVELTY -> DIRECTION/MAGNITUDE -> CONTRADICTION
+# DETECTION -> EVIDENCE-BACKED OUTPUT. The evaluator lives in
+# core/news_adapter.py; thresholds and versions live here so governance reads
+# them from exactly one place. The no-key path stays the explicit UNAVAILABLE
+# contract (a missing provider is a status, never a neutral score).
+NEWS_CLASSIFIER_VERSION = "news-classifier-v2"
+NEWS_TONE_LEXICON_VERSION = "news-tone-lexicon-v1"
+NEWS_AGGREGATOR_VERSION = "news-aggregator-v1"
+NEWS_PIPELINE_VERSION = "news-pipeline-v1"
+
+NEWS_PROVIDER_API_KEY_ENV = "NEWS_PROVIDER_API_KEY"
+NEWS_PROVIDER_URL = "https://newsapi.org/v2/everything"
+NEWS_PROVIDER_TIMEOUT_SECONDS = 10.0
+
+# Query window: articles with published_time <= as_of, window end at as_of,
+# start at as_of minus this many calendar days.
+NEWS_LOOKBACK_DAYS = 7
+
+# Exponential recency decay half-life, in days. v1 approximates the 3-trading-
+# day half-life with calendar days (deterministic; no market calendar needed),
+# mirroring the calendar-day convention of CONFIDENCE_FRESHNESS_*.
+NEWS_RECENCY_HALF_LIFE_DAYS = 3.0
+
+# Contradiction v1: a same-day, same-category cluster of credible articles whose
+# positive/negative mean tones are opposite-sign with |delta| strictly above
+# this threshold yields status CONTRADICTORY (never a neutral average).
+NEWS_CONTRADICTION_TONE_DELTA = 0.6
+NEWS_CONTRADICTION_CONFIDENCE_FLOOR = 0.10
+
+# Registry base confidence for the news domain (SOURCE_REGISTRY["news"] mirrors
+# this value; the adapter never imports fetch_data to avoid coupling).
+NEWS_BASE_SOURCE_CONFIDENCE = 0.75
+
+# Maximum provider articles considered per request (also the provider page size).
+NEWS_MAX_ARTICLES = 50
+
+# Aggregated sentiment [-1, 1] maps onto the ensemble contribution line as
+# base + span * sentiment, i.e. a 0-10 score like every other agent line.
+NEWS_SCORE_BASE = 5.0
+NEWS_SCORE_SPAN = 5.0
+
+# --- Macroeconomic agent (N3) ---------------------------------------------------
+# Vintage-aware economic data with PIT filtering by published_time (first-release
+# semantics). Every series carries provenance: source, publication lag, frequency,
+# transformation, and sector-specific sensitivities. Missing series degrades
+# confidence (INCOMPLETE), never silently zero-fills. Revisions append to
+# raw_store (W6); eligibility gates on published_time <= as_of.
+
+MACRO_CONTRACT_VERSION = "macro-contract-v1"
+# v2: VINTAGE SELECTION stage (N3) — first-release retention + revision history
+# via the ALFRED realtime feed; values are selected as known at as_of.
+# v3: VIX + 30Y yield join the risk-regime signal set (7 series). The regime
+# score is the MEAN of available signals, so widening the set changes every
+# historical score — hence a version bump rather than a silent addition.
+MACRO_ADAPTER_VERSION = "macro-adapter-v3"
+
+# Provider configuration (FRED as v1; BLS/CENSUS extensible but not in v1).
+MACRO_PROVIDER_API_KEY_ENV = "FRED_API_KEY"
+MACRO_PROVIDER_TIMEOUT_SECONDS = 10.0
+
+# Fetch parameters: how far back to fetch (enough history for trend/shock detection).
+# FRED returns all available history; we cache and use the last N periods.
+MACRO_LOOKBACK_PERIODS = 120  # ~10 years of monthly (or equivalent weekly/daily)
+
+# Confidence degradation for missing or INCOMPLETE series.
+MACRO_MISSING_SERIES_PENALTY = 0.15
+
+# Macro score range and centering (risk-on/off tilt, 0-10 scale).
+MACRO_SCORE_BASE = 5.0
+MACRO_SCORE_SPAN = 5.0
+
+# Risk-on/off regime thresholds (0.5 = neutral, >0.5 = risk-on tilt).
+MACRO_RISKOFF_THRESHOLD = 0.3
+MACRO_RISKON_THRESHOLD = 0.7
+
+# VIX bands (index points). VIX is the one INVERTED series in the set: a high
+# reading is risk-OFF. ~20 is the long-run average, ~30 the stress threshold.
+MACRO_VIX_ELEVATED = 20.0
+MACRO_VIX_STRESS = 30.0
+MACRO_VIX_CALM = 14.0
+
+# 30Y yield bands (percent), mirroring the 10Y level signal one notch higher
+# to reflect the term premium at the long end.
+MACRO_YIELD_30Y_ELEVATED = 4.0
+MACRO_YIELD_30Y_NORMAL = 3.0
+MACRO_YIELD_30Y_DEPRESSED = 2.0
+
+# --- Market regime agent (N4) ----------------------------------------------------
+# Five-state governance classification: bullish, bearish, range, risk_off, stress.
+# The classifier lives in core/regime_agent.py and is the ONLY source of the
+# governed regime label; agents/market_data_agent.py keeps its legacy 3-state
+# `market_regime` display heuristic (ungoverned, not the decision regime).
+# Governance coupling: STRESS forces NO_TRADE through the W2 policy rule
+# `market_regime_stress` (severity veto, evaluated in core/risk_policy.py, the
+# only evaluator); RISK_OFF dampens the momentum coefficients of the
+# current-time technical view by REGIME_RISKOFF_MOMENTUM_DAMPING (applied in
+# core/score_engine.py and mirrored in the scoring breakdown so the
+# explanation can never contradict the number).
+
+REGIME_CONTRACT_VERSION = "regime-contract-v1"
+REGIME_PIPELINE_VERSION = "regime-pipeline-v1"
+REGIME_CLASSIFIER_VERSION = "regime-classifier-v1"
+
+REGIME_LABELS = ("bullish", "bearish", "range", "risk_off", "stress")
+REGIME_STRESS_LABEL = "stress"
+REGIME_RISKOFF_LABEL = "risk_off"
+REGIME_RANGE_LABEL = "range"
+
+# Range v1: flat zone — both MA distances strictly inside +/- this band.
+REGIME_RANGE_FLAT_THRESHOLD = 0.02
+
+# Realized volatility: daily-return standard deviation (ddof=0) over this many
+# sessions, matching the market-data agent's `volatility` feature convention.
+REGIME_REALIZED_VOL_WINDOW_SESSIONS = 30
+
+# Volatility is compared against its own trailing history: prior observations
+# (excluding the current session) over a 1y session lookback.
+REGIME_VOL_PERCENTILE_LOOKBACK_SESSIONS = 252
+REGIME_STRESS_VOL_PERCENTILE = 0.95
+REGIME_RISKOFF_VOL_PERCENTILE = 0.80
+
+# Stress requires a second, independent condition: depth below the rolling
+# 60-session high, strictly above this fraction.
+REGIME_DRAWDOWN_HIGH_WINDOW_SESSIONS = 60
+REGIME_STRESS_DRAWDOWN_THRESHOLD = 0.15
+
+# Risk-off trend branch: MA50 < MA200 with 20d AND 60d momentum both negative.
+# Transition risk counts regime flips across this many trailing sessions.
+REGIME_TRANSITION_WINDOW_SESSIONS = 20
+
+# Strict minimum eligible history: the 30d realized vol needs 31 closes and
+# the trailing 1y percentile needs 252 prior vol observations, so the first
+# fully classified session is index 282 (0-based). MA200 and change_60d sit
+# inside that span. Derived constant — do not hand-edit.
+REGIME_REQUIRED_SESSIONS = (
+    REGIME_REALIZED_VOL_WINDOW_SESSIONS + REGIME_VOL_PERCENTILE_LOOKBACK_SESSIONS + 1
+)
+
+# Calendar-day coverage the provider fetch must reach behind as_of
+# (~283 sessions plus a holiday buffer). Selects the fetch period
+# deterministically in core/regime_agent.py.
+REGIME_CALENDAR_COVERAGE_DAYS = 430
+
+# probability_proxy scales: how deep past the deciding boundary, normalized
+# to [0, 1] and clipped. Trend depth uses MA-distance fractions; the risk_off
+# momentum branch uses trailing-return fractions.
+REGIME_TREND_MARGIN_SCALE = 0.10
+REGIME_MOMENTUM_MARGIN_SCALE = 0.05
+
+# RISK_OFF governance coupling: momentum coefficients of the current-time
+# technical view are multiplied by this factor (1.0 = no dampening). The
+# long-term structural view is regime-agnostic in v1; its own volatility drag
+# already discounts regime risk there.
+REGIME_RISKOFF_MOMENTUM_DAMPING = 0.5
+
