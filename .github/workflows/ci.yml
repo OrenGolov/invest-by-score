@@ -32,6 +32,18 @@ jobs:
       - name: Lint
         run: python -m ruff check .
 
+      # D2: a type checker, non-strict and ratcheted. MEASURED, the first run
+      # found TWO WRONG SIGNATURES no test could catch — both declared
+      # `list[str] | None` while returning `list[str | None]`, because A1 made a
+      # partial context possible and the annotations promised the opposite.
+      # Annotations are never evaluated at runtime, so only a checker sees this.
+      #
+      # `continue-on-error` because the 83-error baseline is pre-existing debt;
+      # scripts/check_type_coverage.py is the gate that fails on a RISE.
+      - name: Type check
+        run: python -m mypy
+        continue-on-error: true
+
       - name: Test suite
         run: python -m pytest tests/ -q
 

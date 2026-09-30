@@ -218,7 +218,7 @@ def evaluate_cluster_exposure(
     ]
     clusters = [group for group in clusters if group]
 
-    described = []
+    described: list[dict[str, Any]] = []
     for group in clusters:
         share = sum(contributions.get(member, 0.0) for member in group)
         described.append(
@@ -241,7 +241,9 @@ def evaluate_cluster_exposure(
 
     # A CLUSTER OF ONE IS A POSITION, and R1 already flags those. Reporting it
     # here would double-count the same concentration under a second name.
-    multi = [entry for entry in described if entry["size"] >= CLUSTER_EXPOSURE_MIN_MEMBERS]
+    multi = [
+        entry for entry in described if entry["size"] >= CLUSTER_EXPOSURE_MIN_MEMBERS
+    ]
     worst = multi[0] if multi else None
 
     if worst is None:

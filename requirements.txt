@@ -7,6 +7,7 @@ idna==3.19
 joblib==1.6.0
 lxml==6.1.2
 multitasking==0.0.13
+mypy==1.18.2
 numpy==2.5.2
 pandas==3.0.5
 peewee==4.3.0

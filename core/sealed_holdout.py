@@ -271,6 +271,18 @@ def evaluate_sealed_holdout(
     rows = dataset_rows if dataset_rows is not None else run.get("dataset_rows")
     if rows is None:
         rows = run.get("row_count") or run.get("rows")
+    if rows is None:
+        # Reachable: `recorded_facts` accepts a `dataset_rows` under any of three
+        # keys, and a run could carry the flag without a usable count. Reporting
+        # NOT_EVALUATED beats an int(None) crash, and matches what this function
+        # does for every other missing seal fact.
+        return _result(
+            HOLDOUT_NOT_EVALUATED,
+            "the run records a dataset row count that is not a number, so the "
+            "seal's position cannot be located",
+            reason_code=HOLDOUT_REASON_NO_BOUNDS,
+            recorded_facts=facts,
+        )
     described = describe_seal(
         int(rows),
         int(geometry["fold_sessions"]),

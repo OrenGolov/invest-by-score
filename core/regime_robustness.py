@@ -84,7 +84,13 @@ RR_REASON_THIN_CELLS = "ALL_CELLS_TOO_THIN"
 RR_REASON_CARRIED = "ONE_REGIME_CARRIES_THE_EDGE"
 
 
-def fold_regime_labels(fold: Mapping[str, Any] | None) -> list[str] | None:
+def fold_regime_labels(
+    fold: Mapping[str, Any] | None,
+) -> list[str | None] | None:
+    # `list[str | None] | None`, not `list[str] | None`. A1 made PARTIAL context
+    # possible - a classifier that could not classify one day - so an ENTRY may be
+    # None while the list itself is present. The old signature promised consumers
+    # the opposite, and mypy caught it.
     """Regime labels for a fold's validation observations, or None.
 
     Returns None when the fold carries no per-observation labels. **It never

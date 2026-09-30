@@ -197,7 +197,7 @@ def evaluate_release(
     supplied = dict(results or {})
 
     records = [_gate_record(name, supplied.get(name)) for name in gates]
-    by_state = {state: [] for state in GATE_STATES}
+    by_state: dict[str, list[str]] = {state: [] for state in GATE_STATES}
     for record in records:
         by_state[record["state"]].append(record["gate"])
 
@@ -302,7 +302,7 @@ def release_problems(report: Mapping[str, Any]) -> list[str]:
         if not isinstance(record, Mapping):
             problems.append("a gate record is not a mapping")
             continue
-        gate = record.get("gate")
+        gate = str(record.get("gate") or "")
         if record.get("state") not in GATE_STATES:
             problems.append(f"{gate}: state {record.get('state')!r} is not a gate state")
         # THE CONTRACT THAT MAKES A NEGATIVE USEFUL: a non-pass names a next

@@ -66,3 +66,25 @@ ignore = [
 # This test imports from `scripts/` and so must extend sys.path first, exactly
 # as the gates do.
 "tests/test_live_chart_state.py" = ["E402"]
+
+[tool.mypy]
+# D2: a type checker, where there was none. The codebase already annotates heavily
+# (`from __future__ import annotations` throughout, typed signatures), so this pays
+# for itself immediately — it found two WRONG SIGNATURES on the first run.
+#
+# MEASURED baseline: 92 errors in 28 of 108 core files. Non-strict, because a
+# strict run on a twelve-sprint codebase produces a number nobody can act on. The
+# value is the RATCHET: `scripts/check_type_coverage.py` fails when the count
+# rises, so new code cannot add to the debt even while the existing debt stands.
+python_version = "3.12"
+files = ["core"]
+ignore_missing_imports = true
+# Deliberately off: turning these on takes the count from 83 into the hundreds and
+# would bury the findings that matter. They are the next ratchet, not this one.
+disallow_untyped_defs = false
+disallow_any_generics = false
+warn_return_any = false
+# On, because these catch defects rather than style:
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true

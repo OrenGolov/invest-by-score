@@ -95,7 +95,9 @@ ER_REASON_CARRIED = "ONE_ITEM_CARRIES_THE_EDGE"
 
 def attribution_of(
     fold: Mapping[str, Any] | None, axis: str
-) -> list[str] | None:
+) -> list[str | None] | None:
+    # `list[str | None] | None`: A1 made partial attribution possible, so an entry
+    # may be None while the list is present. Caught by mypy in D2.
     """Per-observation event ids or sources for a fold, or None.
 
     Returns None when the fold carries no attribution. **It never derives one.**
@@ -262,8 +264,15 @@ def evaluate_event_robustness(
     axis_results: dict[str, Any] = {}
     unusable: list[str] = []
     for axis in available:
+        # `available` already filtered out the None axes at the top, but the dict
+        # lookup loses that narrowing. Binding it explicitly keeps the guarantee
+        # visible to a reader and to the type checker, rather than asserting it in
+        # a comment.
+        attribution = supplied[axis]
+        if attribution is None:
+            continue
         try:
-            axis_results[axis] = carrier_ratio(predictions, actuals, supplied[axis])
+            axis_results[axis] = carrier_ratio(predictions, actuals, attribution)
         except EventRobustnessError as exc:
             unusable.append(f"{axis}: {exc}")
 
