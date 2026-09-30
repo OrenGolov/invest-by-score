@@ -22,6 +22,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      # D1: a linter, where there was none. MEASURED on the first run over 49k
+      # lines: 273 findings, one of which was a REAL BUG every test passed over
+      # (`Any` used in an annotation without being imported — deferred evaluation
+      # meant nothing crashed, but `typing.get_type_hints()` would have).
+      #
+      # Runs BEFORE the suite: a name-resolution defect should fail in seconds
+      # rather than after three minutes of tests.
+      - name: Lint
+        run: python -m ruff check .
+
       - name: Test suite
         run: python -m pytest tests/ -q
 

@@ -42,7 +42,7 @@ which are the ones most worth a human look.
 from __future__ import annotations
 
 import statistics
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping
 
 from core.config import (
     ALERT_SEVERITY_INFO,

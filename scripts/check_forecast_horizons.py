@@ -38,7 +38,6 @@ from core.config import (  # noqa: E402
 )
 from core.forecast_horizons import (  # noqa: E402
     HORIZON_STATUS_PENDING,
-    HORIZON_STATUS_SCORABLE,
     horizon_problems,
     horizon_readiness,
     horizon_sessions,

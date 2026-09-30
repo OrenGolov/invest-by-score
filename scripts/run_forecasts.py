@@ -70,7 +70,6 @@ from core.outcome_closure import (  # noqa: E402
     close_forecast,
     closure_report,
     evaluate_calibration,
-    load_ledger,
     record_forecast,
 )
 

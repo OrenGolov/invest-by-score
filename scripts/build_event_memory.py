@@ -69,7 +69,6 @@ import pandas as pd  # noqa: E402
 
 from core.attribution import attribute_study  # noqa: E402
 from core.config import (  # noqa: E402
-    EVENT_MEMORY_RESPONSE_HORIZONS,
     MEMORY_PROVENANCE_INFERRED,
     MEMORY_PROVENANCE_OBSERVED,
 )

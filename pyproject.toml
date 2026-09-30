@@ -1,0 +1,68 @@
+[tool.ruff]
+# D1: a linter in CI, where there was none.
+#
+# MEASURED on the first run over 49k lines: 273 findings. One was a REAL BUG that
+# every test passed over — `Any` used in an annotation in `core/orchestrator.py`
+# without being imported. `from __future__ import annotations` defers evaluation,
+# so nothing crashed; `typing.get_type_hints()` on that function would have. Fixed
+# rather than silenced.
+#
+# The config matches the style the codebase already has rather than imposing a new
+# one. A first run that reformatted 49k lines would bury that one real finding
+# under 272 cosmetic ones, and the diff would be unreviewable.
+line-length = 100
+target-version = "py312"
+extend-exclude = ["venv", "data", "__pycache__"]
+
+[tool.ruff.lint]
+# Pyflakes (F) and a subset of pycodestyle (E). Deliberately NOT the full default
+# set: the point of the first linter in a mature codebase is to catch real defects,
+# not to relitigate formatting decisions made across twelve sprints.
+select = ["F", "E4", "E7", "E9"]
+
+ignore = [
+    # `from core.config._previous import *` is how the C1 config package chains its
+    # parts, and it is deliberate: MEASURED, 88 constants are read across part
+    # boundaries, so the parts must reproduce one flat namespace in order. F403
+    # flags the star import and F405 flags every name that reaches a part through
+    # one — 68 findings describing the design rather than a defect.
+    "F403",
+    "F405",
+    # An f-string with no placeholder is harmless and often deliberate: several
+    # gates print aligned report lines where one row happens to be static, and
+    # rewriting just that row as a plain string makes the block harder to read.
+    "F541",
+    # `a = 1; b = 2` on one line. Used in a few probe scripts and test fixtures
+    # where the pair is one thought; not worth 16 diffs.
+    "E702",
+    # A value computed and not returned. CHECKED each of the 5 rather than
+    # silenced blind: none is a forgotten assertion. `ma_150` sits in a symmetric
+    # block reading four moving averages, `base` computes an interval the function
+    # reports through other fields, and the rest are parallel-structure reads.
+    # Deleting them would make the surrounding blocks asymmetric and harder to
+    # verify against the contract they implement.
+    "F841",
+    # `l` as a loop variable in two list comprehensions over rendered LINES.
+    # Ambiguous with `1` in some fonts, which is the rule's point, but both uses
+    # are two-line comprehensions where the meaning is unmistakable.
+    "E741",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Gates and scripts insert the repo root on `sys.path` before importing `core`,
+# so their imports CANNOT be at the top of the file. Every one already carries a
+# `# noqa: E402`; this makes the rule's inapplicability explicit rather than
+# relying on 70 inline comments.
+"scripts/*.py" = ["E402"]
+# A test may import a symbol purely to assert it EXISTS, or bind a value to
+# document a fixture's shape. That is the assertion, not dead code.
+"tests/*.py" = ["F401", "F841"]
+# The config package's parts are one module split into ten files; a part defines
+# names that later parts and consumers use, which F401 cannot see.
+"core/config/*.py" = ["F401", "E402"]
+# A package facade re-exports names for its consumers; F401 cannot see a use
+# that happens in another module.
+"core/backtest/__init__.py" = ["F401"]
+# This test imports from `scripts/` and so must extend sys.path first, exactly
+# as the gates do.
+"tests/test_live_chart_state.py" = ["E402"]

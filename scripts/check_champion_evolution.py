@@ -34,7 +34,6 @@ Verified to FAIL when any of these is reinjected:
 from __future__ import annotations
 
 import random
-import statistics
 import sys
 from pathlib import Path
 
@@ -64,7 +63,6 @@ from core.champion_evolution import (  # noqa: E402
     evaluate_replacement,
     evolution_problems,
     history_immutability_problems,
-    max_drawdown,
     render_evolution,
     risk_condition,
 )

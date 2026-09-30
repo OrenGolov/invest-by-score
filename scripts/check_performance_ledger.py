@@ -37,7 +37,6 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-import numpy as np  # noqa: E402
 
 from core.config import (  # noqa: E402
     CLOSURE_CLOSED,

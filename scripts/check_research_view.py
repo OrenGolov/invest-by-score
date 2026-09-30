@@ -40,7 +40,6 @@ from core.config import (  # noqa: E402
     RESEARCH_PANEL_CONFIDENCE,
     RESEARCH_PANEL_FORECAST,
     RESEARCH_PANEL_QUALITY,
-    RESEARCH_PANEL_REGIME,
     RESEARCH_PANEL_RISK,
     RESEARCH_PANELS,
     RESEARCH_RETURN_IS_ABSENT,
@@ -58,7 +57,6 @@ from core.forecast_snapshot import build_forecast_snapshot  # noqa: E402
 from core.research_view import (  # noqa: E402
     ResearchViewError,
     build_research_view,
-    cell_from_field,
     render_view,
     view_problems,
 )

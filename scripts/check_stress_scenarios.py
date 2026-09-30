@@ -41,7 +41,6 @@ Verified to FAIL when any of these is reinjected:
 
 from __future__ import annotations
 
-import math
 import random
 import statistics
 import sys
@@ -54,11 +53,8 @@ from core.config import (  # noqa: E402
     STRESS_BLOCKS_TRADES,
     STRESS_CORRELATION_LEVEL,
     STRESS_DEMEAN_FULL_PERIOD,
-    STRESS_MATERIAL_DEGRADATION,
     STRESS_MIN_SESSIONS,
-    STRESS_SCENARIO_CORRELATION_SHOCK,
     STRESS_SCENARIO_HISTORICAL,
-    STRESS_SCENARIO_VOLATILITY_SHOCK,
     STRESS_SCENARIOS,
     STRESS_VOLATILITY_MULTIPLIER,
     STRESS_WORST_SHARE,

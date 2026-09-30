@@ -35,7 +35,6 @@ from core.config import (  # noqa: E402
 )
 from core.event_memory import load_memories  # noqa: E402
 from core.event_robustness import (  # noqa: E402
-    ER_REASON_CARRIED,
     ER_REASON_NO_ATTRIBUTION,
     ER_REASON_TOO_FEW_ITEMS,
     EventRobustnessError,

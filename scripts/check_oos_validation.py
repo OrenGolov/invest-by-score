@@ -14,7 +14,6 @@ draws because 0.5750 is the largest number in the column.
 
 from __future__ import annotations
 
-import math
 import sys
 from pathlib import Path
 
@@ -25,7 +24,6 @@ from core.config import (  # noqa: E402
     OOS_ALPHA,
     OOS_APPROVED,
     OOS_BASELINE_ESTIMATOR,
-    OOS_MIN_FOLDS,
     OOS_MIN_OBSERVATIONS,
     OOS_NOT_APPROVED,
     OOS_NOT_EVALUATED,

@@ -379,8 +379,8 @@ class QuotaAwareNewsTests(unittest.TestCase):
         eligible = sorted(t for t in PORTFOLIO_TICKERS if sector_for(t) is not None)
         runs = -(-len(eligible) // COLLECT_NEWS_BATCH_SIZE)
         covered = set()
-        for run in range(runs):
-            start = (run * COLLECT_NEWS_BATCH_SIZE) % len(eligible)
+        for batch in range(runs):
+            start = (batch * COLLECT_NEWS_BATCH_SIZE) % len(eligible)
             covered |= {
                 eligible[(start + offset) % len(eligible)]
                 for offset in range(COLLECT_NEWS_BATCH_SIZE)

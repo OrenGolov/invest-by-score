@@ -55,9 +55,6 @@ from core.position_exposure import (  # noqa: E402
     exposure_report,
     load_positions,
     marginal_exposure,
-    portfolio_variance,
-    risk_contributions,
-    weights,
 )
 
 FAILURES: list[str] = []

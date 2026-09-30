@@ -34,12 +34,11 @@ from M5's NOT_EVALUATED. Absence of evidence is not evidence of safety.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping
 
 from core.config import (
     CHAMPION_MIN_TENURE_DAYS,
     CHAMPION_TENURE_ALLOWS_ROLLBACK,
-    CHAMPION_TENURE_MEASURED_FROM,
     CHAMPION_TENURE_VERSION,
     L5_AUTO_PROMOTE,
     L5_OWNED_STAGES,

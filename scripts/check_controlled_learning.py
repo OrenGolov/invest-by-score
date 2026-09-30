@@ -31,7 +31,6 @@ Verified to FAIL when any of these is reinjected:
 
 from __future__ import annotations
 
-import inspect
 import random
 import statistics
 import sys
@@ -46,7 +45,6 @@ from core.config import (  # noqa: E402
     CHAMPION_TENURE_MEASURED_FROM,
     L5_AUTO_PROMOTE,
     L5_OWNED_STAGES,
-    L5_STAGE_CHAMPION,
     L5_STAGE_GATE,
     L5_STAGE_TENURE,
     L5_STAGES,

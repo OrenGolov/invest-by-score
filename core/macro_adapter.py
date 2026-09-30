@@ -62,9 +62,6 @@ from core.macro_registry import (
     MACRO_SERIES_REGISTRY,
     MACRO_VINTAGE_SOURCE_ALFRED,
     MACRO_VINTAGE_SOURCE_NONE,
-    SECTOR_MACRO_LOADINGS,
-    SYMBOL_TO_SECTOR,
-    get_series,
     get_sector_loadings,
     get_symbol_sector,
 )

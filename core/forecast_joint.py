@@ -57,7 +57,6 @@ from core.config import (
     FORECAST_HORIZONS,
     FORECAST_TARGETS,
     JOINT_CELL_PRECEDENCE,
-    JOINT_COHERENCE_FLAGGED,
     JOINT_COHERENCE_NOT_EVALUATED,
     JOINT_COHERENCE_OK,
     JOINT_COHERENCE_VIOLATED,
@@ -78,7 +77,6 @@ from core.forecast_horizons import (
 )
 from core.forecast_targets import (
     bounds_problems,
-    label_field_for,
     realized_value,
     target_contract,
 )

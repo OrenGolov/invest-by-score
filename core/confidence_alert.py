@@ -56,7 +56,6 @@ from core.config import (
     CONF_CHANGE_MOVED,
     CONF_CHANGE_NONE,
     CONF_CHANGE_NOT_EVALUATED,
-    FCONF_STATUS_MEASURED,
 )
 
 

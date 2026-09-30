@@ -40,7 +40,7 @@ rather than relying on the reader to remember.
 
 from __future__ import annotations
 
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping
 
 from core.config import (
     EVENT_CONTEXT_ASSOCIATION_CAUTION,

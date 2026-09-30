@@ -33,7 +33,6 @@ Verified to FAIL when any of these is reinjected:
 from __future__ import annotations
 
 import random
-import statistics
 import sys
 from pathlib import Path
 
@@ -45,7 +44,6 @@ from core.config import (  # noqa: E402
     ALERT_SEVERITY_WARN,
     EVENT_IMPACT_BLOCKS_TRADES,
     EVENT_IMPACT_HIGH,
-    EVENT_IMPACT_HORIZON,
     EVENT_IMPACT_LOW,
     EVENT_IMPACT_MIN_ANALOGS,
     EVENT_IMPACT_MIN_MEDIAN_MOVE,

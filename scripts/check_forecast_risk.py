@@ -49,13 +49,11 @@ from core.config import (  # noqa: E402
     FRISK_NOT_EVALUATED,
     FRISK_REDUCED,
     FRISK_UNCHANGED,
-    FRISK_VERDICTS,
     SIZING_MIN_WEIGHT,
     SIZING_REFUSED,
     SIZING_SIZED,
 )
 from core.correlation_sizing import size_position  # noqa: E402
-from core.forecast_confidence import assess_confidence  # noqa: E402
 from core.forecast_risk import (  # noqa: E402
     adjust_size,
     confidence_of,

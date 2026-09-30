@@ -32,7 +32,6 @@ import statistics
 from typing import Any, Iterable, Mapping, Sequence
 
 from core.config import (
-    REGIME_LABELS,
     REGIME_SPEC_INSUFFICIENT,
     REGIME_SPEC_NOT_EVALUATED,
     REGIME_SPEC_POOLED,

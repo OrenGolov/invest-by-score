@@ -32,7 +32,6 @@ can report any track record it likes.
 from __future__ import annotations
 
 import math
-import statistics
 from typing import Any, Mapping, Sequence
 
 from core.config import (

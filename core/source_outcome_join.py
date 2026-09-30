@@ -35,11 +35,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 from core.config import (
     LABEL_HORIZON_SESSIONS,
-    SOURCE_OUTCOME_ATTRIBUTION_REQUEST_KEY,
     SOURCE_OUTCOME_MIN_TONE_ABS,
     SOURCE_OUTCOME_VERSION,
 )

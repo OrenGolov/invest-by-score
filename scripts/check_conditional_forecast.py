@@ -53,7 +53,6 @@ from core.config import (  # noqa: E402
     CONDITIONAL_CELL_PRECEDENCE,
     CONDITIONAL_CLAIM_DIRECTIONAL,
     CONDITIONAL_CLAIM_INSUFFICIENT,
-    CONDITIONAL_CLAIM_INTERVAL,
     CONDITIONAL_CLAIM_POINT,
     CONDITIONAL_CLAIM_PRECEDENCE,
     CONDITIONAL_MAX_INTERVAL_WIDTH,
@@ -63,8 +62,6 @@ from core.config import (  # noqa: E402
     REGIME_LABELS,
 )
 from core.forecast_conditional import (  # noqa: E402
-    DIRECTION_HIGHER,
-    DIRECTION_INDISTINGUISHABLE,
     build_cell,
     build_conditional_forecast,
     conditional_problems,

@@ -27,7 +27,6 @@ Verified to FAIL when any of these is reinjected:
 
 from __future__ import annotations
 
-import math
 import random
 import statistics
 import sys

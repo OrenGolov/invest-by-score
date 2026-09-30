@@ -43,14 +43,13 @@ from __future__ import annotations
 
 import logging
 
-from core.calibration import UncalibratedProbabilityError, calibrated_probability
+from core.calibration import calibrated_probability
 from core.config import (
     FORECAST_HORIZONS,
     FORECAST_KIND_DISTRIBUTION,
     FORECAST_KIND_PROBABILITY,
     FORECAST_TARGET_CONTRACT_VERSION,
     FORECAST_TARGET_CONTRACTS,
-    FORECAST_TARGET_RELATIVE,
     FORECAST_TARGETS,
 )
 

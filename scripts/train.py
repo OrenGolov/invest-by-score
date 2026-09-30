@@ -29,7 +29,6 @@ sys.path.insert(0, str(REPO_ROOT))
 from core.config import (  # noqa: E402
     LABEL_HORIZON_SESSIONS,
     TEMPORAL_HORIZONS,
-    OUTCOME_LABEL_VERSION,
     TRAINING_DEFAULT_SEED,
 )
 from core.temporal_robustness import evaluate_temporal_robustness  # noqa: E402

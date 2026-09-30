@@ -32,7 +32,6 @@ Verified to FAIL when any of these is reinjected:
 from __future__ import annotations
 
 import random
-import statistics
 import sys
 from pathlib import Path
 
@@ -46,7 +45,6 @@ from core.config import (  # noqa: E402
     EVENT_CONTEXT_REQUIRE_ASSOCIATION_SHARE,
     EVENT_CONTEXT_SHOW_PROVENANCE,
     EVENT_CONTEXT_STATUS_INSUFFICIENT,
-    EVENT_CONTEXT_STATUS_MEASURED,
     EVENT_CONTEXT_STATUS_NO_EVENT,
     EVENT_MEMORY_MIN_ANALOGS,
     EVENT_MEMORY_MIN_SIMILARITY,

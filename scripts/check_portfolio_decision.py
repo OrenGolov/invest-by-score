@@ -30,7 +30,6 @@ Verified to FAIL when any of these is reinjected:
 
 from __future__ import annotations
 
-import math
 import random
 import sys
 from pathlib import Path
@@ -47,9 +46,7 @@ from core.config import (  # noqa: E402
     PORTFOLIO_MAX_TOTAL_SIZE,
     PORTFOLIO_MAX_VOLATILITY_INCREASE,
     PORTFOLIO_NO_TRADE,
-    PORTFOLIO_NOT_EVALUATED,
     PORTFOLIO_PROCEED,
-    PORTFOLIO_REDUCED,
     PORTFOLIO_RULES,
     PORTFOLIO_SEVERITY_VETO,
     SECTOR_BLOCKS_TRADES,

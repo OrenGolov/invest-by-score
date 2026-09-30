@@ -37,7 +37,6 @@ import pandas as pd
 
 from core.backtest.costs import (
     COST_TABLE_V2,
-    COST_TABLE_VERSION,
     execution_cost_record,
     realized_vol_daily,
 )

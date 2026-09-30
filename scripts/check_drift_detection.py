@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import math
 import random
-import statistics
 import sys
 from pathlib import Path
 
@@ -42,13 +41,10 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from core.config import (  # noqa: E402
     DRIFT_ALERT,
-    DRIFT_CALIBRATION,
-    DRIFT_FEATURE,
     DRIFT_MIN_WINDOW,
     DRIFT_NOT_EVALUATED,
     DRIFT_PSI_ALERT,
     DRIFT_RELATIONSHIP,
-    DRIFT_RESPONSE,
     DRIFT_STABLE,
     DRIFT_TRIGGERS_RETRAIN,
     DRIFT_TYPES,

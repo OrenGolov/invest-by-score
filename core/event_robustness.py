@@ -66,7 +66,6 @@ from typing import Any
 
 from core.config import (
     EVENT_CARRIED,
-    EVENT_MEMORY_MIN_ANALOGS,
     EVENT_ROBUST,
     EVENT_ROBUSTNESS_AXES,
     EVENT_ROBUSTNESS_AXIS_EVENT,

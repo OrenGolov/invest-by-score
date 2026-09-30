@@ -69,8 +69,6 @@ from core.thesis_alert import (  # noqa: E402
     STANCE_SUPPORTS,
     STANCE_UNMEASURED,
     ThesisAlertError,
-    carrier_of,
-    read_buckets,
     render_thesis_alert,
     stance_of,
     thesis_alert_problems,

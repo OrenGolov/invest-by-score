@@ -54,7 +54,6 @@ from core.config import (  # noqa: E402
     EVENT_MEMORY_SIMILARITY_FIELDS,
     EVENT_STAGE_BLOCKED,
     EVENT_STAGE_DEGRADED,
-    EVENT_STAGE_FAILED,
     EVENT_STAGE_OK,
 )
 from core.event_memory import EventMemory  # noqa: E402
@@ -68,7 +67,6 @@ from core.forecast_event import (  # noqa: E402
     build_event_forecast,
     event_forecast_problems,
     render_pipeline,
-    represent_event,
 )
 
 EVENT = {

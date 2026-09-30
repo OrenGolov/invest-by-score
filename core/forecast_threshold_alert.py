@@ -39,7 +39,6 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from core.config import (
-    ALERT_SEVERITY_INFO,
     ALERT_SEVERITY_WARN,
     FORECAST_THRESHOLD_ALERT_VERSION,
     FTHRESHOLD_BLOCKS_TRADES,

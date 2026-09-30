@@ -53,7 +53,6 @@ So X7 requires both: the permutation test decides, Bonferroni is a floor.
 
 from __future__ import annotations
 
-import math
 from collections.abc import Mapping, Sequence
 from typing import Any
 

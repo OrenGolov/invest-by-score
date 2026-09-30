@@ -43,7 +43,6 @@ from core.config import (  # noqa: E402
     PROVENANCE_REQUIRED_FIELDS,
     PROVENANCE_TRACE_REFUSALS,
     PROV_FIELD_PAYLOAD,
-    PROV_FIELD_SOURCE,
     PROV_ORIGIN_COMPOSED,
     PROV_ORIGIN_DERIVED,
     PROV_ORIGIN_OBSERVED,
@@ -59,7 +58,6 @@ from core.provenance_surface import (  # noqa: E402
     provenance_problems,
     render_provenance,
     trace,
-    untraced,
 )
 from core.research_view import build_research_view  # noqa: E402
 

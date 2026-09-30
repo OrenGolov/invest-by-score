@@ -27,7 +27,6 @@ Verified to FAIL when any of these is reinjected:
 
 from __future__ import annotations
 
-import math
 import random
 import sys
 from pathlib import Path
@@ -40,13 +39,11 @@ from core.config import (  # noqa: E402
     SIZING_IS_ADVISORY,
     SIZING_MAX_WEIGHT,
     SIZING_MIN_SESSIONS,
-    SIZING_MIN_WEIGHT,
     SIZING_NOT_EVALUATED,
     SIZING_REFUSED,
     SIZING_REPORT_BINDING_CONSTRAINT,
     SIZING_RISK_BUDGET,
     SIZING_SIZED,
-    SIZING_VERDICTS,
 )
 from core.correlation_sizing import (  # noqa: E402
     BINDING_RISK_BUDGET,
