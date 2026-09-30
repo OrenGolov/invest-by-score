@@ -269,6 +269,24 @@ root:
    separately. X10 now asserts the eight EVIDENCE gates (which read only tracked
    ledgers) and checks X9 only against its two legitimate states.
 
+**RECURRED A FOURTH TIME 2026-09-30, in D2.** `check_type_coverage.py` failed
+when the mypy error count dropped more than 5 below its baseline — a guard I added
+so a stale baseline could not accumulate slack. CI #164 failed on it while every
+local run passed, including one against a fresh clone.
+
+**The count is PLATFORM-dependent, not checkout-dependent**, which is why the
+clean-clone check did not catch it: the 83 was measured on Windows/Python 3.13
+and CI runs Ubuntu/Python 3.12, where mypy resolves platform-specific stubs
+differently. A baseline measured on one machine cannot bind another.
+
+**And the failure mode was backwards.** The gate broke the build for the code
+being CLEANER than recorded. Progress must never fail a build.
+
+6. A ratchet asserts a DIRECTION, not a value. It may fail on a regression and
+   must only REPORT an improvement — and its threshold must not depend on the
+   interpreter, the OS or the tool version, none of which the repository pins for
+   a developer's machine.
+
 ## 7. Collection cadence is manual — DECISION
 
 **Raised:** Sprint L (2026-09). **Owner:** operator.
