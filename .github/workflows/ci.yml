@@ -44,8 +44,17 @@ jobs:
         run: python -m mypy
         continue-on-error: true
 
+      # D3: the suite carries the coverage measurement, rather than a gate
+      # re-running it. MEASURED, a separate coverage gate took 353 s - more than
+      # doubling the 126 s gate sweep by repeating work this step already does.
+      #
+      # `--cov-fail-under` is the ratchet: 90% floor against a measured 93.8%.
+      # Before D3 the only evidence was that 89 of 90 modules were IMPORTED by a
+      # test, which is not coverage.
       - name: Test suite
-        run: python -m pytest tests/ -q
+        run: >
+          python -m pytest tests/ -q
+          --cov=core --cov-report=term --cov-fail-under=90
 
       # The governance gates — DISCOVERED, not enumerated.
       #
