@@ -57,3 +57,9 @@ data/raw/newsapi_news/
 # append-only provenance ledger and data/feature_registry.jsonl is the M1
 # registry. "delete derived cache -> rebuild from raw -> reproduce the same
 # result" is only executable by a fresh clone if these travel with the repo.
+
+# C2: the reproducibility gate's dataset cache. DERIVED — the build is
+# deterministic (verified: identical dataset_hash across builds), so the cache is
+# a speed-up and never an input. Committing it would ship a pickle of rebuildable
+# data, and a stale one would make the gate measure the cache rather than the code.
+data/.cache/

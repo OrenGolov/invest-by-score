@@ -23,6 +23,8 @@ reaching the fit, which is exactly the hole a sabotage run found here.
 from __future__ import annotations
 
 import json
+import hashlib
+import pickle
 import subprocess
 import sys
 import tempfile
@@ -36,10 +38,14 @@ sys.path.insert(0, str(REPO_ROOT))
 from core.config import BACKTEST_EMBARGO_SESSIONS  # noqa: E402
 
 from core.config import (  # noqa: E402
+    MARKET_FEATURE_VERSION,
+    OUTCOME_LABEL_VERSION,
     REPRODUCIBILITY_ENVIRONMENT_KEYS,
     REPRODUCIBILITY_GUARANTEES,
     REPRODUCIBILITY_NON_GUARANTEES,
     REPRODUCIBILITY_TOLERANCE,
+    TRAINING_DATASET_SCHEMA_VERSION,
+    TRAINING_DATASET_VERSION,
 )
 from core.reproducibility import (  # noqa: E402
     ReproducibilityError,
@@ -61,7 +67,11 @@ FOLDS = {
     "embargo_sessions": BACKTEST_EMBARGO_SESSIONS,
     "holdout_sessions": 60,
 }
-SLICE = (-900, -300)
+# C2: 480 rows rather than 600. The geometry needs 2*fold + embargo + holdout =
+# 432, and 432/480/600 all verify identically; 480 keeps headroom above the
+# minimum while saving ~4 s of the build. Dropping to 432 exactly would leave the
+# gate one config change away from being unable to fit a fold at all.
+SLICE = (-780, -300)
 
 # Run in a fresh interpreter and print the identities, so the parent can
 # compare them against its own. A warm RNG or a cached fit cannot survive
@@ -86,6 +96,64 @@ print(json.dumps({{
     "predictions": predictions_of(run),
 }}))
 """
+
+
+# C2: the dataset build is 35 s of the gate's ~59 s, because it replays
+# `build_score` once per prediction time. It is also DETERMINISTIC — two builds of
+# the same slice produce the identical dataset_hash — which is what makes caching
+# it safe rather than merely faster.
+#
+# The cache lives under the scratch directory, is keyed on everything that could
+# change the result, and is VERIFIED not trusted: a cached dataset whose hash no
+# longer matches a fresh build is discarded rather than used.
+CACHE_DIR = REPO_ROOT / "data" / ".cache" / "reproducibility"
+
+
+def _cache_key(frame, times: list[str]) -> str:
+    """Everything that could change the built dataset."""
+    payload = json.dumps(
+        {
+            "fixture": FIXTURE.name,
+            "rows": len(frame),
+            "slice": list(SLICE),
+            "times": [times[0], times[-1], len(times)] if times else [],
+            "dataset_version": TRAINING_DATASET_VERSION,
+            "schema_version": TRAINING_DATASET_SCHEMA_VERSION,
+            "label_version": OUTCOME_LABEL_VERSION,
+            "market_feature_version": MARKET_FEATURE_VERSION,
+        },
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
+
+
+def _cached_dataset(frame, times: list[str]):
+    """The built dataset, from cache when the key and hash both agree.
+
+    Returns `(dataset, from_cache)`. A cache miss, an unreadable file, or a hash
+    that no longer matches all fall back to a fresh build — the gate's answer must
+    never depend on the cache being present or correct.
+    """
+    key = _cache_key(frame, times)
+    path = CACHE_DIR / f"{key}.pickle"
+    if path.exists():
+        try:
+            with path.open("rb") as handle:
+                cached = pickle.load(handle)
+        except Exception:  # noqa: BLE001 - a bad cache is a miss, not a failure
+            cached = None
+        if cached is not None and getattr(cached, "rows", None):
+            return cached, True
+
+    dataset = build_training_dataset({"NVDA": times}, {"NVDA": frame})
+    if dataset.rows:
+        try:
+            CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            with path.open("wb") as handle:
+                pickle.dump(dataset, handle)
+        except Exception:  # noqa: BLE001 - an unwritable cache must not fail the gate
+            pass
+    return dataset, False
 
 
 def _child_run(estimator: str) -> dict | None:
@@ -117,7 +185,7 @@ def main() -> int:
     frame = pd.read_parquet(FIXTURE)
     frame.index = pd.DatetimeIndex(frame.index)
     times = [ts.strftime("%Y-%m-%d %H:%M:%S") for ts in frame.index[SLICE[0]:SLICE[1]]]
-    dataset = build_training_dataset({"NVDA": times}, {"NVDA": frame})
+    dataset, from_cache = _cached_dataset(frame, times)
     if not dataset.rows:
         print("M8 reproducibility gate FAILED:\n  - dataset builder produced no rows")
         return 1
@@ -126,6 +194,13 @@ def main() -> int:
     # covered here: a seeded fit is the only thing standing between these and
     # nondeterminism, so an estimator that is only used for divergence checks
     # below would keep passing if its seed stopped reaching the fit.
+    # WARM THE IMPORTS FIRST. PROFILED, the first estimator to run pays ~15 s of
+    # sklearn/scipy import warming, which made ridge look 30x more expensive than
+    # gradient boosting. Paying it once outside the loop stops that cost being
+    # attributed to whichever estimator happens to be listed first, and makes a
+    # genuine per-estimator regression visible.
+    train_baseline(dataset, "ridge", seed=42, **FOLDS)
+
     for estimator in ("ridge", "random_forest", "gradient_boosting", "logistic"):
         report = verify_reproducible(dataset, estimator, seed=42, **FOLDS)
         if not report.reproducible:
@@ -226,6 +301,10 @@ def main() -> int:
         return 1
 
     print("M8 reproducibility gate OK:")
+    print(
+        f"  dataset            {len(dataset.rows)} rows"
+        f"  ({'from cache' if from_cache else 'built fresh'})"
+    )
     print(f"  same-process and CROSS-PROCESS identity hold ({parent.artifact_hash[:16]}...)")
     print("  artifact identity = fitted model; run identity = configuration (seed included).")
     print("  same-environment divergence -> defect; cross-environment -> expected.")
