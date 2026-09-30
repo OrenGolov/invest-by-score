@@ -40,7 +40,7 @@ from core.timeframes import (  # noqa: E402
     build_timeframe_snapshot,
     build_timeframe_state,
     eligible_bars,
-    snapshot_problems,
+    timeframe_snapshot_problems,
 )
 
 AS_OF = "2026-09-15"
@@ -89,7 +89,7 @@ def main() -> int:
         failures.append(f"timeframes absent from the snapshot: {missing}")
     if snapshot["status"] != STATUS_OK:
         failures.append(f"healthy fixture did not read OK (got {snapshot['status']})")
-    for problem in snapshot_problems(snapshot):
+    for problem in timeframe_snapshot_problems(snapshot):
         failures.append(f"contract problem: {problem}")
 
     # 2. the leak: a bar labelled in the past that closes in the future

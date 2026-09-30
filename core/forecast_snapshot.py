@@ -410,7 +410,7 @@ def snapshot_value(snapshot: dict, field: str):
     return row.get("value") if row.get("status") == SNAPSHOT_STATUS_PRESENT else None
 
 
-def snapshot_problems(snapshot: dict) -> list[str]:
+def forecast_snapshot_problems(snapshot: dict) -> list[str]:
     """Validate a snapshot against the F8 contract."""
     problems: list[str] = []
     if not isinstance(snapshot, dict):
@@ -503,3 +503,15 @@ def render_snapshot(snapshot: dict) -> list[dict]:
             }
         )
     return rows
+
+
+# C4: `snapshot_problems` was defined under that name in THREE modules — this
+# one for F8's per-forecast ForecastSnapshot, plus the other two snapshots. They are genuinely different
+# objects with different contracts, so this is not a W5 duplicate; the shared
+# NAME was the problem. A reader greping it found three functions with no way to
+# tell which a call site meant, and importing two into one file would have
+# silently shadowed one.
+#
+# The alias keeps any external caller working. In-repo callers all use the
+# explicit name.
+snapshot_problems = forecast_snapshot_problems

@@ -552,7 +552,7 @@ def verify_snapshot(
     }
 
 
-def snapshot_problems(report: Mapping[str, Any]) -> list[str]:
+def release_snapshot_problems(report: Mapping[str, Any]) -> list[str]:
     """Contract check on a release snapshot. Empty means clean."""
     problems: list[str] = []
     if not isinstance(report, Mapping):
@@ -628,3 +628,15 @@ def render_release_snapshot(report: Mapping[str, Any]) -> list[str]:
     if str(report.get("reason_code") or "").strip():
         lines.append(f"  reason code        {report['reason_code']}")
     return lines
+
+
+# C4: `snapshot_problems` was defined under that name in THREE modules — this
+# one for X9's release snapshot, plus the other two snapshots. They are genuinely different
+# objects with different contracts, so this is not a W5 duplicate; the shared
+# NAME was the problem. A reader greping it found three functions with no way to
+# tell which a call site meant, and importing two into one file would have
+# silently shadowed one.
+#
+# The alias keeps any external caller working. In-repo callers all use the
+# explicit name.
+snapshot_problems = release_snapshot_problems

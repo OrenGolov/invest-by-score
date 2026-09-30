@@ -57,7 +57,7 @@ from core.forecast_snapshot import (  # noqa: E402
     forecast_versions,
     render_snapshot,
     snapshot_digest,
-    snapshot_problems,
+    forecast_snapshot_problems,
     snapshot_value,
 )
 
@@ -271,7 +271,7 @@ def main() -> int:
 
     # A snapshot built with nothing still honours the contract.
     bare = build_forecast_snapshot("NVDA", "2026-09-20", "20d")
-    for problem in snapshot_problems(bare):
+    for problem in forecast_snapshot_problems(bare):
         failures.append(f"bare snapshot problem: {problem}")
     if list(bare["fields"]) != list(SNAPSHOT_FIELDS):
         failures.append("a bare snapshot omits contract fields")
@@ -279,7 +279,7 @@ def main() -> int:
         if row["status"] != SNAPSHOT_STATUS_PRESENT and not row["reason"]:
             failures.append(f"{row['field']}: renders blank for a reader")
 
-    for problem in snapshot_problems(snapshot):
+    for problem in forecast_snapshot_problems(snapshot):
         failures.append(f"contract problem: {problem}")
 
     # Versions must all be present, or a replay cannot be pinned.

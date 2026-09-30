@@ -349,7 +349,7 @@ def build_timeframe_snapshot(
     return snapshot.to_dict()
 
 
-def snapshot_problems(snapshot: dict) -> list[str]:
+def timeframe_snapshot_problems(snapshot: dict) -> list[str]:
     """Validate a built snapshot against the C1 contract."""
     problems: list[str] = []
     if not isinstance(snapshot, dict):
@@ -368,3 +368,15 @@ def snapshot_problems(snapshot: dict) -> list[str]:
         if state.get("status") != STATUS_OK and state.get("trend"):
             problems.append(f"timeframe {name!r} is {state.get('status')} but still reports a trend")
     return problems
+
+
+# C4: `snapshot_problems` was defined under that name in THREE modules — this
+# one for C1's multi-timeframe snapshot, plus the other two snapshots. They are genuinely different
+# objects with different contracts, so this is not a W5 duplicate; the shared
+# NAME was the problem. A reader greping it found three functions with no way to
+# tell which a call site meant, and importing two into one file would have
+# silently shadowed one.
+#
+# The alias keeps any external caller working. In-repo callers all use the
+# explicit name.
+snapshot_problems = timeframe_snapshot_problems

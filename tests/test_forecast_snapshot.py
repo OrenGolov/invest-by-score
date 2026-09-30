@@ -31,7 +31,7 @@ from core.forecast_snapshot import (
     forecast_versions,
     render_snapshot,
     snapshot_digest,
-    snapshot_problems,
+    forecast_snapshot_problems,
     snapshot_value,
 )
 
@@ -65,7 +65,7 @@ class ContractShapeTests(unittest.TestCase):
     def test_a_bare_snapshot_still_carries_every_field(self):
         bare = build_forecast_snapshot("NVDA", "2026-09-20", "20d")
         self.assertEqual(list(bare["fields"]), list(SNAPSHOT_FIELDS))
-        self.assertEqual(snapshot_problems(bare), [])
+        self.assertEqual(forecast_snapshot_problems(bare), [])
 
     def test_the_contract_declares_fifteen_fields(self):
         self.assertEqual(len(SNAPSHOT_FIELDS), 15)
@@ -85,7 +85,7 @@ class ContractShapeTests(unittest.TestCase):
             )
 
     def test_a_healthy_snapshot_raises_nothing(self):
-        self.assertEqual(snapshot_problems(self.snapshot), [])
+        self.assertEqual(forecast_snapshot_problems(self.snapshot), [])
 
 
 class AbsentIsNotZeroTests(unittest.TestCase):
@@ -177,7 +177,7 @@ class DigestTests(unittest.TestCase):
         snapshot = _snapshot()
         snapshot["fields"]["ticker"]["value"] = "TSLA"
         self.assertTrue(
-            any("does not match" in p for p in snapshot_problems(snapshot))
+            any("does not match" in p for p in forecast_snapshot_problems(snapshot))
         )
 
 
@@ -286,7 +286,7 @@ class ContractProblemTests(unittest.TestCase):
     def _mutated(self, mutate):
         snapshot = _snapshot()
         mutate(snapshot)
-        return snapshot_problems(snapshot)
+        return forecast_snapshot_problems(snapshot)
 
     def test_a_value_on_an_absent_field_is_reported(self):
         problems = self._mutated(

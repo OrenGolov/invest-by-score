@@ -46,7 +46,7 @@ from core.release_snapshot import (
     is_dirty,
     render_release_snapshot,
     snapshot_digest,
-    snapshot_problems,
+    release_snapshot_problems,
     tracked_files,
     verify_snapshot,
     worktree_digest,
@@ -292,13 +292,13 @@ class VerdictTests(unittest.TestCase):
     def test_a_clean_complete_snapshot_is_frozen(self):
         report = self.build(self.frozen_components())
         self.assertEqual(report["verdict"], RELEASE_FROZEN)
-        self.assertEqual(snapshot_problems(report), [])
+        self.assertEqual(release_snapshot_problems(report), [])
 
     def test_a_dirty_tree_is_not_frozen(self):
         self.assertTrue(RELEASE_DIRTY_IS_NOT_RELEASABLE)
         report = self.build(self.frozen_components(dirty=True))
         self.assertEqual(report["verdict"], RELEASE_DIRTY)
-        self.assertEqual(snapshot_problems(report), [])
+        self.assertEqual(release_snapshot_problems(report), [])
 
     def test_an_absent_component_is_incomplete(self):
         components = self.frozen_components()
@@ -306,14 +306,14 @@ class VerdictTests(unittest.TestCase):
         report = self.build(components)
         self.assertEqual(report["verdict"], RELEASE_INCOMPLETE)
         self.assertEqual(report["absent"], ["validation"])
-        self.assertEqual(snapshot_problems(report), [])
+        self.assertEqual(release_snapshot_problems(report), [])
 
     def test_absent_code_is_not_evaluated(self):
         components = self.frozen_components()
         components["code"] = _component(COMPONENT_ABSENT, "no git")
         report = self.build(components)
         self.assertEqual(report["verdict"], RELEASE_NOT_EVALUATED)
-        self.assertEqual(snapshot_problems(report), [])
+        self.assertEqual(release_snapshot_problems(report), [])
 
 
 class TheShippedBuilderIsExercisedTests(unittest.TestCase):
@@ -329,7 +329,7 @@ class TheShippedBuilderIsExercisedTests(unittest.TestCase):
         report = build_release_snapshot(validation=None)
         self.assertEqual(report["verdict"], RELEASE_INCOMPLETE)
         self.assertIn("validation", report["absent"])
-        self.assertEqual(snapshot_problems(report), [])
+        self.assertEqual(release_snapshot_problems(report), [])
 
     def test_the_builder_reports_incomplete_when_models_are_absent(self):
         report = build_release_snapshot(
@@ -347,7 +347,7 @@ class TheShippedBuilderIsExercisedTests(unittest.TestCase):
             )
             self.assertEqual(report["verdict"], RELEASE_NOT_EVALUATED)
             self.assertEqual(report["reason_code"], RELEASE_REASON_NO_GIT)
-            self.assertEqual(snapshot_problems(report), [])
+            self.assertEqual(release_snapshot_problems(report), [])
 
     def test_the_builder_always_records_every_component(self):
         report = build_release_snapshot(validation=None)
@@ -416,7 +416,7 @@ class TheShippedBuilderIsExercisedTests(unittest.TestCase):
             )
             self.assertEqual(report["verdict"], RELEASE_DIRTY)
             self.assertEqual(report["reason_code"], RELEASE_REASON_DIRTY)
-            self.assertEqual(snapshot_problems(report), [])
+            self.assertEqual(release_snapshot_problems(report), [])
         finally:
             module.collect_components = real
 
@@ -447,7 +447,7 @@ class TheShippedBuilderIsExercisedTests(unittest.TestCase):
                 validation={"X1": {"verdict": "OK"}}
             )
             self.assertEqual(report["verdict"], RELEASE_FROZEN)
-            self.assertEqual(snapshot_problems(report), [])
+            self.assertEqual(release_snapshot_problems(report), [])
         finally:
             module.collect_components = real
 
@@ -601,7 +601,7 @@ class ContractTests(unittest.TestCase):
                 name: _component(COMPONENT_PRESENT, "d") for name in RELEASE_COMPONENTS
             },
         }
-        self.assertTrue(snapshot_problems(forged))
+        self.assertTrue(release_snapshot_problems(forged))
 
     def test_a_forged_frozen_report_with_absences_is_caught(self):
         forged = {
@@ -614,7 +614,7 @@ class ContractTests(unittest.TestCase):
                 name: _component(COMPONENT_PRESENT, "d") for name in RELEASE_COMPONENTS
             },
         }
-        self.assertTrue(snapshot_problems(forged))
+        self.assertTrue(release_snapshot_problems(forged))
 
     def test_a_frozen_report_from_a_dirty_tree_is_caught(self):
         components = {
@@ -630,7 +630,7 @@ class ContractTests(unittest.TestCase):
             "worktree_digest": "d" * 64,
             "components": components,
         }
-        self.assertTrue(snapshot_problems(forged))
+        self.assertTrue(release_snapshot_problems(forged))
 
     def test_a_report_missing_a_component_state_is_caught(self):
         forged = {
@@ -640,7 +640,7 @@ class ContractTests(unittest.TestCase):
             "worktree_digest": "d" * 64,
             "components": {"code": _component(COMPONENT_PRESENT, "d")},
         }
-        self.assertTrue(snapshot_problems(forged))
+        self.assertTrue(release_snapshot_problems(forged))
 
     def test_an_incomplete_report_with_no_absences_is_caught(self):
         forged = {
@@ -652,17 +652,17 @@ class ContractTests(unittest.TestCase):
                 name: _component(COMPONENT_PRESENT, "d") for name in RELEASE_COMPONENTS
             },
         }
-        self.assertTrue(snapshot_problems(forged))
+        self.assertTrue(release_snapshot_problems(forged))
 
     def test_a_blocking_report_is_caught(self):
         self.assertTrue(
-            snapshot_problems(
+            release_snapshot_problems(
                 {"verdict": RELEASE_FROZEN, "reason": "r", "blocks_trades": True}
             )
         )
 
     def test_a_non_mapping_report_is_caught(self):
-        self.assertTrue(snapshot_problems("not a mapping"))
+        self.assertTrue(release_snapshot_problems("not a mapping"))
 
     def test_an_unknown_verdict_is_refused(self):
         from core.release_snapshot import _result

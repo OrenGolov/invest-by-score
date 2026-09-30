@@ -49,7 +49,7 @@ from core.release_snapshot import (  # noqa: E402
     is_dirty,
     render_release_snapshot,
     snapshot_digest,
-    snapshot_problems,
+    release_snapshot_problems,
     verify_snapshot,
     worktree_digest,
 )
@@ -259,8 +259,8 @@ check(
     f"the shipped snapshot reported {shipped['verdict']!r}",
 )
 check(
-    snapshot_problems(shipped) == [],
-    f"the shipped snapshot is not contract-clean: {snapshot_problems(shipped)}",
+    release_snapshot_problems(shipped) == [],
+    f"the shipped snapshot is not contract-clean: {release_snapshot_problems(shipped)}",
 )
 check(
     bool(shipped.get("worktree_digest")) and bool(shipped.get("commit")),
@@ -314,9 +314,9 @@ with tempfile.TemporaryDirectory() as directory:
         f"git repository, not NOT_EVALUATED",
     )
     check(
-        snapshot_problems(builder_no_git) == [],
+        release_snapshot_problems(builder_no_git) == [],
         f"the no-git snapshot is not contract-clean: "
-        f"{snapshot_problems(builder_no_git)}",
+        f"{release_snapshot_problems(builder_no_git)}",
     )
 
 # A COMPONENT DECLARED WITH NO PROBE must still record ABSENT. Also found by
@@ -416,7 +416,7 @@ def verdict_of(built):
 
 frozen = verdict_of(complete())
 check(frozen["verdict"] == RELEASE_FROZEN, f"a clean complete set gave {frozen['verdict']}")
-check(snapshot_problems(frozen) == [], f"frozen unclean: {snapshot_problems(frozen)}")
+check(release_snapshot_problems(frozen) == [], f"frozen unclean: {release_snapshot_problems(frozen)}")
 
 dirty_report = verdict_of(complete(dirty=True))
 check(
@@ -478,7 +478,7 @@ check(
 )
 check(
     bool(
-        snapshot_problems(
+        release_snapshot_problems(
             {
                 "verdict": RELEASE_FROZEN,
                 "reason": "trust me",

@@ -36,7 +36,7 @@ from core.timeframes import (
     build_timeframe_state,
     classify_trend,
     eligible_bars,
-    snapshot_problems,
+    timeframe_snapshot_problems,
     worst_status,
 )
 
@@ -246,7 +246,7 @@ class SnapshotTests(unittest.TestCase):
     def test_a_healthy_snapshot_is_ok_and_contract_clean(self):
         snapshot = build_timeframe_snapshot("MSFT", AS_OF, fetcher=self._fetcher(self._healthy_frames()))
         self.assertEqual(snapshot["status"], STATUS_OK)
-        self.assertEqual(snapshot_problems(snapshot), [])
+        self.assertEqual(timeframe_snapshot_problems(snapshot), [])
 
     def test_the_snapshot_status_is_the_worst_timeframe(self):
         """A multi-timeframe view is only as good as its weakest clock."""
@@ -308,7 +308,7 @@ class ContractValidationTests(unittest.TestCase):
             "ticker": "MSFT", "as_of": AS_OF, "status": STATUS_OK,
             "calculation_version": "v1", "timeframes": {"daily": {"status": STATUS_OK, "trend": "up"}},
         }
-        problems = snapshot_problems(snapshot)
+        problems = timeframe_snapshot_problems(snapshot)
         self.assertTrue(any("weekly" in problem for problem in problems))
 
     def test_an_ok_timeframe_without_a_trend_is_a_contract_problem(self):
@@ -317,7 +317,7 @@ class ContractValidationTests(unittest.TestCase):
             "MSFT", AS_OF, fetcher=helper._fetcher(helper._healthy_frames()),
         )
         snapshot["timeframes"]["daily"]["trend"] = None
-        self.assertTrue(any("no trend" in problem for problem in snapshot_problems(snapshot)))
+        self.assertTrue(any("no trend" in problem for problem in timeframe_snapshot_problems(snapshot)))
 
     def test_min_bars_covers_every_timeframe(self):
         self.assertEqual(set(TIMEFRAME_MIN_BARS), set(TIMEFRAME_ORDER))
