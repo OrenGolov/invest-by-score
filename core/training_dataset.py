@@ -534,6 +534,12 @@ def build_training_dataset(
                 try:
                     score_result = build_score(ticker, prediction_time, persist_audit=False)
                 except Exception as exc:
+                    # ABSORBS: any failure replaying the live scoring path at
+                    # this timestamp — a thin history, a provider gap, a feature
+                    # that cannot be computed. The row is EXCLUDED with a named
+                    # reason rather than built from partial features: M2 requires
+                    # every row to be complete, and the exclusion report is how a
+                    # reader learns how many rows were lost and to what.
                     excluded.append({
                         "ticker": str(ticker).upper(),
                         "prediction_time": str(prediction_time),
@@ -563,6 +569,10 @@ def build_training_dataset(
                 try:
                     label_set = build_outcome_labels(ticker, prediction_time)
                 except Exception as exc:
+                    # ABSORBS: any failure building the outcome labels — usually
+                    # a horizon that has not matured yet. Excluded with its
+                    # reason, never labelled zero: a forward return of 0.0 is a
+                    # fabricated outcome, and V1 refuses to emit one.
                     excluded.append({
                         "ticker": str(ticker).upper(),
                         "prediction_time": str(prediction_time),

@@ -40,6 +40,14 @@ def _code_commit() -> str:
         )
         return result.stdout.strip()
     except Exception:
+        # ABSORBS: git being absent, not a repository, or slow. A manifest must
+        # still be produced — the commit is provenance, not a precondition — so
+        # this degrades to a named "unknown" rather than failing the run.
+        #
+        # X9 measured the cost of that sentinel: "unknown" is indistinguishable
+        # from a commit literally named unknown once written into a record, which
+        # is why `release_snapshot` returns None instead. This one predates that
+        # and is kept for compatibility with existing manifests.
         return "unknown"
 
 

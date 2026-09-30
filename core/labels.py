@@ -193,6 +193,10 @@ def build_outcome_labels(ticker: str, as_of: str, timestamp: str | None = None) 
     try:
         frame = fetch_price_history(ticker, period=period, interval="1d")
     except Exception as exc:
+        # ABSORBS: any provider failure fetching price history — network, rate
+        # limit, malformed payload, delisted ticker. A label that cannot be
+        # computed is UNAVAILABLE, never zero: a forward return of 0.0 would
+        # train a model on a fabricated outcome.
         LOGGER.warning("Outcome label fetch failed for %s: %s", ticker, exc)
         return _unavailable_set(ticker, as_of_text, f"Price history fetch failed; no labels can be computed. ({exc})")
 

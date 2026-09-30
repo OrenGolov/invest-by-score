@@ -133,6 +133,10 @@ def _tone_direction(article: Mapping[str, Any]) -> tuple[int | None, str]:
                 }
             )
         except Exception:
+            # ABSORBS: the news adapter's tone lexicon being unimportable or
+            # raising on odd text. The article yields NO directional claim, so it
+            # is dropped rather than scored — counting it would penalise an
+            # outlet for the system's own missing classification.
             return None, "unavailable"
     if tone is None:
         return None, derivation

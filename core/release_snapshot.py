@@ -83,6 +83,10 @@ def _git(*args: str, cwd: Path | None = None) -> str | None:
             cwd=str(cwd) if cwd else None,
         )
     except Exception:
+        # ABSORBS: git being absent, not a repository, or timing out. None, never
+        # a sentinel string: `_code_commit()` returns the literal "unknown" in
+        # this situation, which is indistinguishable from a commit named
+        # "unknown" once written into a record.
         return None
     return result.stdout
 
@@ -121,6 +125,9 @@ def worktree_digest(cwd: Path | None = None) -> str | None:
             cwd=str(cwd) if cwd else None,
         )
     except Exception:
+        # ABSORBS: `git hash-object` failing over the worktree. None means the
+        # digest is UNKNOWN, which X9 reports as an absent code component rather
+        # than freezing a release around a digest it could not compute.
         return None
     # Hash the per-file hashes with their paths, so a rename changes the digest
     # even when the contents do not.
@@ -400,6 +407,11 @@ def _load_runs() -> list[dict[str, Any]]:
 
         return list(load_training_runs())
     except Exception:
+        # ABSORBS: an unreadable or malformed run ledger. An EMPTY list, which
+        # `collect_components` then reports as an ABSENT models component — so a
+        # broken ledger blocks the release rather than being mistaken for a
+        # repository that has simply never trained anything. Both are "no runs";
+        # only one is a defect, and X9's INCOMPLETE verdict covers both.
         return []
 
 

@@ -241,6 +241,11 @@ def drift_check(
     try:
         result = score_drift_psi(reference_scores, candidate_scores)
     except Exception as exc:
+        # ABSORBS: a PSI computation that cannot be made — too few scores,
+        # degenerate bins, mismatched shapes. Reports NOT_EVALUATED with the
+        # exception type, never "no drift": an uncomputable drift check is
+        # ignorance, and treating it as a pass is the exact failure X10 exists
+        # to prevent.
         return _check(
             PROMO_CHECK_DRIFT, PROMO_NOT_EVALUATED,
             f"drift could not be computed: {type(exc).__name__}: {exc}",

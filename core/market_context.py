@@ -196,6 +196,11 @@ def build_market_context(
         try:
             frame = fetcher(proxy, "1y", "1d")
         except Exception as exc:
+            # ABSORBS: a provider failure for ONE context proxy. The others are
+            # still usable, so the loop records this one as failed and continues
+            # — a missing VIX must not cost the S&P context too. The failure is
+            # named in `failed`, so a consumer can tell partial context from
+            # complete.
             LOGGER.warning("market context fetch failed for %s (%s): %s", name, proxy, exc)
             failed.append(name)
             continue

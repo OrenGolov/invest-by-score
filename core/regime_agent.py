@@ -443,6 +443,10 @@ def build_regime_snapshot(ticker: str, as_of: str, timestamp: str | None = None)
     try:
         history = fetch_price_history(ticker, period=period, interval="1d")
     except Exception as exc:
+        # ABSORBS: any provider failure fetching the history a regime is
+        # classified from. Returns an UNAVAILABLE snapshot rather than a regime:
+        # N4 couples STRESS to NO_TRADE, so guessing a regime here could unblock
+        # a trade the evidence does not support.
         LOGGER.warning("Regime fetch failed for %s: %s", ticker, exc)
         return _snapshot_frame(
             ticker, as_of_text, "UNAVAILABLE", UNAVAILABLE_SOURCE_ID,

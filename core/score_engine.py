@@ -87,6 +87,9 @@ def _build_recommended_actions(score: float, confidence: float, as_of: str) -> d
         review_dt = __import__("datetime").datetime.fromisoformat(review_date[:10])
         review_date = (review_dt + timedelta(days=45)).strftime("%Y-%m-%d")
     except Exception:
+        # ABSORBS: a review date that will not parse as an ISO date. Reports the
+        # literal "TBD" rather than a guessed date — an invented review date
+        # would be presented to an operator as a fact.
         review_date = "TBD"
 
     return {
@@ -106,6 +109,9 @@ def _build_latest_financial_report(as_of: str) -> dict:
         report_dt = __import__("datetime").datetime.fromisoformat(as_of[:10])
         report_date = (report_dt - timedelta(days=90)).strftime("%Y-%m-%d")
     except Exception:
+        # ABSORBS: an as_of that will not parse. Falls back to the as_of DATE
+        # itself, which is the one date known to be real — a ±90-day estimate
+        # from an unparseable stamp would be fiction.
         report_date = as_of[:10]
 
     return {
@@ -125,6 +131,7 @@ def _build_next_expected_report(as_of: str) -> dict:
         report_dt = __import__("datetime").datetime.fromisoformat(as_of[:10])
         next_date = (report_dt + timedelta(days=90)).strftime("%Y-%m-%d")
     except Exception:
+        # ABSORBS: the same unparseable as_of, for the forward-looking estimate.
         next_date = as_of[:10]
 
     return {
@@ -623,6 +630,9 @@ def _parse_calendar_day(raw: object) -> datetime | None:
     try:
         return datetime.strptime(str(raw)[:10], "%Y-%m-%d")
     except Exception:
+        # ABSORBS: any unparseable timestamp. None means NOT A DATE, which every
+        # caller checks — returning a sentinel date instead would let an
+        # unparseable stamp pass a freshness test.
         return None
 
 

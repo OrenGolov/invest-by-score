@@ -489,6 +489,10 @@ def embargo_problems(
             end = pd.Timestamp(rows[train_end].prediction_time)
             start = pd.Timestamp(rows[validation_start].prediction_time)
         except Exception:
+            # ABSORBS: a prediction_time that will not parse as a timestamp.
+            # Reported as a PROBLEM rather than skipped, because an unverifiable
+            # embargo is exactly the condition A2 added this check to catch — a
+            # silent skip would restore the label leak it closed.
             problems.append(
                 f"fold {fold.get('fold_id')}: prediction times are not timestamps, "
                 f"so the embargo cannot be verified"
