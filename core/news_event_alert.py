@@ -66,6 +66,29 @@ NEWS_EVENT_ALERT_VERSION = "news-event-alert-v1"
 # evidence that nothing happened.
 NEWS_EVENT_NOT_EVALUATED = "NOT_EVALUATED"
 
+# SNAPSHOT STATUSES THAT MEAN "DO NOT CONCLUDE ANYTHING", with the sentence each
+# one contributes to the alert's reason. Enumerated POSITIVELY so a status nobody
+# listed here is not silently treated as readable.
+#
+# `INCOMPLETE` is deliberately ABSENT: it means the provider was asked and
+# carried no on-entity article, which is a real negative answer -- "nothing
+# happened" -- and reporting it as unevaluable would hide a measurement.
+_UNREADABLE_STATUSES: dict[str, str] = {
+    "UNAVAILABLE": "the news provider was unavailable",
+    "INVALID": (
+        "the provider payload violated the point-in-time policy, so it was "
+        "rejected fail-closed"
+    ),
+    # MEASURED LIVE on NVDA: the adapter publishes NO sentiment for this status,
+    # because averaging sources that disagree beyond the tone tolerance
+    # manufactures a neutral reading no source supports. Grading an event from
+    # such a day asserts something the credible evidence disputes.
+    "CONTRADICTORY": (
+        "credible sources disagree beyond the tone tolerance, so no aggregate "
+        "was published"
+    ),
+}
+
 # Human titles for the taxonomy, so a subject line reads like the operator's
 # examples ("Earnings Results") rather than like a database key ("earnings").
 _TITLES: dict[str, str] = {
@@ -97,17 +120,24 @@ def title_for(event_type: str, *, headline: str = "") -> str:
 
 
 def _articles(snapshot: Mapping[str, Any]) -> list[dict]:
-    """The point-in-time-eligible articles a snapshot carries.
+    """The articles the adapter judged ELIGIBLE, in the adapter's own terms.
 
-    Reads the keys the news adapter actually writes. An unrecognised shape yields
-    nothing rather than guessing, because inventing articles would manufacture
-    events.
+    MEASURED on a live snapshot: the payload key is ``articles``, and each row
+    carries the adapter's own ``included_in_aggregation`` flag plus an
+    ``exclusion_reason`` ("duplicate_headline", "zero_relevance",
+    "zero_source_weight"). The ``credible`` list is an internal local in
+    ``build_news_snapshot`` and never reaches the payload, so reading it finds
+    nothing and silently falls through to the UNFILTERED list -- which would
+    treat articles the adapter explicitly excluded as eligible evidence.
     """
-    for key in ("credible", "articles", "records"):
-        value = snapshot.get(key)
-        if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
-            return [dict(item) for item in value if isinstance(item, Mapping)]
-    return []
+    value = snapshot.get("articles")
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return []
+    return [
+        dict(item)
+        for item in value
+        if isinstance(item, Mapping) and item.get("included_in_aggregation")
+    ]
 
 
 def leading_event(
@@ -131,13 +161,18 @@ def leading_event(
     if not isinstance(snapshot, Mapping):
         raise NewsEventAlertError("a news snapshot must be a mapping")
 
+    # EVERY STATUS IS HANDLED EXPLICITLY, and the three that mean "do not
+    # conclude anything" are distinguished from the one that means "nothing
+    # happened". CAUGHT LIVE: NVDA returned CONTRADICTORY and the first version
+    # graded an event from it, because only UNAVAILABLE was checked.
     status = str(snapshot.get("status") or "").upper()
-    if status == "UNAVAILABLE":
+    if status in _UNREADABLE_STATUSES:
         return {
             "found": False,
             "readable": False,
+            "status": status,
             "reason": (
-                f"the news provider was unavailable "
+                f"{_UNREADABLE_STATUSES[status]} "
                 f"({snapshot.get('reason') or 'no reason given'}); nothing can "
                 f"be concluded about whether an event occurred"
             ),
@@ -153,16 +188,29 @@ def leading_event(
             "reason": "the provider returned no point-in-time eligible article",
         }
 
+    # THE ADAPTER'S OWN RELEVANCE IS USED, never recomputed. It stamps
+    # `relevance` on every enriched article; recomputing it here from `ticker`
+    # and `company_name` reads fields the enriched record does not carry, so it
+    # returned 0.0 for every article and the floor was never really applied.
+    # W5: one canonical implementation of one measurement.
     scored: list[tuple[float, dict]] = []
     for article in articles:
+        relevance = article.get("relevance")
+        if relevance is None:
+            # Not stamped: fall back to the canonical resolver rather than
+            # assuming either extreme.
+            try:
+                relevance = resolve_relevance(article, ticker)
+            except Exception as exc:  # a malformed article must not lose the day
+                LOGGER.warning("relevance failed for an article: %s", exc)
+                continue
         try:
-            relevance = resolve_relevance(article, ticker)
-        except Exception as exc:  # a malformed article must not lose the day
-            LOGGER.warning("relevance failed for an article: %s", exc)
+            relevance = float(relevance)
+        except (TypeError, ValueError):
             continue
-        if relevance is None or float(relevance) < float(min_relevance):
+        if relevance < float(min_relevance):
             continue
-        scored.append((float(relevance), article))
+        scored.append((relevance, article))
 
     if not scored:
         return {
@@ -178,8 +226,15 @@ def leading_event(
     relevance, article = max(scored, key=lambda pair: pair[0])
     headline = str(article.get("headline") or article.get("title") or "")
     body = str(article.get("summary") or article.get("description") or "")
-    event_type = classify_event(f"{headline} {body}")
-    tone, derivation = resolve_tone(article)
+
+    # THE ADAPTER'S OWN CATEGORY AND TONE, for the same W5 reason. It classifies
+    # over the full text it fetched, which is more than the enriched record
+    # keeps; reclassifying from the headline alone loses that context.
+    event_type = article.get("category") or classify_event(f"{headline} {body}")
+    tone = article.get("tone")
+    derivation = article.get("tone_derivation")
+    if tone is None:
+        tone, derivation = resolve_tone(article)
 
     return {
         "found": True,
@@ -190,7 +245,11 @@ def leading_event(
         "tone": tone,
         "tone_derivation": derivation,
         "published_time": article.get("published_time") or article.get("publishedAt"),
-        "source": article.get("source") or article.get("source_name"),
+        "source": (
+            article.get("source")
+            or article.get("source_id")
+            or article.get("source_name")
+        ),
         "url": article.get("url"),
         "candidates": len(scored),
     }
@@ -324,7 +383,9 @@ def summary_for(alert: Mapping[str, Any]) -> dict:
 
     ticker = alert.get("ticker") or "the portfolio"
     detail = alert.get("detail") if isinstance(alert.get("detail"), Mapping) else {}
-    source = detail.get("source")
+    # The adapter stamps `source_id`; `source` is the provider-payload spelling.
+    # Read both, because `leading_event` carries whichever the article had.
+    source = detail.get("source") or detail.get("source_id")
     headline = alert.get("headline") or detail.get("headline")
 
     who = f"{ticker}"

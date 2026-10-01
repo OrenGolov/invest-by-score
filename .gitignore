@@ -69,3 +69,10 @@ data/.cache/
 # file deleted before it is read. CI #170 failed exactly that way.
 .coverage
 .coverage.*
+
+# A8 alert ledgers. The dashboard reads these; they are local operational
+# records, not source. Keeping them untracked avoids the checkout-dependence
+# bug class: a test or gate that asserted their contents would pass here and
+# fail on a fresh clone.
+data/alerts.jsonl
+data/alert_deliveries.jsonl

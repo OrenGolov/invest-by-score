@@ -48,20 +48,55 @@ def article(
     company="Broadcom",
     source="Reuters",
     published="2026-10-01T20:30:00+00:00",
+    relevance=None,
+    category=None,
+    tone=None,
+    included=True,
+    exclusion_reason="",
 ):
+    """One ENRICHED article, in the shape `build_news_snapshot` really emits.
+
+    MEASURED on a live snapshot: the adapter stamps `relevance`, `category`,
+    `tone`, `tone_derivation`, `included_in_aggregation` and `exclusion_reason`
+    on each row, and does NOT carry `ticker`, `company_name` or `summary`. The
+    first version of this fixture invented those three, which is why a reader
+    that recomputed relevance from them passed the tests and returned 0.0 for
+    every real article.
+
+    `relevance`, `category` and `tone` default to the canonical resolvers' own
+    answers, so a fixture cannot disagree with the adapter about its own text.
+    """
+    from core.news_adapter import classify_event, lexicon_tone, resolve_relevance
+
+    text = f"{headline} {summary}".strip()
+    if relevance is None:
+        relevance = resolve_relevance(
+            {"headline": headline, "summary": summary,
+             "ticker": ticker, "company_name": company},
+            "AVGO" if company == "Broadcom" else ticker or "",
+        )
+    if category is None:
+        category = classify_event(text)
+    if tone is None:
+        tone = lexicon_tone(text)
     return {
         "headline": headline,
-        "summary": summary,
-        "ticker": ticker,
-        "company_name": company,
         "published_time": published,
-        "source": source,
+        "source_id": source,
+        "relevance": relevance,
+        "category": category,
+        "tone": tone,
+        "tone_derivation": "lexicon_v1",
+        "included_in_aggregation": included,
+        "exclusion_reason": exclusion_reason,
+        "source_weight": 1.0,
         "url": "https://example.invalid/story",
     }
 
 
 def snapshot(articles, status="OK", reason=None):
-    out = {"status": status, "credible": list(articles)}
+    """A snapshot in the payload shape: the key is `articles`, not `credible`."""
+    out = {"status": status, "articles": list(articles)}
     if reason:
         out["reason"] = reason
     return out
@@ -247,6 +282,63 @@ class AnUnreadableProviderIsNotAQuietDayTests(unittest.TestCase):
         )
         self.assertIn("429", alert["reason"])
 
+    def test_a_contradictory_snapshot_is_not_evaluated(self):
+        """CAUGHT LIVE on NVDA. The first version checked only UNAVAILABLE.
+
+        The adapter publishes NO sentiment for CONTRADICTORY, because averaging
+        sources that disagree beyond the tone tolerance manufactures a neutral
+        reading no source supports. Grading an event from such a day asserts
+        something the credible evidence disputes.
+        """
+        alert = news_event_alert(
+            snapshot(
+                [article("Broadcom reports quarterly earnings")],
+                status="CONTRADICTORY",
+                reason="2 same-day contradiction cluster(s) exceed the tolerance",
+            ),
+            "AVGO", memories=many("earnings", 0.055), as_of="2026-10-01",
+        )
+        self.assertEqual(alert["verdict"], NEWS_EVENT_NOT_EVALUATED)
+        self.assertIn("disagree", alert["reason"])
+
+    def test_an_invalid_payload_is_not_evaluated(self):
+        # INVALID means the payload broke the point-in-time policy and was
+        # rejected fail-closed. Future-dated articles are not evidence.
+        alert = news_event_alert(
+            snapshot(
+                [article("Broadcom reports quarterly earnings")],
+                status="INVALID",
+                reason="3 future-dated publication times",
+            ),
+            "AVGO", memories=many("earnings", 0.055), as_of="2026-10-01",
+        )
+        self.assertEqual(alert["verdict"], NEWS_EVENT_NOT_EVALUATED)
+        self.assertIn("point-in-time", alert["reason"])
+
+    def test_an_incomplete_snapshot_IS_a_real_negative(self):
+        # INCOMPLETE is deliberately NOT unreadable: the provider was asked and
+        # carried no on-entity article. That is "nothing happened", and calling
+        # it unevaluable would hide a measurement.
+        alert = news_event_alert(
+            snapshot([], status="INCOMPLETE",
+                     reason="no credible, on-entity articles in the window"),
+            "AVGO", memories=many("earnings", 0.055), as_of="2026-10-01",
+        )
+        self.assertEqual(alert["verdict"], EVENT_IMPACT_NO_EVENT)
+        self.assertTrue(alert["measured"])
+
+    def test_an_article_the_adapter_excluded_is_not_evidence(self):
+        # The adapter flags duplicates, zero-relevance and zero-weight rows with
+        # `included_in_aggregation: False`. Reading the unfiltered list would
+        # treat those as eligible.
+        alert = news_event_alert(
+            snapshot([article("Broadcom reports quarterly earnings",
+                              included=False,
+                              exclusion_reason="duplicate_headline")]),
+            "AVGO", memories=many("earnings", 0.055), as_of="2026-10-01",
+        )
+        self.assertEqual(alert["verdict"], EVENT_IMPACT_NO_EVENT)
+
     def test_a_missing_snapshot_is_not_evaluated(self):
         alert = news_event_alert(None, "AVGO", as_of="2026-10-01")
         self.assertEqual(alert["verdict"], NEWS_EVENT_NOT_EVALUATED)
@@ -350,7 +442,8 @@ class RelevanceTests(unittest.TestCase):
     def test_an_unrelated_article_is_excluded(self):
         alert = news_event_alert(
             snapshot([article("Some other firm reports earnings",
-                              ticker="ZZZZ", company="Totally Different Inc")]),
+                              ticker="ZZZZ", company="Totally Different Inc",
+                              relevance=0.0)]),
             "AVGO", memories=many("earnings", 0.055), as_of="2026-10-01",
         )
         self.assertEqual(alert["verdict"], EVENT_IMPACT_NO_EVENT)
