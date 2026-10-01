@@ -363,18 +363,35 @@ class ShippedFamilyTests(unittest.TestCase):
             for line in open("data/research_trials.jsonl", encoding="utf-8")
             if line.strip()
         ]
-        family = {r["estimator"]: r["folds"][0]["predictions"] for r in runs}
-        outcomes = runs[0]["folds"][0]["actuals"]
+        # A COHERENT COHORT. The ledger is append-only and holds runs of two
+        # vintages - 120-row folds before A1, 300-row folds after - so building
+        # the family from every run while taking the outcomes from runs[0] pairs
+        # 300 predictions against 120 outcomes.
+        newest = runs[-1].get("dataset_hash")
+        cohort = [r for r in runs if r.get("dataset_hash") == newest] or runs
+        family = {r["estimator"]: r["folds"][0]["predictions"] for r in cohort}
+        outcomes = cohort[0]["folds"][0]["actuals"]
+        runs = cohort
         return family, outcomes, runs, trials
 
-    def test_the_registry_undercounts_the_shipped_search(self):
+    def test_the_registry_no_longer_undercounts_the_search(self):
+        """RESTATED after A5. The blocker was 1 trial against 8 estimators.
+
+        A5 registers one trial per estimator whenever a run is persisted, so the
+        registry must now hold at least as many trials as the cohort has runs.
+        The ledger is append-only, so the pre-A5 trial survives and the count can
+        exceed the run count — that is history being kept, not a new gap.
+        """
         _, _, runs, trials = self.shipped()
         counts = family_size(runs, trials)
-        self.assertEqual(counts["observed_count"], 8)
-        self.assertEqual(counts["registered_count"], 1)
-        self.assertEqual(counts["registry_gap"], 7)
+        self.assertGreaterEqual(
+            counts["registered_count"],
+            counts["observed_count"],
+            "fewer trials than runs means runs are being persisted outside the "
+            "path that registers them",
+        )
 
-    def test_the_shipped_family_fails_correction(self):
+    def test_the_shipped_family_still_fails_correction(self):
         family, outcomes, runs, trials = self.shipped()
         report = evaluate_multiple_testing(
             family, outcomes, runs=runs, trials=trials, permutations=200

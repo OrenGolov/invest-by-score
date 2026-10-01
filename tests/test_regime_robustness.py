@@ -318,15 +318,33 @@ class RenderTests(unittest.TestCase):
 class ShippedFoldTests(unittest.TestCase):
     """The blocking measurement, against the runs the repo ships."""
 
-    def test_no_shipped_fold_carries_regime_labels(self):
+    def test_the_regenerated_folds_carry_regime_labels(self):
+        """RESTATED after A1. The blocker was that NO fold carried a label.
+
+        A1 records one per validation observation and the ledger was
+        regenerated, so a labelled fold must exist and its labels must align
+        with its predictions - a misaligned slice reads as evidence while
+        describing the wrong observations.
+        """
         from core.training import load_training_runs
 
         runs = load_training_runs()
         if not runs:
             self.skipTest("no training runs on disk")
-        for run in runs:
+        labelled = [
+            run for run in runs if fold_regime_labels(run["folds"][0]) is not None
+        ]
+        self.assertTrue(
+            labelled,
+            "no fold carries regime labels; A1 added them and losing them "
+            "re-blocks X3 entirely",
+        )
+        for run in labelled:
             with self.subTest(estimator=run["estimator"]):
-                self.assertIsNone(fold_regime_labels(run["folds"][0]))
+                fold = run["folds"][0]
+                self.assertEqual(
+                    len(fold_regime_labels(fold)), len(fold["predictions"])
+                )
 
     def test_a_shipped_run_is_not_evaluated(self):
         from core.training import load_training_runs

@@ -34,7 +34,6 @@ from core.config import (  # noqa: E402
 )
 from core.regime_robustness import (  # noqa: E402
     RR_REASON_CARRIED,
-    RR_REASON_NO_LABELS,
     RR_REASON_THIN_CELLS,
     RegimeRobustnessError,
     evaluate_regime_robustness,
@@ -83,38 +82,37 @@ def book(concentrated: bool, n: int = 100, seed: int = 303):
 runs = load_training_runs()
 check(bool(runs), "no training runs are available; X3 cannot state its blocker")
 
+# RESTATED 2026-10-01. A1 records a regime label per validation observation and
+# the ledger was regenerated, so the blocking claim - "not one persisted fold
+# carries a regime label" - is history. The gate now requires them to be there.
 labelled = [r["estimator"] for r in runs if fold_regime_labels(r["folds"][0]) is not None]
 check(
-    not labelled,
-    f"{labelled} now carry per-observation regime labels. That is the fix X3 "
-    f"asks for, and this gate's NOT_EVALUATED claim is stale - the real "
-    f"robustness test must now run on them",
+    bool(labelled),
+    "no run carries per-observation regime labels. A1 added them and the ledger "
+    "was regenerated; losing them re-blocks X3 entirely",
 )
 
 if runs:
-    fold = runs[0]["folds"][0]
+    # The ledger is append-only and holds runs of two vintages: the originals
+    # (no context) and those written after A1. Read a LABELLED one, or this
+    # measures the pre-A1 world forever.
+    labelled_runs = [r for r in runs if fold_regime_labels(r["folds"][0]) is not None]
+    fold = (labelled_runs or runs)[0]["folds"][0]
     shipped = evaluate_regime_robustness(
         fold["predictions"], fold["actuals"], fold_regime_labels(fold)
     )
     check(
-        shipped["verdict"] == REGIME_ROBUSTNESS_NOT_EVALUATED,
-        f"a shipped run reported {shipped['verdict']}; with no labels the only "
-        f"honest answer is NOT_EVALUATED",
+        shipped["verdict"] != REGIME_ROBUSTNESS_NOT_EVALUATED,
+        f"a shipped run still reported NOT_EVALUATED with labels present; the "
+        f"labels exist, so the comparison must produce a verdict",
     )
     check(
-        shipped["reason_code"] == RR_REASON_NO_LABELS,
-        f"a shipped run gave reason {shipped['reason_code']!r}",
+        shipped.get("pooled_accuracy") is not None,
+        "an evaluated report must carry a pooled accuracy",
     )
     check(
-        "prediction_time" in shipped["reason"],
-        "the NOT_EVALUATED reason does not name the pipeline fix; a blocker "
-        "without a next action is just a complaint",
-    )
-    # And it must not invent numbers it could not compute.
-    check(
-        shipped.get("pooled_accuracy") is None and shipped.get("worst_drop") is None,
-        "an unevaluated report carried an accuracy or a drop; those cannot "
-        "exist without labels and must be ABSENT",
+        shipped.get("worst_drop") is not None,
+        "an evaluated report must carry a worst leave-one-out drop",
     )
 
 
@@ -354,7 +352,7 @@ if failures:
     sys.exit(1)
 
 print("X3 regime robustness gate: OK")
-print(f"  shipped runs with regime labels   0 of {len(runs)}  -> NOT_EVALUATED")
+print(f"  shipped runs with regime labels   {len(labelled)} of {len(runs)}  -> {shipped['verdict']}")
 print(f"  carried book                      {concentrated['verdict']}"
       f" (carrier {concentrated['carrier']}, drop {concentrated['worst_drop']:.4f})")
 print(f"  uniform book                      {broad['verdict']}"

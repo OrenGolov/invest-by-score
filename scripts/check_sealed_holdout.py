@@ -36,7 +36,6 @@ from core.config import (  # noqa: E402
 )
 from core.sealed_holdout import (  # noqa: E402
     HOLDOUT_REASON_EMBARGO_SHORT,
-    HOLDOUT_REASON_NO_BOUNDS,
     HOLDOUT_REASON_NO_RUNS,
     HOLDOUT_REASON_OVERLAP,
     SEAL_REQUIRED_FACTS,
@@ -111,36 +110,39 @@ if runs:
         )
         if any(facts.values())
     ]
+    # RESTATED 2026-10-01. A1 added the four seal facts to TrainingRun and the
+    # ledger was regenerated, so the blocking claim this gate carried - "of the
+    # four facts needed to verify a seal, the run ledger carries none" - is
+    # history. The gate now asserts the opposite: the runs that record a seal
+    # must produce a real verdict rather than NOT_EVALUATED.
+    sealed_cohort = [run for run in runs if run.get("dataset_rows")]
     check(
-        not recorded,
-        f"{recorded} now record seal facts. That is the fix X8 asks for, and "
-        f"this gate's 'the seal is recorded nowhere' claim is stale - the real "
-        f"seal check must now run against them",
+        bool(sealed_cohort),
+        "no run records its dataset row count. A1 added the seal facts and the "
+        "ledger was regenerated with them; if none survives, that regression "
+        "re-blocks X8",
     )
 
-    shipped = evaluate_sealed_holdout(runs, dataset_rows=dataset_rows)
+    # NO dataset_rows OVERRIDE: the run records its own count, which is what A1
+    # added it for. The dataset ledger's first line describes the OLD 406-row
+    # dataset, and passing it made a 1,464-row run's folds look like they
+    # reached into a 406-row holdout.
+    shipped = evaluate_sealed_holdout(sealed_cohort or runs)
     check(
-        shipped["verdict"] == HOLDOUT_NOT_EVALUATED,
-        f"the shipped runs reported {shipped['verdict']}; with no recorded "
-        f"bounds, geometry or fold indices the only honest answer is "
-        f"NOT_EVALUATED",
+        shipped["verdict"] == HOLDOUT_SEALED,
+        f"the shipped runs reported {shipped['verdict']}, not SEALED. A1 records "
+        f"the bounds, the geometry and the absolute fold indices, and A2 set a "
+        f"geometry whose last fold stops a full horizon short of the tail",
     )
     check(
-        shipped.get("reason_code") == HOLDOUT_REASON_NO_BOUNDS,
-        f"the shipped reason code is {shipped.get('reason_code')!r}, expected "
-        f"{HOLDOUT_REASON_NO_BOUNDS!r}",
+        shipped.get("holdout") is not None,
+        "a SEALED report must name its bounds; an unlocated seal is not a seal",
     )
+    facts = recorded_facts((sealed_cohort or runs)[0])
     check(
-        sorted(shipped.get("missing_facts") or []) == sorted(SEAL_REQUIRED_FACTS),
-        f"the report does not name all four missing seal facts: "
-        f"{shipped.get('missing_facts')}",
-    )
-    # THE SHAPE RULE: an unlocated seal carries no bounds. [0, 0] or a 0.0 share
-    # would read as "the seal is empty", a different claim entirely.
-    check(
-        shipped.get("holdout") is None and shipped.get("holdout_share") is None,
-        "an unevaluated report carried bounds or a share; neither can exist "
-        "without a recorded seal and both must be ABSENT",
+        all(facts.values()),
+        f"the runs record only {[k for k, v in facts.items() if v]} of the four "
+        f"seal facts; X8 cannot be audited on a partial record",
     )
     check(
         holdout_problems(shipped) == [],
@@ -388,8 +390,8 @@ if failures:
 
 print("X8 sealed holdout gate: OK")
 print(f"  dataset rows                      {dataset_rows}")
-print(f"  seal facts recorded               0 of {len(SEAL_REQUIRED_FACTS)}"
-      f"  -> NOT_EVALUATED")
+print(f"  seal facts recorded               {sum(facts.values())} of "
+      f"{len(SEAL_REQUIRED_FACTS)}  -> {shipped['verdict']}")
 print(f"  shipped geometry (emb 60)         ILLEGAL against a {horizon}-session horizon")
 print(f"  cheapest legal geometry           {minimum_rows(60, 252, 60)} rows"
       f"  (short by {minimum_rows(60, 252, 60) - 406})")

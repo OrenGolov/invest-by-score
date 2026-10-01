@@ -417,16 +417,37 @@ class ShippedDataTests(unittest.TestCase):
     def test_the_dataset_is_406_rows(self):
         self.assertEqual(self.rows, 406)
 
-    def test_no_shipped_run_records_a_seal(self):
-        for run_record in self.runs:
+    def test_the_regenerated_runs_record_a_seal(self):
+        """RESTATED after A1. The blocker was that NO run recorded any seal fact.
+
+        A1 added the four facts to `TrainingRun` and the ledger was regenerated,
+        so the runs carrying a `dataset_rows` must carry all four — a partial
+        record cannot be audited, which was the original complaint.
+        """
+        sealed = [run for run in self.runs if run.get("dataset_rows")]
+        self.assertTrue(
+            sealed,
+            "no run records a dataset row count; A1's seal facts have been lost",
+        )
+        for run_record in sealed:
             with self.subTest(estimator=run_record["estimator"]):
                 facts = recorded_facts(run_record)
-                self.assertEqual([f for f, p in facts.items() if p], [])
+                self.assertEqual([f for f, ok in facts.items() if not ok], [])
 
-    def test_the_shipped_verdict_is_not_evaluated(self):
-        report = evaluate_sealed_holdout(self.runs, dataset_rows=self.rows)
-        self.assertEqual(report["verdict"], HOLDOUT_NOT_EVALUATED)
-        self.assertEqual(report["reason_code"], HOLDOUT_REASON_NO_BOUNDS)
+    def test_the_shipped_verdict_is_sealed(self):
+        """RESTATED after A1/A2: the seal is recorded and the geometry embargoes it.
+
+        NO `dataset_rows` OVERRIDE. The run records its own count — that is what
+        A1 added it for — and the dataset ledger's first line describes the OLD
+        406-row dataset, which would make a 1,464-row run's folds look like they
+        reached into a 406-row holdout.
+        """
+        sealed = [run for run in self.runs if run.get("dataset_rows")]
+        if not sealed:
+            self.skipTest("no run records a seal")
+        report = evaluate_sealed_holdout(sealed)
+        self.assertEqual(report["verdict"], HOLDOUT_SEALED)
+        self.assertIsNotNone(report.get("holdout"))
         self.assertEqual(holdout_problems(report), [])
 
     def test_the_shipped_dataset_admits_no_legal_geometry(self):
