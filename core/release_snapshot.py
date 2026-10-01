@@ -114,27 +114,55 @@ def worktree_digest(cwd: Path | None = None) -> str | None:
     files = tracked_files(cwd)
     if files is None:
         return None
-    try:
-        result = subprocess.run(
-            ["git", "hash-object", "--stdin-paths"],
-            input="\n".join(files),
-            capture_output=True,
-            text=True,
-            timeout=300,
-            check=True,
-            cwd=str(cwd) if cwd else None,
-        )
-    except Exception:
-        # ABSORBS: `git hash-object` failing over the worktree. None means the
-        # digest is UNKNOWN, which X9 reports as an absent code component rather
-        # than freezing a release around a digest it could not compute.
-        return None
+
+    root = Path(cwd) if cwd else Path.cwd()
+
+    def _hash_batch(paths: list[str]) -> list[str] | None:
+        try:
+            result = subprocess.run(
+                ["git", "hash-object", "--stdin-paths"],
+                input="\n".join(paths),
+                capture_output=True,
+                text=True,
+                timeout=300,
+                check=True,
+                cwd=str(cwd) if cwd else None,
+            )
+        except Exception:
+            # ABSORBS: `git hash-object` failing for the batch. Resolved per file
+            # below rather than voiding the digest — see the note there.
+            return None
+        blobs = result.stdout.split()
+        return blobs if len(blobs) == len(paths) else None
+
+    digests = _hash_batch(files)
+    if digests is None:
+        # A FILE VANISHED MID-HASH, and one transient must not void the digest.
+        #
+        # MEASURED: `pytest --cov` writes `.coverage` into the repository root.
+        # `git ls-files` lists it, and by the time `hash-object` reaches it the
+        # file is gone, so git exits 128 and the ORIGINAL version returned None
+        # for all 383 files. The code component then read ABSENT and a snapshot
+        # reported NOT_EVALUATED instead of INCOMPLETE — a blackout caused by one
+        # unreadable path.
+        #
+        # That is the wrong failure mode for a check whose job is to NOTICE
+        # CHANGE. A vanished file is itself a change, so it is recorded as one.
+        digests = []
+        for path in files:
+            single = _hash_batch([path])
+            if single:
+                digests.append(single[0])
+            elif (root / path).exists():
+                # Present but unhashable: genuinely unknown, so the digest cannot
+                # claim to describe the tree.
+                return None
+            else:
+                digests.append("<absent>")
+
     # Hash the per-file hashes with their paths, so a rename changes the digest
     # even when the contents do not.
-    blobs = result.stdout.split()
-    if len(blobs) != len(files):
-        return None
-    payload = json.dumps(dict(zip(files, blobs)), sort_keys=True)
+    payload = json.dumps(dict(zip(files, digests)), sort_keys=True)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 

@@ -63,3 +63,9 @@ data/raw/newsapi_news/
 # a speed-up and never an input. Committing it would ship a pickle of rebuildable
 # data, and a stale one would make the gate measure the cache rather than the code.
 data/.cache/
+
+# D3's coverage data. Derived, and tracking it would also break X9: `git ls-files`
+# lists it the moment pytest-cov creates it, and `git hash-object` then fails on a
+# file deleted before it is read. CI #170 failed exactly that way.
+.coverage
+.coverage.*
