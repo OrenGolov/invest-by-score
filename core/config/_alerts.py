@@ -1352,3 +1352,60 @@ def _validate_alert_delivery_config() -> None:
 
 
 _validate_alert_delivery_config()
+
+
+# --- A9: news event alert ------------------------------------------------------
+# The operator's examples were corporate news ("AVGO - Earnings Results"), which
+# none of A1-A6 can produce because none of them reads a headline. A9 classifies
+# the day's article and then lets A3 grade it from REALIZED outcomes.
+NEWS_EVENT_ALERT_VERSION = "news-event-alert-v1"
+
+# THE RELEVANCE FLOOR. `news_adapter.resolve_relevance` is a THREE-VALUED scale,
+# not a continuum: 1.0 when the ticker itself matches, 0.7 when every token of
+# the company name appears, and 0.0 otherwise. So only two cut points are
+# meaningful and the choice is which of the two positive levels to admit.
+#
+# 0.7 is chosen, because a 1.0-only floor would discard every article that names
+# the company without printing the symbol -- which is how most financial
+# journalism is written ("Broadcom raised its outlook", not "AVGO raised its
+# outlook"). A floor of 0.0 admits articles with no established connection to the
+# holding at all, which E5 attribution calls CONFOUNDED.
+NEWS_EVENT_MIN_RELEVANCE = 0.7
+
+# A HEADLINE NEVER SETS THE PRIORITY. Stated as configuration because it is the
+# single most tempting shortcut in this module: "beats by 8%" reads urgent, and
+# whether that KIND of event has ever moved the price is a different question.
+NEWS_EVENT_GRADES_FROM_HEADLINE = False
+
+# TONE IS DIRECTION, NOT IMPORTANCE. The lexicon says whether an article reads
+# positive or negative; it says nothing about how far the price moves. Letting it
+# set severity would rank a cheerful press release above a quiet regulatory
+# filing.
+NEWS_EVENT_TONE_SETS_SEVERITY = False
+
+
+def _validate_news_event_alert_config() -> None:
+    """Import-time guard for the A9 contract."""
+    if NEWS_EVENT_GRADES_FROM_HEADLINE:
+        raise ValueError(
+            "A9 must not grade from the headline: an unvalidated claim about "
+            "size is exactly what A3 refuses, and `magnitude` has never been "
+            "compared against a single realized outcome"
+        )
+    if NEWS_EVENT_TONE_SETS_SEVERITY:
+        raise ValueError(
+            "tone indicates direction, not size; using it to set severity would "
+            "rank a cheerful press release above a quiet regulatory filing"
+        )
+    # The resolver returns exactly 1.0, 0.7 or 0.0, so a floor outside those
+    # levels either admits everything or nothing while appearing to be tuned.
+    if NEWS_EVENT_MIN_RELEVANCE not in (0.7, 1.0):
+        raise ValueError(
+            f"NEWS_EVENT_MIN_RELEVANCE must be 0.7 or 1.0, got "
+            f"{NEWS_EVENT_MIN_RELEVANCE!r}: resolve_relevance is three-valued "
+            f"(1.0 ticker match, 0.7 company-name match, 0.0 otherwise), so any "
+            f"other floor silently admits everything or nothing"
+        )
+
+
+_validate_news_event_alert_config()
