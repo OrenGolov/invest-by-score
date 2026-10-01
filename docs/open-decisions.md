@@ -287,7 +287,7 @@ being CLEANER than recorded. Progress must never fail a build.
    interpreter, the OS or the tool version, none of which the repository pins for
    a developer's machine.
 
-## 7. Collection cadence is manual — DECISION
+## 7. Collection cadence — MEASURED in E1/E2, still an operator decision
 
 **Raised:** Sprint L (2026-09). **Owner:** operator.
 
@@ -298,6 +298,48 @@ the operator asked to run "every other day if needed, but not now".
 **What would settle it:** whether to cron them, and at what cadence. The
 NewsAPI free tier's 100 requests/day is the binding constraint, which is why
 `COLLECT_NEWS_TRACK_ANYWAY` exists for SOXX and CIBR.
+
+### MEASURED 2026-10-01 in E1/E2
+
+**The arithmetic of the quota, which decides the cadence:**
+
+```
+eligible tickers              75
+news batch per run            40   (COLLECT_NEWS_BATCH_SIZE)
+free tier limit          100/day
+```
+
+So a full sweep needs **two runs per day**, and the rotation cursor exists
+precisely because one run cannot cover the universe. Today's run covered 40 of 75
+before the provider returned HTTP 429 — meaning the day's quota was already partly
+spent.
+
+**The collector behaved correctly under the limit**, which is worth recording
+because it is the fail-closed contract working on live data:
+- it stopped early rather than retrying into a hard limit;
+- it did **not** advance the rotation cursor, so the next run retries the same
+  tickers rather than skipping them;
+- it named the perishable loss explicitly — *"news — this day cannot be recovered
+  later"*.
+
+**The key is valid.** `scripts/verify_news_key.py` confirms it is set and
+well-formed; the 429 is the free tier's daily limit, not a configuration fault.
+
+**What is genuinely lost:** 2026-09-22 to 09-25. A price bar can be refetched from
+history; a news window closes. Those four days have no news and never will.
+
+**What is captured:** Sept 28–30 and Oct 1 are now committed (price and
+fundamentals). Storage runs at ~1.65 GB/year at this cadence — below the 3.9
+GB/year that made the news ledger local in `0e289b4`, but the same order of
+magnitude, so the same decision will arrive again.
+
+**The decision remains the operator's**, and it is now two questions rather than
+one:
+1. Register the scheduled task (`scripts/install_daily_task.ps1`) — and at **twice
+   daily**, not once, or the universe is never fully swept.
+2. Accept the free tier (≈1.3 sweeps/day of headroom) or upgrade. At the free tier
+   the news evidence will always be partial, which caps what L4 and X4 can ever
+   measure.
 
 ---
 
