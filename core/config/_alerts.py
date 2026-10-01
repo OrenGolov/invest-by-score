@@ -973,3 +973,382 @@ def _validate_alert_suppression_config() -> None:
 _validate_alert_suppression_config()
 
 
+# --- A8: alert delivery -- priority, action, store, dashboard, email ------------
+# The operator asked for every alert to reach them in two places: a Monitoring
+# tab that keeps everything forever, and an email. A1-A7 already DETECT; nothing
+# delivered. MEASURED before this block existed, no production module imported
+# any of the seven builders -- they were exercised only by gates and tests.
+#
+# THE DECIDING MEASUREMENT FOR THE PRIORITY SCALE. The operator specified five
+# priorities (Urgent / Very High / High / Medium / Low). The detectors speak a
+# TWO-value vocabulary, ALERT_SEVERITIES = (info, warn), which five modules
+# import and which W2 shares system wide. Three ways to reconcile them, and two
+# are wrong:
+#
+#   1. REPLACE the vocabulary with five values. Rejected: info/warn is W2 shared
+#      severity, read by the audit surface and the risk report, so widening it
+#      changes the meaning of every severity in the system to serve a display
+#      concern.
+#   2. MAP severity straight to priority (info -> Low, warn -> High). Rejected on
+#      measurement: that collapses the scale to TWO of the five levels, so
+#      Urgent can never occur and the operator top band is decorative.
+#   3. DERIVE priority from severity PLUS the facts that distinguish urgency.
+#      Adopted. Severity says how bad; the alert KIND and its CONFIRMATION say
+#      how soon, and those are already measured per module.
+#
+# So priority is a FUNCTION of (severity, kind, confirmation), computed in
+# core.alert_priority, and the detectors keep their two-value severity.
+ALERT_DELIVERY_VERSION = "alert-delivery-v1"
+
+ALERT_PRIORITY_URGENT = "Urgent"
+ALERT_PRIORITY_VERY_HIGH = "Very High"
+ALERT_PRIORITY_HIGH = "High"
+ALERT_PRIORITY_MEDIUM = "Medium"
+ALERT_PRIORITY_LOW = "Low"
+
+# Ordered WORST FIRST, so a reader and a sort agree without a second table.
+ALERT_PRIORITIES: tuple[str, ...] = (
+    ALERT_PRIORITY_URGENT,
+    ALERT_PRIORITY_VERY_HIGH,
+    ALERT_PRIORITY_HIGH,
+    ALERT_PRIORITY_MEDIUM,
+    ALERT_PRIORITY_LOW,
+)
+
+# Rank for comparison. HIGHER IS MORE URGENT, matching _SEVERITY_RANK so the two
+# scales never disagree about direction.
+ALERT_PRIORITY_RANK: dict[str, int] = {
+    ALERT_PRIORITY_LOW: 1,
+    ALERT_PRIORITY_MEDIUM: 2,
+    ALERT_PRIORITY_HIGH: 3,
+    ALERT_PRIORITY_VERY_HIGH: 4,
+    ALERT_PRIORITY_URGENT: 5,
+}
+
+# The colour each priority carries in the dashboard, specified by the operator.
+ALERT_PRIORITY_COLOURS: dict[str, str] = {
+    ALERT_PRIORITY_URGENT: "red",
+    ALERT_PRIORITY_VERY_HIGH: "orange",
+    ALERT_PRIORITY_HIGH: "yellow",
+    ALERT_PRIORITY_MEDIUM: "blue",
+    ALERT_PRIORITY_LOW: "white",
+}
+
+# AN UNPRIORITISABLE ALERT IS NOT A LOW ONE. When severity is absent -- which
+# happens by design for NOT_EVALUATED, where the detector could not reach a
+# verdict -- there is no evidence for ANY priority. Defaulting such an alert to
+# Low would bury "this detector is blind" at the bottom of the feed, which is
+# the inverse of what it means. It gets no priority and is shown separately.
+ALERT_PRIORITY_UNKNOWN: None = None
+
+# --- Recommended action --------------------------------------------------------
+# The operator asked for Buy / Sell / Hold / Watch / Review.
+#
+# THE DECIDING MEASUREMENT: THIS SYSTEM CANNOT SAY BUY OR SELL. Two independent
+# reasons, both already enforced elsewhere:
+#
+#   * Rule 5 in README and X10 honest gate: real-capital execution is disabled
+#     until the validation gates pass, and MEASURED on the current ledger the
+#     release verdict is NOT APPROVED with 2 of 9 gates passing.
+#   * X1 MEASURED four of five estimators performing WORSE than a coin flip
+#     (0.400-0.427 accuracy); only historical_mean beat chance.
+#
+# Emitting Buy from an alert would therefore be a directional recommendation
+# from a system that has measured itself unable to make one, and it would route
+# around the governance that W2 and A7 exist to enforce. So BUY and SELL are
+# DEFINED (the operator vocabulary is preserved, and a future promoted model may
+# legitimately produce them) but GATED: they require an explicit governance
+# clearance that no current path grants.
+ALERT_ACTION_BUY = "Buy"
+ALERT_ACTION_SELL = "Sell"
+ALERT_ACTION_HOLD = "Hold"
+ALERT_ACTION_WATCH = "Watch"
+ALERT_ACTION_REVIEW = "Review"
+ALERT_ACTIONS: tuple[str, ...] = (
+    ALERT_ACTION_BUY,
+    ALERT_ACTION_SELL,
+    ALERT_ACTION_HOLD,
+    ALERT_ACTION_WATCH,
+    ALERT_ACTION_REVIEW,
+)
+
+# Actions that assert a DIRECTION and therefore need a promoted model plus a
+# clear governance state. Listed POSITIVELY, so adding a directional action is a
+# deliberate edit rather than an omission that silently escapes the gate.
+ALERT_DIRECTIONAL_ACTIONS: tuple[str, ...] = (
+    ALERT_ACTION_BUY,
+    ALERT_ACTION_SELL,
+)
+
+# What an alert recommends when no directional claim is permitted. REVIEW rather
+# than HOLD: Hold is itself a position statement ("stay in"), and an alert about
+# a thesis break must not read as reassurance.
+ALERT_ACTION_DEFAULT = ALERT_ACTION_REVIEW
+
+# --- Storage -------------------------------------------------------------------
+# NOTHING IS EVER DELETED. The operator was explicit, and it matches W6: the
+# ledger is append-only, so the dashboard reads history rather than a cache.
+ALERT_STORE_PATH = "data/alerts.jsonl"
+ALERT_STORE_APPEND_ONLY = True
+
+# The delivery ledger, separate from the alert store. An alert is a FINDING; a
+# delivery is an ACT. Keeping them in one file would make "we emailed this"
+# indistinguishable from "we found this", and only one of them can be retried.
+ALERT_DELIVERY_PATH = "data/alert_deliveries.jsonl"
+
+# --- Email ---------------------------------------------------------------------
+# Immediate for the top three priorities; Low and Medium batch into one daily
+# digest. MEASURED basis for splitting rather than emailing all five instantly:
+# A4 confirmation table gives 7.6 regime alerts per ticker-year at 3-session
+# confirmation, which across 77 tickers is ~585/year, and A7 MEASURED that 93.3%
+# of alert-days are repeats. The survivors still concentrate in the two lowest
+# bands, so instant-everything trains the reader to ignore the channel -- the
+# exact failure A7 exists to prevent, arriving by email instead.
+ALERT_EMAIL_IMMEDIATE_PRIORITIES: tuple[str, ...] = (
+    ALERT_PRIORITY_URGENT,
+    ALERT_PRIORITY_VERY_HIGH,
+    ALERT_PRIORITY_HIGH,
+)
+ALERT_EMAIL_DIGEST_PRIORITIES: tuple[str, ...] = (
+    ALERT_PRIORITY_MEDIUM,
+    ALERT_PRIORITY_LOW,
+)
+
+# EVERY priority is emailed, one way or the other. The operator requirement is
+# that no alert is email-silent; the split governs WHEN, never WHETHER.
+ALERT_EMAIL_ALL_PRIORITIES = True
+
+# SMTP. Host and port are configuration; the CREDENTIAL IS NOT, and never enters
+# the repository -- it is read from the environment at send time. A password in
+# a tracked file is a password in the git history forever.
+ALERT_EMAIL_HOST = "smtp.gmail.com"
+ALERT_EMAIL_PORT = 587
+ALERT_EMAIL_USE_STARTTLS = True
+ALERT_EMAIL_USER_ENV = "ALERT_EMAIL_USER"
+ALERT_EMAIL_PASSWORD_ENV = "ALERT_EMAIL_PASSWORD"
+ALERT_EMAIL_TO_ENV = "ALERT_EMAIL_TO"
+ALERT_EMAIL_CREDENTIAL_IN_CONFIG = False
+
+# Sending is OFF until credentials exist. Absence of a key is not a reason to
+# fail the run -- the dashboard still receives every alert -- so a missing
+# credential degrades email and nothing else.
+ALERT_EMAIL_REQUIRED = False
+
+# The digest runs once, after the close, on the same schedule as collection.
+ALERT_DIGEST_HOUR_LOCAL = 22
+
+# Subject format, specified by the operator:
+#     <Priority>: <Ticker> - <Short, Direct Description>
+ALERT_EMAIL_SUBJECT_TEMPLATE = "{priority}: {ticker} - {title}"
+
+# Mobile-first rendering. A single column at this width is what a phone client
+# shows without horizontal scrolling.
+ALERT_EMAIL_MAX_WIDTH_PX = 600
+
+# --- Dashboard -----------------------------------------------------------------
+ALERT_DASHBOARD_TAB = "Monitoring"
+ALERT_DASHBOARD_NEWEST_FIRST = True
+ALERT_DASHBOARD_PAGE_SIZE = 100
+ALERT_DASHBOARD_FILTERS: tuple[str, ...] = (
+    "priority",
+    "ticker",
+    "date_range",
+    "event_type",
+    "search",
+)
+# Timestamps are stored in UTC and RENDERED in the viewer zone. Storing local
+# time would make the ledger unreadable from another machine and unsortable
+# across a daylight-saving boundary.
+ALERT_STORE_TIMEZONE = "UTC"
+ALERT_DASHBOARD_RENDERS_LOCAL_TIME = True
+
+
+def _validate_alert_delivery_config() -> None:
+    """Import-time guard for the A8 delivery contract."""
+    if len(set(ALERT_PRIORITIES)) != len(ALERT_PRIORITIES):
+        raise ValueError("duplicate alert priority")
+    if len(ALERT_PRIORITIES) != 5:
+        raise ValueError(
+            f"the operator specified five priorities, got "
+            f"{len(ALERT_PRIORITIES)}; a scale with a missing band silently "
+            f"reassigns the alerts that belonged in it"
+        )
+    if set(ALERT_PRIORITY_RANK) != set(ALERT_PRIORITIES):
+        raise ValueError(
+            "every priority must be rankable, and nothing unrankable may be "
+            "ranked: an unranked priority cannot be sorted or escalated"
+        )
+    # AN ORPHAN BAND IS UNREACHABLE, NOT HARMLESS. Declaring
+    # ALERT_PRIORITY_SOMETHING without listing it leaves a name a caller can
+    # import and assign, while every sort, colour map and email route silently
+    # ignores it -- so the alert renders unprioritised and is never emailed.
+    # CAUGHT BY SABOTAGE: adding a sixth constant passed all the checks above.
+    declared = {
+        name: value
+        for name, value in globals().items()
+        if name.startswith("ALERT_PRIORITY_")
+        and isinstance(value, str)
+        and name
+        not in ("ALERT_PRIORITY_RANK", "ALERT_PRIORITY_COLOURS",
+                "ALERT_PRIORITY_UNKNOWN")
+    }
+    orphans = sorted(
+        name for name, value in declared.items() if value not in ALERT_PRIORITIES
+    )
+    if orphans:
+        raise ValueError(
+            f"{orphans} declare a priority that ALERT_PRIORITIES does not "
+            f"list, so it can be assigned but never sorted, coloured or "
+            f"emailed; add it to the tuple or delete the constant"
+        )
+    if len(set(ALERT_PRIORITY_RANK.values())) != len(ALERT_PRIORITY_RANK):
+        raise ValueError("two priorities share a rank, so ordering is undefined")
+    if ALERT_PRIORITY_RANK[ALERT_PRIORITY_URGENT] != max(
+        ALERT_PRIORITY_RANK.values()
+    ):
+        raise ValueError(
+            "Urgent must rank highest, or escalation compares backwards"
+        )
+    if set(ALERT_PRIORITY_COLOURS) != set(ALERT_PRIORITIES):
+        raise ValueError(
+            "every priority needs a colour: an uncoloured band renders as "
+            "another band colour and misreports severity at a glance"
+        )
+    if ALERT_PRIORITY_UNKNOWN is not None:
+        raise ValueError(
+            "an unprioritisable alert must carry NO priority: defaulting it to "
+            "a band claims evidence the detector explicitly refused to give"
+        )
+
+    if len(set(ALERT_ACTIONS)) != len(ALERT_ACTIONS):
+        raise ValueError("duplicate alert action")
+    for action in ALERT_DIRECTIONAL_ACTIONS:
+        if action not in ALERT_ACTIONS:
+            raise ValueError(f"unknown directional action {action!r}")
+    if ALERT_ACTION_DEFAULT in ALERT_DIRECTIONAL_ACTIONS:
+        raise ValueError(
+            f"the default action must not assert a direction: MEASURED, four "
+            f"of five estimators score below chance (0.400-0.427) and X10 "
+            f"reports the release NOT APPROVED, so {ALERT_ACTION_DEFAULT!r} "
+            f"would be a directional call this system cannot support"
+        )
+    if ALERT_ACTION_DEFAULT == ALERT_ACTION_HOLD:
+        raise ValueError(
+            "Hold is a position statement, so an alert about a thesis break "
+            "would read as reassurance; the default must be Review"
+        )
+
+    if not ALERT_STORE_APPEND_ONLY:
+        raise ValueError(
+            "the alert store is append-only: the operator requires that no "
+            "alert is ever deleted, and W6 provenance depends on it"
+        )
+    if ALERT_STORE_PATH == ALERT_DELIVERY_PATH:
+        raise ValueError(
+            "a finding and a delivery must not share a file: 'we found this' "
+            "and 'we emailed this' are different facts, and only the second is "
+            "retryable"
+        )
+
+    immediate = set(ALERT_EMAIL_IMMEDIATE_PRIORITIES)
+    digest = set(ALERT_EMAIL_DIGEST_PRIORITIES)
+    if immediate & digest:
+        raise ValueError(
+            f"{sorted(immediate & digest)} is both immediate and digested, so "
+            f"the same alert would be emailed twice -- the duplicate the "
+            f"operator asked to prevent"
+        )
+    if ALERT_EMAIL_ALL_PRIORITIES and immediate | digest != set(ALERT_PRIORITIES):
+        missing = sorted(set(ALERT_PRIORITIES) - (immediate | digest))
+        raise ValueError(
+            f"every priority must be emailed either immediately or in the "
+            f"digest; {missing} would be email-silent, and the operator "
+            f"requires that no alert is"
+        )
+    for priority in ALERT_EMAIL_IMMEDIATE_PRIORITIES:
+        if priority not in ALERT_PRIORITIES:
+            raise ValueError(f"unknown priority {priority!r}")
+    # The three most urgent bands must be the immediate ones. A configuration
+    # that emailed Low instantly and Urgent in a digest would satisfy every
+    # check above while inverting the operator intent.
+    ranked = sorted(
+        ALERT_PRIORITIES, key=lambda p: ALERT_PRIORITY_RANK[p], reverse=True
+    )
+    if set(ranked[: len(immediate)]) != immediate:
+        raise ValueError(
+            f"the immediate priorities must be the most urgent ones, got "
+            f"{sorted(immediate)} against the top {len(immediate)} "
+            f"{ranked[: len(immediate)]}; otherwise an Urgent alert waits for "
+            f"a digest while a Low one interrupts"
+        )
+
+    if ALERT_EMAIL_CREDENTIAL_IN_CONFIG:
+        raise ValueError(
+            "an SMTP credential must never live in configuration: a password "
+            "in a tracked file is in the git history permanently"
+        )
+    for env_name in (
+        ALERT_EMAIL_USER_ENV,
+        ALERT_EMAIL_PASSWORD_ENV,
+        ALERT_EMAIL_TO_ENV,
+    ):
+        if not env_name or not env_name.isupper():
+            raise ValueError(
+                f"{env_name!r} must be a non-empty upper-case environment "
+                f"variable name"
+            )
+    if ALERT_EMAIL_PORT not in (25, 465, 587, 2525):
+        raise ValueError(
+            f"port {ALERT_EMAIL_PORT} is not a standard SMTP submission port"
+        )
+    if ALERT_EMAIL_PORT == 587 and not ALERT_EMAIL_USE_STARTTLS:
+        raise ValueError(
+            "port 587 is the submission port and requires STARTTLS; sending a "
+            "credential in clear text over it would expose the password"
+        )
+    if ALERT_EMAIL_REQUIRED:
+        raise ValueError(
+            "a missing email credential must not fail the run: the dashboard "
+            "still receives every alert, so email degrades alone"
+        )
+    if ALERT_EMAIL_MAX_WIDTH_PX > 640:
+        raise ValueError(
+            f"{ALERT_EMAIL_MAX_WIDTH_PX}px exceeds the width a phone mail "
+            f"client shows without horizontal scrolling"
+        )
+    for field in ("{priority}", "{ticker}", "{title}"):
+        if field not in ALERT_EMAIL_SUBJECT_TEMPLATE:
+            raise ValueError(
+                f"the subject template must carry {field}: the operator "
+                f"specified '<Priority>: <Ticker> - <Short Description>'"
+            )
+
+    if not 0 <= ALERT_DIGEST_HOUR_LOCAL <= 23:
+        raise ValueError("the digest hour must be a valid hour of the day")
+    if not ALERT_DASHBOARD_NEWEST_FIRST:
+        raise ValueError(
+            "the operator requires the newest alert first; an append-only "
+            "ledger reads oldest-first by default, so this must be explicit"
+        )
+    if ALERT_DASHBOARD_PAGE_SIZE < 1:
+        raise ValueError("the dashboard must show at least one alert per page")
+    for required in ("priority", "ticker", "date_range", "event_type", "search"):
+        if required not in ALERT_DASHBOARD_FILTERS:
+            raise ValueError(
+                f"the operator specified a {required!r} filter and it is "
+                f"missing"
+            )
+    if ALERT_STORE_TIMEZONE != "UTC":
+        raise ValueError(
+            f"alerts are stored in UTC, not {ALERT_STORE_TIMEZONE!r}: a local "
+            f"timestamp is unsortable across a daylight-saving boundary and "
+            f"unreadable from another machine"
+        )
+    if not ALERT_DASHBOARD_RENDERS_LOCAL_TIME:
+        raise ValueError(
+            "the operator requires timestamps in their own timezone; storing "
+            "UTC without rendering local shows the wrong time to the reader"
+        )
+
+
+_validate_alert_delivery_config()
