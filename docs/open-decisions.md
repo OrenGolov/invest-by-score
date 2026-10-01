@@ -47,6 +47,19 @@ state requires, so it is refused by live forecasting for an unrelated second
 reason. Both resolve the same way — decide what the instrument is and whether
 it belongs in the universe at this history length.
 
+### RE-MEASURED 2026-10-01 in E4 — unchanged, and one fact worth adding
+
+```
+universe entry    ticker + reason "initial_member", no type, no listed_from
+price history     119 bars, 2026-03-31 -> 2026-09-18   (210 required)
+```
+
+**It is a 2026 listing**, which the original note did not say. The history
+shortfall is therefore self-resolving: at ~252 sessions a year it crosses 210
+bars around March 2027 without anyone doing anything. Only the METADATA question
+needs a decision — what the instrument is — and until that is answered the news
+skip is correct regardless of history length.
+
 ## 3. Breadth / participation features — PARKED
 
 **Raised:** Sprint C. **Blocked on:** an index-constituent adapter.
@@ -59,6 +72,29 @@ which names were *in* the index on each past date. It can never be inferred
 from price, volume or technical indicators — inferring it from today's
 constituents is survivorship bias by construction. Held open by 18 tests in
 `tests/test_deferred_features.py`, including the placeholder itself.
+
+### RE-CHECKED 2026-10-01 in E3 — the blocker is real and unchanged, STAYS PARKED
+
+The one thing that could have unblocked this is the V6 universe ledger, which
+carries `listed_from` / `listed_to` fields that look like point-in-time index
+membership. They are not:
+
+```
+data/universe.jsonl      77 rows
+listed_from populated     0
+listed_to   populated     0
+source_id                 portfolio_list_snapshot (all 77)
+```
+
+It is a **portfolio watchlist**, not index membership. Breadth asks "how many of
+the S&P 500 are above their 200-day average" — that needs the index's
+constituents on each past date, which nothing in the repository has and no
+provider is connected for.
+
+**Revisit when** an index-constituent provider is configured. Until then the
+deferral is the correct answer and the placeholder's `base_confidence: 0.0` is
+doing its job: a breadth feature that could not be computed must never reach a
+model as a neutral value.
 
 ## 4. The source → outcome join — BUILT in B2 (was PARKED)
 
@@ -430,6 +466,29 @@ is inert, and those are not the same result.
 re-checked for reachability before being trusted. Without that habit, all five
 would have been recorded as "guard verified" while the guard was untested.
 
+### CONFIRMED 2026-10-01 in E4 — it happened three more times, and stays OPEN
+
+The improvement sprints produced three further instances, so the pattern is now
+nine occurrences across two sprint families:
+
+| task | sabotage that wrongly passed | why the probe could not decide |
+|---|---|---|
+| X9 | the `if absent:` branch disabled | gate and tests both drove verdicts through a LOCAL helper that duplicated the rules, never the shipped builder |
+| X9 | the unprobed-component fallback disabled | every declared component already had a probe, so the branch was unreachable |
+| B4 | the NOT_EVALUATED verdict swapped | a ragged covariance raised `IndexError`, which was not in the except clause — the branch CRASHED instead of running |
+
+**The B4 one is the sharpest version of the pattern yet.** The sabotage passed
+because the fail-closed path it targeted was *unreachable*, and an unreachable
+fail-closed path is worse than an untested one: it looks like a guarantee and is
+not.
+
+**A second habit this session added**, beyond checking reachability: when a
+sabotage passes, check whether the TEST FIXTURE can express the property at all.
+B4's synthetic covariance never degenerated at any threshold, so a sweep over it
+would have concluded the two linkage rules were equivalent — which, absent a
+broadly-correlated bridge asset, they genuinely are. The fixture needed the
+bridge before the test could mean anything.
+
 **What would settle it:** a convention that every sabotage is accompanied by a
 positive control — a paired scenario that FAILS when the guard is removed and
 PASSES when restored — so an inert probe is visible rather than silent. A7 does
@@ -486,7 +545,7 @@ the first number" fails rather than silently thresholding on a factor score.
 
 ---
 
-## 11. `scripts/train.py` cannot regenerate its own ledger — OPEN
+## 11. `scripts/train.py` could not regenerate its own ledger — FIXED in A2
 
 **Raised:** Sprint X8 (2026-09-28). **Found by:** the sealed-holdout gate,
 while trying to establish where the holdout fell.
@@ -522,6 +581,27 @@ rather than a bug fix —
 Option 1 is the only one that preserves what F2 set out to do. Until then
 `scripts/train.py --embargo-sessions 60` is a default that cannot run, which is
 worth fixing on its own regardless of which option is chosen.
+
+### FIXED 2026-09-30 in A2 — option 1, and the defaults are now derived
+
+```
+scripts/train.py defaults   rows=1464  fold=300  embargo=252  holdout=60
+build_walk_forward_folds    2 folds, holdout [1404, 1463]      ACCEPTED
+```
+
+The defaults are **derived from `LABEL_HORIZON_SESSIONS`** rather than hardcoded,
+so the next horizon change cannot strand them the way F2 did. 1,464 is measured,
+not chosen: it is the smallest row count yielding two walk-forward folds *and* a
+holdout embargoed against the 252-session horizon.
+
+The dataset was never data-limited — 3,772 sessions of 15-year history exist per
+ticker against the 406 rows the old ledger was built from. That 406 came from
+`--tickers 12 --times 25` build parameters, not from a shortage of data.
+
+**A2 also found a label-leakage hazard underneath this**: the geometry's embargo
+is counted in ROWS while the horizon is in SESSIONS, so a 14-ticker panel's
+252-row embargo spans only 18 dates. `train_baseline` now verifies the calendar
+separation before fitting anything.
 
 ---
 
