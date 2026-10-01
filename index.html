@@ -226,6 +226,181 @@
       letter-spacing: 0.06em;
       font-size: 0.72rem;
     }
+    /* --- Navigation ------------------------------------------------------ */
+    .tabs {
+      display: flex;
+      gap: 6px;
+      margin: 0 0 18px;
+      border-bottom: 1px solid var(--border);
+      flex-wrap: wrap;
+    }
+    .tab {
+      background: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 0.95rem;
+      font-weight: 700;
+      padding: 10px 14px;
+      width: auto;
+      height: auto;
+    }
+    .tab:hover { color: var(--text); }
+    .tab.active {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+    }
+    .tab .count {
+      background: rgba(90, 168, 255, 0.18);
+      border-radius: 10px;
+      font-size: 0.72rem;
+      margin-left: 6px;
+      padding: 1px 7px;
+    }
+    .page { display: none; }
+    .page.active { display: block; }
+
+    /* --- Monitoring filters ---------------------------------------------- */
+    .filters {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+    .filters select, .filters input {
+      height: 42px;
+      background: var(--panel-alt);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      padding: 0 10px;
+      width: 100%;
+      font-size: 0.9rem;
+    }
+    .filters .wide { grid-column: 1 / -1; }
+    .filter-actions {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+      margin-bottom: 14px;
+    }
+    .filter-actions button {
+      width: auto;
+      padding: 0 16px;
+      height: 38px;
+    }
+    .chip-row { display: flex; flex-wrap: wrap; gap: 6px; }
+    .chip {
+      background: var(--panel-alt);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 0.78rem;
+      padding: 5px 12px;
+      width: auto;
+      height: auto;
+    }
+    .chip.on { color: var(--text); border-color: currentColor; }
+    .chip .dot {
+      border-radius: 50%;
+      display: inline-block;
+      height: 8px;
+      margin-right: 6px;
+      width: 8px;
+    }
+
+    /* --- Alert cards ----------------------------------------------------- */
+    /* Priority colours, matching core.config.ALERT_PRIORITY_COLOURS so the
+       dashboard and an email never disagree about what Urgent looks like. */
+    .p-urgent   { --band: #ff5252; }
+    .p-veryhigh { --band: #ff9e3d; }
+    .p-high     { --band: #ffd43b; }
+    .p-medium   { --band: #4dabf7; }
+    .p-low      { --band: #cfd8e3; }
+    .p-none     { --band: #78889c; }
+
+    .alert-card {
+      background: var(--panel-alt);
+      border: 1px solid var(--border);
+      border-left: 4px solid var(--band, var(--muted));
+      border-radius: 10px;
+      margin-bottom: 8px;
+      overflow: hidden;
+    }
+    .alert-head {
+      align-items: center;
+      cursor: pointer;
+      display: grid;
+      gap: 10px;
+      grid-template-columns: auto auto 1fr auto auto;
+      padding: 12px 14px;
+    }
+    .alert-head:hover { background: var(--panel-soft); }
+    .badge {
+      background: var(--band, var(--muted));
+      border-radius: 6px;
+      color: #08121c;
+      font-size: 0.68rem;
+      font-weight: 800;
+      letter-spacing: 0.04em;
+      padding: 3px 8px;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    .alert-ticker {
+      font-weight: 800;
+      font-size: 0.95rem;
+      min-width: 56px;
+    }
+    .alert-title { font-size: 0.95rem; }
+    .alert-when {
+      color: var(--muted);
+      font-size: 0.78rem;
+      white-space: nowrap;
+    }
+    .caret { color: var(--muted); font-size: 0.8rem; }
+    .alert-body {
+      border-top: 1px solid var(--border);
+      display: none;
+      padding: 14px;
+    }
+    .alert-card.open .alert-body { display: block; }
+    .alert-body dl {
+      display: grid;
+      grid-template-columns: minmax(110px, auto) 1fr;
+      gap: 6px 14px;
+      margin: 0;
+    }
+    .alert-body dt {
+      color: var(--muted);
+      font-size: 0.74rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .alert-body dd { margin: 0; font-size: 0.88rem; line-height: 1.5; }
+    .alert-body .block { margin-top: 12px; }
+    .alert-body ul { margin: 4px 0 0; padding-left: 18px; font-size: 0.88rem; }
+    .alert-body li { line-height: 1.5; margin-bottom: 3px; }
+    .action-pill {
+      background: rgba(124, 227, 195, 0.16);
+      border: 1px solid rgba(124, 227, 195, 0.4);
+      border-radius: 6px;
+      color: var(--accent-2);
+      font-size: 0.78rem;
+      font-weight: 700;
+      padding: 2px 9px;
+    }
+    .empty {
+      border: 1px dashed var(--border);
+      border-radius: 10px;
+      color: var(--muted);
+      padding: 28px;
+      text-align: center;
+    }
+
     @media (max-width: 900px) {
       .summary-grid, .layout {
         grid-template-columns: 1fr 1fr;
@@ -233,6 +408,18 @@
       .controls {
         grid-template-columns: 1fr;
       }
+    }
+    /* The feed must stay readable on a phone: the head collapses to two rows
+       and the timestamp moves under the title rather than being truncated. */
+    @media (max-width: 620px) {
+      .alert-head {
+        grid-template-columns: auto 1fr auto;
+        row-gap: 4px;
+      }
+      .alert-title { grid-column: 1 / -1; }
+      .alert-when { grid-column: 1 / -1; white-space: normal; }
+      .alert-body dl { grid-template-columns: 1fr; gap: 2px; }
+      .alert-body dt { margin-top: 8px; }
     }
     @media (max-width: 640px) {
       .summary-grid, .layout {
@@ -247,6 +434,12 @@
   <div class="container">
     <h1>Investment Score</h1>
 
+    <nav class="tabs">
+      <button class="tab active" data-page="score">Score</button>
+      <button class="tab" data-page="monitoring">Monitoring<span class="count" id="alertCount"></span></button>
+    </nav>
+
+    <section class="page active" id="page-score">
     <div class="controls">
       <div>
         <label for="ticker">Ticker</label>
@@ -265,6 +458,26 @@
     <div class="status" id="status">Default date is today.</div>
 
     <div id="output"></div>
+    </section>
+
+    <section class="page" id="page-monitoring">
+      <div class="filters">
+        <input id="fSearch" class="wide" type="search"
+               placeholder="Search ticker, title, reason&hellip;" />
+        <input id="fTicker" type="text" list="tickerList"
+               placeholder="Ticker (e.g. NVDA)" />
+        <datalist id="tickerList"></datalist>
+        <select id="fType"><option value="">All event types</option></select>
+        <input id="fStart" type="date" title="From" />
+        <input id="fEnd" type="date" title="To" />
+      </div>
+      <div class="filter-actions">
+        <div class="chip-row" id="priorityChips"></div>
+        <button id="fClear">Clear</button>
+      </div>
+      <div class="status" id="alertStatus">Loading alerts&hellip;</div>
+      <div id="alertFeed"></div>
+    </section>
   </div>
 
   <script>
@@ -774,6 +987,285 @@
     loadProviderHealth();
     loadAuditEvents();
     loadScore();
+  </script>
+  <script>
+    /* ---------------- Monitoring tab ----------------------------------------
+       Filtering is SERVER SIDE. The alert store is append-only and nothing is
+       ever deleted, so it only grows; shipping the whole ledger to the browser
+       to filter it here would get slower every day forever.
+    ------------------------------------------------------------------------ */
+    const PRIORITY_CLASS = {
+      'Urgent': 'p-urgent',
+      'Very High': 'p-veryhigh',
+      'High': 'p-high',
+      'Medium': 'p-medium',
+      'Low': 'p-low'
+    };
+    const PRIORITY_DOT = {
+      'Urgent': '#ff5252',
+      'Very High': '#ff9e3d',
+      'High': '#ffd43b',
+      'Medium': '#4dabf7',
+      'Low': '#cfd8e3'
+    };
+
+    const selectedPriorities = new Set();
+    let debounce = null;
+
+    function esc(value) {
+      /* Alert text includes provider headlines: untrusted input. Everything
+         reaching the DOM goes through here. */
+      return String(value === null || value === undefined ? '' : value)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
+    function localTime(iso) {
+      /* Stored in UTC, RENDERED in the viewer's zone, which is what the
+         operator asked for. An unparseable stamp shows as-is rather than as
+         "Invalid Date". */
+      if (!iso) return '';
+      const when = new Date(iso);
+      if (isNaN(when.getTime())) return String(iso);
+      return when.toLocaleString(undefined, {
+        year: 'numeric', month: 'short', day: '2-digit',
+        hour: '2-digit', minute: '2-digit'
+      });
+    }
+
+    function buildPriorityChips(priorities) {
+      const host = document.getElementById('priorityChips');
+      if (!host || host.dataset.built) return;
+      host.innerHTML = (priorities || []).map(function (band) {
+        return '<button class="chip" data-priority="' + esc(band) + '">' +
+          '<span class="dot" style="background:' +
+          esc(PRIORITY_DOT[band] || '#78889c') + '"></span>' +
+          esc(band) + '</button>';
+      }).join('');
+      host.dataset.built = '1';
+      host.querySelectorAll('.chip').forEach(function (chip) {
+        chip.addEventListener('click', function () {
+          const band = chip.dataset.priority;
+          if (selectedPriorities.has(band)) {
+            selectedPriorities.delete(band);
+            chip.classList.remove('on');
+          } else {
+            selectedPriorities.add(band);
+            chip.classList.add('on');
+          }
+          loadAlerts();
+        });
+      });
+    }
+
+    function alertCard(row) {
+      /* Collapsed: priority, ticker, title, time. Expanded: the whole thing. */
+      const band = PRIORITY_CLASS[row.priority] || 'p-none';
+      const label = row.priority || 'Unprioritised';
+      const summary = row.summary || {};
+      const detail = row.detail || {};
+
+      let body = '<dl>';
+      body += '<dt>Action</dt><dd><span class="action-pill">' +
+        esc(row.action || 'Review') + '</span></dd>';
+      if (row.alert) body += '<dt>Detector</dt><dd>' + esc(row.alert) + '</dd>';
+      if (row.state) body += '<dt>State</dt><dd>' + esc(row.state) + '</dd>';
+      if (row.horizon) body += '<dt>Horizon</dt><dd>' + esc(row.horizon) + '</dd>';
+      if (row.as_of) body += '<dt>As of</dt><dd>' + esc(row.as_of) + '</dd>';
+      body += '<dt>Detected</dt><dd>' + esc(localTime(row.detected_at)) + '</dd>';
+      body += '</dl>';
+
+      if (summary.who || summary.what || summary.when) {
+        body += '<div class="block"><dl>';
+        if (summary.who) body += '<dt>Who</dt><dd>' + esc(summary.who) + '</dd>';
+        if (summary.what) body += '<dt>What</dt><dd>' + esc(summary.what) + '</dd>';
+        if (summary.when) body += '<dt>When</dt><dd>' + esc(summary.when) + '</dd>';
+        body += '</dl></div>';
+      }
+
+      const why = summary.why;
+      if (Array.isArray(why) && why.length) {
+        body += '<div class="block"><dt>Why it matters</dt><ul>' +
+          why.map(function (item) { return '<li>' + esc(item) + '</li>'; }).join('') +
+          '</ul></div>';
+      } else if (row.reason) {
+        body += '<div class="block"><dt>Why it matters</dt><dd>' +
+          esc(row.reason) + '</dd></div>';
+      }
+
+      /* The reasoning behind the band and the action, so the card carries the
+         evidence for its own priority and nobody has to re-run the grader. */
+      if (row.priority_reason) {
+        body += '<div class="block"><dt>Priority basis</dt><dd class="muted">' +
+          esc(row.priority_reason) + '</dd></div>';
+      }
+      if (row.action_reason) {
+        body += '<div class="block"><dt>Action basis</dt><dd class="muted">' +
+          esc(row.action_reason) + '</dd></div>';
+      }
+      if (detail.headline) {
+        body += '<div class="block"><dt>Headline</dt><dd>' +
+          esc(detail.headline) + '</dd></div>';
+      }
+
+      return '<article class="alert-card ' + band + '">' +
+        '<div class="alert-head" role="button" tabindex="0">' +
+          '<span class="badge">' + esc(label) + '</span>' +
+          '<span class="alert-ticker">' + esc(row.ticker || '—') + '</span>' +
+          '<span class="alert-title">' + esc(row.title || row.state || 'Alert') + '</span>' +
+          '<span class="alert-when">' + esc(localTime(row.detected_at)) + '</span>' +
+          '<span class="caret">▸</span>' +
+        '</div>' +
+        '<div class="alert-body">' + body + '</div>' +
+      '</article>';
+    }
+
+    function renderAlerts(rows, meta) {
+      const feed = document.getElementById('alertFeed');
+      const status = document.getElementById('alertStatus');
+      if (!feed) return;
+
+      if (!rows.length) {
+        feed.innerHTML = '<div class="empty">No alerts match these filters.' +
+          '<br />Nothing is ever deleted, so widening the date range will ' +
+          'always show the full history.</div>';
+      } else {
+        feed.innerHTML = rows.map(alertCard).join('');
+        feed.querySelectorAll('.alert-head').forEach(function (head) {
+          const toggle = function () {
+            const card = head.parentElement;
+            card.classList.toggle('open');
+            const caret = head.querySelector('.caret');
+            if (caret) caret.textContent = card.classList.contains('open') ? '▾' : '▸';
+          };
+          head.addEventListener('click', toggle);
+          head.addEventListener('keydown', function (event) {
+            if (event.key === 'Enter' || event.key === ' ') {
+              event.preventDefault();
+              toggle();
+            }
+          });
+        });
+      }
+
+      if (status) {
+        const counts = (meta && meta.counts) || {};
+        const parts = Object.keys(counts)
+          .filter(function (key) { return counts[key] > 0; })
+          .map(function (key) { return counts[key] + ' ' + key; });
+        status.textContent = 'Showing ' + rows.length + ' alert(s)' +
+          (parts.length ? '  ·  stored: ' + parts.join(', ') : '') +
+          '  ·  times shown in your local timezone';
+      }
+    }
+
+    function populateFilterOptions(meta) {
+      if (!meta) return;
+      buildPriorityChips(meta.priorities);
+
+      const list = document.getElementById('tickerList');
+      if (list && !list.dataset.built && meta.tickers) {
+        list.innerHTML = meta.tickers.map(function (t) {
+          return '<option value="' + esc(t) + '"></option>';
+        }).join('');
+        list.dataset.built = '1';
+      }
+      const types = document.getElementById('fType');
+      if (types && !types.dataset.built && meta.event_types) {
+        types.innerHTML = '<option value="">All event types</option>' +
+          meta.event_types.map(function (t) {
+            return '<option value="' + esc(t) + '">' + esc(t) + '</option>';
+          }).join('');
+        types.dataset.built = '1';
+      }
+      const badge = document.getElementById('alertCount');
+      if (badge && meta.counts) {
+        const total = Object.keys(meta.counts).reduce(function (sum, key) {
+          return sum + meta.counts[key];
+        }, 0);
+        badge.textContent = total ? String(total) : '';
+      }
+    }
+
+    async function loadAlerts() {
+      const status = document.getElementById('alertStatus');
+      const params = new URLSearchParams();
+      const value = function (id) {
+        const element = document.getElementById(id);
+        return element ? element.value.trim() : '';
+      };
+      if (value('fSearch')) params.set('search', value('fSearch'));
+      if (value('fTicker')) params.set('ticker', value('fTicker'));
+      if (value('fType')) params.set('event_type', value('fType'));
+      if (value('fStart')) params.set('start', value('fStart'));
+      if (value('fEnd')) params.set('end', value('fEnd'));
+      /* The viewer's own offset, so "today" in the date picker means their
+         today. CAUGHT LIVE at UTC+3: filtering the local date against the UTC
+         store returned 0 of 12 rows on the day the feed was populated. */
+      params.set('tz', String(-new Date().getTimezoneOffset()));
+      selectedPriorities.forEach(function (band) {
+        params.append('priority', band);
+      });
+
+      try {
+        const response = await fetch('/api/alerts?' + params.toString());
+        const payload = await response.json();
+        if (!payload.ok) {
+          if (status) status.textContent = 'Could not load alerts: ' + payload.error;
+          return;
+        }
+        populateFilterOptions(payload.meta);
+        renderAlerts(payload.data || [], payload.meta);
+      } catch (error) {
+        if (status) status.textContent = 'Could not load alerts: ' + error.message;
+      }
+    }
+
+    document.querySelectorAll('.tab').forEach(function (tab) {
+      tab.addEventListener('click', function () {
+        document.querySelectorAll('.tab').forEach(function (other) {
+          other.classList.toggle('active', other === tab);
+        });
+        const target = tab.dataset.page;
+        document.querySelectorAll('.page').forEach(function (page) {
+          page.classList.toggle('active', page.id === 'page-' + target);
+        });
+        if (target === 'monitoring') loadAlerts();
+      });
+    });
+
+    ['fSearch', 'fTicker'].forEach(function (id) {
+      const element = document.getElementById(id);
+      if (!element) return;
+      element.addEventListener('input', function () {
+        /* Debounced: a keystroke per request would hammer the server while
+           typing a ticker. */
+        clearTimeout(debounce);
+        debounce = setTimeout(loadAlerts, 250);
+      });
+    });
+    ['fType', 'fStart', 'fEnd'].forEach(function (id) {
+      const element = document.getElementById(id);
+      if (element) element.addEventListener('change', loadAlerts);
+    });
+    const clear = document.getElementById('fClear');
+    if (clear) {
+      clear.addEventListener('click', function () {
+        ['fSearch', 'fTicker', 'fType', 'fStart', 'fEnd'].forEach(function (id) {
+          const element = document.getElementById(id);
+          if (element) element.value = '';
+        });
+        selectedPriorities.clear();
+        document.querySelectorAll('#priorityChips .chip').forEach(function (chip) {
+          chip.classList.remove('on');
+        });
+        loadAlerts();
+      });
+    }
+
+    /* Load once at startup so the tab badge shows a count before the tab is
+       ever opened. */
+    loadAlerts();
   </script>
 </body>
 </html>

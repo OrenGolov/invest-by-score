@@ -40,7 +40,7 @@ import hashlib
 import json
 import logging
 from collections.abc import Iterable, Mapping
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -324,6 +324,39 @@ def delivered_ids(
     return out
 
 
+def _instant(row: Mapping[str, Any]) -> datetime | None:
+    """A row's detection instant, or None when it cannot be parsed.
+
+    None is excluded from a date-bounded query rather than treated as either
+    boundary: an unparseable stamp has no position in time, and placing it at one
+    end would make it appear in half of all ranges.
+    """
+    stamp = row.get("detected_at")
+    if not stamp:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(stamp))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _day_bound(value: str, shift: timedelta, *, end_of_day: bool) -> datetime:
+    """Resolve a filter bound to an absolute instant.
+
+    A bare `YYYY-MM-DD` means that whole day IN THE VIEWER'S ZONE; a full
+    timestamp is used as given.
+    """
+    text = str(value).strip()
+    if len(text) == 10:
+        day = datetime.fromisoformat(text).replace(tzinfo=timezone.utc)
+        if end_of_day:
+            day += timedelta(days=1) - timedelta(microseconds=1)
+        return day - shift
+    parsed = datetime.fromisoformat(text)
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc) - shift
+
+
 def query(
     rows: Iterable[Mapping[str, Any]] | None = None,
     *,
@@ -335,6 +368,7 @@ def query(
     search: str | None = None,
     newest_first: bool = True,
     limit: int | None = None,
+    utc_offset_minutes: int | None = None,
     path: Path | None = None,
 ) -> list[dict]:
     """The dashboard's read path: filter, search, order, page.
@@ -365,15 +399,27 @@ def query(
         needle = str(event_type).strip().lower()
         items = [r for r in items if str(r.get("alert") or "").lower() == needle]
 
-    if start:
-        items = [r for r in items if str(r.get("detected_at") or "") >= str(start)]
-    if end:
-        # Inclusive of the whole end DAY. A bare date compares as midnight, so
-        # `end="2026-10-01"` would otherwise exclude everything that day.
-        boundary = str(end)
-        if len(boundary) == 10:
-            boundary += "T99"
-        items = [r for r in items if str(r.get("detected_at") or "") <= boundary]
+    # DATE BOUNDS ARE RESOLVED IN THE VIEWER'S ZONE, not in UTC.
+    #
+    # CAUGHT LIVE: the operator is at UTC+3, so at 02:15 local the alerts
+    # generated minutes earlier carry detected_at 2026-10-01T23:12Z. Filtering
+    # "today" (their 2026-10-02) against the raw UTC string returned ZERO of 12
+    # rows -- the feed looked empty on the very day it was populated. Comparing a
+    # local date against a UTC timestamp is off by the offset, every day, and
+    # silently.
+    #
+    # `utc_offset_minutes` is the viewer's offset (JavaScript's
+    # -getTimezoneOffset()). Absent, bounds are read as UTC, which is the right
+    # default for a caller that did not say.
+    if start or end:
+        shift = timedelta(minutes=int(utc_offset_minutes or 0))
+        if start:
+            lower = _day_bound(start, shift, end_of_day=False)
+            items = [r for r in items if _instant(r) is not None and _instant(r) >= lower]
+        if end:
+            # Inclusive of the whole end DAY in the viewer's zone.
+            upper = _day_bound(end, shift, end_of_day=True)
+            items = [r for r in items if _instant(r) is not None and _instant(r) <= upper]
 
     if search:
         needle = str(search).strip().lower()

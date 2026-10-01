@@ -334,6 +334,61 @@ class DashboardQueryTests(StoreTestCase):
         rows = query(path=self.store, start="2026-10-01", end="2026-10-01")
         self.assertEqual(len(rows), 1)
 
+    def test_a_local_date_filter_finds_an_evening_alert(self):
+        """CAUGHT LIVE at UTC+3, and it made the feed look empty.
+
+        At 02:15 local the alerts generated minutes earlier carried
+        detected_at 2026-10-01T23:12Z. Filtering the operator's "today"
+        (2026-10-02) against the raw UTC string returned ZERO of 12 rows -- on
+        the very day the feed was populated. Comparing a local date against a
+        UTC timestamp is off by the offset, every day, and silently.
+        """
+        evening = self.record(
+            detector_alert(ticker="LATE"), at="2026-10-01T23:12:00+00:00"
+        )
+        # UTC+3: 23:12Z on the 1st is 02:12 local on the 2nd.
+        found = query(path=self.store, start="2026-10-02", end="2026-10-02",
+                      utc_offset_minutes=180)
+        self.assertIn(
+            evening["alert_id"], [row["alert_id"] for row in found],
+            "an alert from the viewer's today must appear under their date",
+        )
+
+    def test_the_same_filter_in_utc_excludes_it(self):
+        # The complement: without an offset the bound is read as UTC, which is
+        # the right default for a caller that did not say which zone it meant.
+        evening = self.record(
+            detector_alert(ticker="LATE"), at="2026-10-01T23:12:00+00:00"
+        )
+        found = query(path=self.store, start="2026-10-02", end="2026-10-02")
+        self.assertNotIn(evening["alert_id"], [r["alert_id"] for r in found])
+
+    def test_a_negative_offset_shifts_the_other_way(self):
+        # New York at UTC-4: 01:30Z on the 2nd is still the evening of the 1st.
+        early = self.record(
+            detector_alert(ticker="NYC"), at="2026-10-02T01:30:00+00:00"
+        )
+        found = query(path=self.store, start="2026-10-01", end="2026-10-01",
+                      utc_offset_minutes=-240)
+        self.assertIn(early["alert_id"], [r["alert_id"] for r in found])
+
+    def test_an_unparseable_stamp_is_excluded_from_a_dated_query(self):
+        # An unparseable stamp has no position in time; placing it at either
+        # boundary would make it appear in half of all ranges.
+        rows = list(load_alerts(self.store))
+        rows.append({"alert_id": "broken", "ticker": "XX",
+                     "detected_at": "not a time", "priority": "Low"})
+        found = query(rows, start="2026-10-01", end="2026-12-31")
+        self.assertNotIn("broken", [r.get("alert_id") for r in found])
+
+    def test_a_full_timestamp_bound_still_works(self):
+        # An hour-wide window, so it cannot collide with the setUp fixtures
+        # (which sit at 12:00 on 2026-10-01..06).
+        self.record(detector_alert(ticker="ZZ"), at="2026-10-09T15:30:00+00:00")
+        found = query(path=self.store, start="2026-10-09T15:00:00+00:00",
+                      end="2026-10-09T16:00:00+00:00")
+        self.assertEqual([r["ticker"] for r in found], ["ZZ"])
+
     def test_a_date_range_selects_the_span(self):
         rows = query(path=self.store, start="2026-10-02", end="2026-10-04")
         self.assertEqual(len(rows), 3)

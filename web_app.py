@@ -8,7 +8,18 @@ from urllib.parse import parse_qs, urlparse
 
 from agents.market_data_agent import fetch_market_snapshot
 from core.agent_contracts import NoTradeDecision
+from core.alert_store import (
+    counts_by_priority,
+    event_types_seen,
+    tickers_seen,
+)
+from core.alert_store import query as query_alerts
 from core.audit_store import get_audit_events, get_decision_by_replay_hash
+from core.config import (
+    ALERT_DASHBOARD_PAGE_SIZE,
+    ALERT_PRIORITIES,
+    ALERT_PRIORITY_COLOURS,
+)
 from core.orchestrator import orchestrate_score
 from fetch_data import get_provider_health_matrix
 
@@ -81,6 +92,60 @@ class AppHandler(SimpleHTTPRequestHandler):
                 self._send_json(200, {"ok": True, "data": get_audit_events(limit=int(limit))})
             except ValueError:
                 self._send_json(400, {"ok": False, "error": "limit must be an integer"})
+            return
+
+        if parsed.path == "/api/alerts":
+            # The Monitoring tab's read path. Filtering happens SERVER SIDE so
+            # the browser never has to hold the whole append-only ledger in
+            # memory: nothing is ever deleted, so it only grows.
+            params = parse_qs(parsed.query)
+
+            def one(name: str) -> str:
+                return (params.get(name, [""])[0] or "").strip()
+
+            try:
+                limit = int(one("limit") or ALERT_DASHBOARD_PAGE_SIZE)
+            except ValueError:
+                self._send_json(400, {"ok": False, "error": "limit must be an integer"})
+                return
+            priorities = [p for p in params.get("priority", []) if p.strip()]
+            # The browser's own UTC offset, so a date filter means the viewer's
+            # day. Absent, bounds are read as UTC.
+            try:
+                offset = int(one("tz") or 0)
+            except ValueError:
+                offset = 0
+            try:
+                rows = query_alerts(
+                    priority=priorities or None,
+                    ticker=one("ticker") or None,
+                    event_type=one("event_type") or None,
+                    start=one("start") or None,
+                    end=one("end") or None,
+                    search=one("search") or None,
+                    limit=max(1, limit),
+                    utc_offset_minutes=offset,
+                )
+            except Exception as exc:
+                self._send_json(400, {"ok": False, "error": str(exc)})
+                return
+            self._send_json(
+                200,
+                {
+                    "ok": True,
+                    "data": rows,
+                    "meta": {
+                        # The vocabularies come from the DATA, so a filter can
+                        # never offer a value that returns nothing.
+                        "tickers": tickers_seen(),
+                        "event_types": event_types_seen(),
+                        "counts": counts_by_priority(),
+                        "priorities": list(ALERT_PRIORITIES),
+                        "colours": dict(ALERT_PRIORITY_COLOURS),
+                        "returned": len(rows),
+                    },
+                },
+            )
             return
 
         if parsed.path.startswith("/api/replay"):
