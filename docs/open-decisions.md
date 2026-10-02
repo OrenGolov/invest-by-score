@@ -335,6 +335,48 @@ the operator asked to run "every other day if needed, but not now".
 NewsAPI free tier's 100 requests/day is the binding constraint, which is why
 `COLLECT_NEWS_TRACK_ANYWAY` exists for SOXX and CIBR.
 
+### MEASURED 2026-10-02 — THE 22:00 SLOT IS THE WORST POSSIBLE TIME
+
+A later finding that changes the recommendation, and it is a TIMING defect rather
+than a quota one. Reading `data/collection_report.jsonl` across every scheduled
+night:
+
+```
+as_of        overall   news      ok  unavailable  note
+2026-09-21   FAILED    FAILED     0            1  quota_exhausted on ticker 1
+2026-09-28   FAILED    FAILED     0            1  quota_exhausted on ticker 1
+2026-09-29   FAILED    FAILED     0            1  quota_exhausted on ticker 1
+2026-09-30   FAILED    FAILED     0            1  quota_exhausted on ticker 1
+2026-10-01   FAILED    FAILED     0            1  quota_exhausted on ticker 1
+2026-10-02   PARTIAL   PARTIAL   33            7  ran mid-afternoon instead
+```
+
+Every scheduled night failed on its FIRST ticker in 0.2-0.3 seconds with
+`quota_exhausted: true`. A probe of the provider confirms the key is valid and the
+quota is available during the day (HTTP 200, 242 results), so this was never a
+missing or broken credential — **the day's 100 requests were already spent by
+22:00**.
+
+Where they go:
+
+```
+one collector run                40 requests
+a second collector run           40 requests   -> 80 of 100
+every /api/score call             1 request    per ticker scored
+```
+
+So an afternoon of ad-hoc scoring consumes the remaining 20 and then eats into the
+budget the evening run needs. Scheduling news collection at 22:00 puts the
+PERISHABLE source last in the queue for a resource that depletes all day — the
+exact inversion of what irreversibility demands. Price bars, fundamentals and
+macro are all re-fetchable; news is gone after `NEWS_LOOKBACK_DAYS = 7`.
+
+**Acted on rather than left open**, because this one is not a preference: the
+collector now runs at 14:30 local, before the US close but ahead of the day's
+ad-hoc consumption. The 22:00 slot remains for the non-perishable sources. The
+operator still owns the one-run-vs-two question below, and the free-tier-vs-upgrade
+question in item 8.
+
 ### MEASURED 2026-10-01 in E1/E2
 
 **The arithmetic of the quota, which decides the cadence:**
