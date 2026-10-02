@@ -40,6 +40,8 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from collections.abc import Mapping
+from typing import Any
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -72,9 +74,11 @@ from core.alert_store import (  # noqa: E402
 from core.alert_suppression import disposition  # noqa: E402
 from core.config import (  # noqa: E402
     ALERT_PRIORITIES,
+    COLLECT_NEWS_BATCH_SIZE,
     SUPPRESS_DELIVER,
     SUPPRESS_GATED,
 )
+from core.news_adapter import enrich_captured_news  # noqa: E402
 
 LOGGER = logging.getLogger("run_alerts")
 
@@ -173,15 +177,90 @@ def detect_regime(ticker: str, as_of: str, previous: dict | None) -> dict | None
     return alert
 
 
+def _captured_news(ticker: str, as_of: str) -> dict | None:
+    """Today's news for one ticker, read from the W6 ledger. NO network call.
+
+    MEASURED BY TRIGGERING THE REAL TASK: calling `build_news_snapshot` per
+    ticker is one provider request each, and over 77 tickers the run logged **62
+    HTTP 429s** -- the collector had already spent ~40 of the free tier's 100
+    earlier the same day.
+
+    That is worse than a wasted run. News is the one PERISHABLE source (gone
+    after NEWS_LOOKBACK_DAYS = 7), and collection was moved to 14:30 precisely
+    to protect it from daytime consumption; an alert task at 22:15 spending 77
+    requests would consume tomorrow's budget and recreate the failure it was
+    meant to fix.
+
+    Every provider fetch appends to the raw ledger on its way past, so the day's
+    news is already on disk by the time alerts run -- and reading it is also MORE
+    correct than re-fetching, because a 22:15 fetch would read a different news
+    window than the one the ledger records.
+
+    Returns None when nothing was captured for this ticker today, which is NOT
+    the same as "no news": the collector rotates 40 of 75 eligible tickers per
+    run.
+    """
+    from core.news_adapter import NEWS_SOURCE_ID
+    from core.raw_store import load_raw_records
+
+    entries = load_raw_records(NEWS_SOURCE_ID, f"{ticker}_{as_of}")
+    if not entries:
+        return None
+
+    # Supersede older versions of the same article by its own record id, so a
+    # re-run on the same day does not double-count. The ledger keeps every
+    # version; this picks the newest of each.
+    newest: dict[str, dict] = {}
+    for entry in entries:
+        record = entry.get("record")
+        if not isinstance(record, Mapping):
+            continue
+        key = str(
+            record.get("source_record_id")
+            or record.get("url")
+            or record.get("headline")
+            or ""
+        )
+        if not key:
+            continue
+        newest[key] = dict(record)
+
+    return {"status": "OK", "records": list(newest.values()), "ticker": ticker}
+
+
 def detect_news(ticker: str, as_of: str, previous: dict | None) -> dict | None:
-    """A9: did a material news event occur, graded by its type's history?"""
+    """A9: did a material news event occur, graded by its type's history?
+
+    Reads the captured ledger rather than the provider -- see `_captured_news`.
+    """
     from core.event_memory import load_memory_objects
-    from core.news_adapter import build_news_snapshot
     from core.news_event_alert import news_event_alert
 
-    snapshot = build_news_snapshot(ticker, as_of)
-    memories = load_memory_objects()
-    return news_event_alert(snapshot, ticker, memories=memories, as_of=as_of)
+    raw = _captured_news(ticker, as_of)
+    if raw is None:
+        # NOT CAPTURED IS NOT QUIET. The rotation covers 40 of 75 per run, so
+        # reporting NO_EVENT here would claim calm for two thirds of the
+        # portfolio every single day.
+        return news_event_alert(
+            {"status": "UNAVAILABLE",
+             "reason": (
+                 f"no news was captured for {ticker} on {as_of}; the collector "
+                 f"rotates {COLLECT_NEWS_BATCH_SIZE} of the eligible tickers "
+                 f"per run, so this ticker was not looked at today"
+             )},
+            ticker,
+            memories=load_memory_objects(),
+            as_of=as_of,
+        )
+
+    # The raw records need the adapter's enrichment (relevance, category, tone,
+    # eligibility) before A9 can read them, and that enrichment is pure -- it
+    # makes no request. `build_news_snapshot` is NOT reused here because it
+    # fetches; the enrichment is applied directly.
+    snapshot = enrich_captured_news(raw, ticker, as_of)
+    return news_event_alert(
+        snapshot, ticker, memories=load_memory_objects(), as_of=as_of
+    )
 
 
 DETECTOR_FUNCTIONS = {
@@ -316,7 +395,7 @@ def deliver(records: list[dict], *, dry_run: bool, as_of: str) -> dict:
     already = delivered_ids(CHANNEL_EMAIL)
     already |= delivered_ids(CHANNEL_DIGEST)
 
-    report = {
+    report: dict[str, Any] = {
         "immediate_sent": 0,
         "immediate_failed": 0,
         "digested": 0,
@@ -340,8 +419,14 @@ def deliver(records: list[dict], *, dry_run: bool, as_of: str) -> dict:
         route, _ = routing(record.get("priority"))
         (immediate if route == "immediate" else digested).append(record)
 
-    if not user or not password:
+    if not user or not password or not recipient:
         # Email degrades alone. Every record is already stored and visible.
+        #
+        # `recipient` is checked HERE rather than at the send. credentials()
+        # defaults it to the sender, so a None recipient means the credential
+        # set is incomplete; passing it through would reach build_message, which
+        # raises on an empty address -- turning a missing setting into a crash on
+        # exactly the days that have alerts to deliver. CAUGHT BY mypy.
         for record in immediate + digested:
             record_delivery(
                 record, channel=CHANNEL_EMAIL, status=DELIVERY_SKIPPED,

@@ -323,6 +323,60 @@ being CLEANER than recorded. Progress must never fail a build.
    interpreter, the OS or the tool version, none of which the repository pins for
    a developer's machine.
 
+## 10. News entity resolution produces false positives — MEASURED, pre-existing
+
+**Raised:** 2026-10-02, while wiring A9. **Owner:** needs a decision on scope.
+
+`news_adapter.resolve_relevance` scores 1.0 when the ticker appears "as a token in
+the text". MEASURED over a full 77-ticker news sweep replayed from the W6 ledger,
+that rule matched **20 of 52 graded alerts on the bare symbol**, and several are
+plainly not about the holding:
+
+```
+AEP    [0day-rubbish] MultiTech Conduit AEP 6.3.6 Authenticated import_config ...
+ANET   CTF-ANET: Clinical Time Frequency Aware-Attention Network for cardiovascular ...
+CEG    Proton Experimental brings fixes for Crysis, Crysis Wars, CEG-protected games
+KEEL   keel-visual 0.9.0
+NOW    Silent epidemic spreading across the US may trigger suicidal urges... now ...
+```
+
+A CVE advisory, a medical paper, game DRM, a PyPI release, and the English word
+"now".
+
+**Why the portfolio is unusually exposed to this.** Twelve of the 77 tickers are
+English words or one-to-two characters:
+
+```
+ARM  BE  CAT  GLW  KEEL  KO  MP  NOW  NU  STX  TER  V
+```
+
+Eight of them produced a graded alert in the sweep. `V` and `BE` will match almost
+any text.
+
+**What it costs today.** Nothing severe, and that is why this is recorded rather
+than patched in place. Every such alert grades **UNKNOWN_IMPACT → Medium**, which
+routes to the daily digest rather than the inbox, because the `other` event type
+has no remembered 20-day outcomes to size it with. So the noise is visible and
+contained. It would start to matter as soon as event memories accumulate for more
+types, since a false positive would then inherit a real type's impact history.
+
+**Options, in increasing cost:**
+
+1. **Require the company name, not the symbol**, for tickers in a collision-prone
+   list. Cheapest, and `resolve_relevance` already returns 0.7 for a company-name
+   match, so the machinery exists.
+2. **Require two independent signals** (symbol AND a finance-domain source, or
+   symbol AND company name). Stricter, and loses genuine single-mention stories.
+3. **Score the source domain**, so a PyPI feed or an arXiv listing cannot reach
+   the relevance floor at all regardless of what it mentions.
+
+**Not acted on**, because it changes `resolve_relevance` — a function the scoring
+engine, N1 entity resolution and the event-memory builder all depend on — and
+re-scoring the existing 2,921 memories is a separate decision from wiring alerts.
+A9 was built to read the canonical resolver precisely so a fix here reaches it
+automatically.
+
+
 ## 7. Collection cadence — MEASURED in E1/E2, still an operator decision
 
 **Raised:** Sprint L (2026-09). **Owner:** operator.

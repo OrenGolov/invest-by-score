@@ -382,7 +382,10 @@ def summary_for(alert: Mapping[str, Any]) -> dict:
         raise NewsEventAlertError("an alert must be a mapping")
 
     ticker = alert.get("ticker") or "the portfolio"
-    detail = alert.get("detail") if isinstance(alert.get("detail"), Mapping) else {}
+    raw_detail = alert.get("detail")
+    detail: Mapping[str, Any] = (
+        raw_detail if isinstance(raw_detail, Mapping) else {}
+    )
     # The adapter stamps `source_id`; `source` is the provider-payload spelling.
     # Read both, because `leading_event` carries whichever the article had.
     source = detail.get("source") or detail.get("source_id")

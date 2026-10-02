@@ -156,7 +156,10 @@ def _summary_lines(record: Mapping[str, Any]) -> list[tuple[str, list[str]]]:
     provides; everything else is derived from the detector's own fields, never
     invented.
     """
-    summary = record.get("summary") if isinstance(record.get("summary"), Mapping) else {}
+    raw_summary = record.get("summary")
+    summary: Mapping[str, Any] = (
+        raw_summary if isinstance(raw_summary, Mapping) else {}
+    )
     ticker = record.get("ticker") or "the portfolio"
     detector = str(record.get("alert") or "a detector").replace("_", " ")
     state = record.get("state") or "an unnamed state"
@@ -254,7 +257,10 @@ def _numbers(record: Mapping[str, Any]) -> list[tuple[str, str]]:
     than coalesced to 0.0 -- that coercion is what A1 measured turning a vanished
     forecast into a -0.56 crash.
     """
-    detail = record.get("detail") if isinstance(record.get("detail"), Mapping) else {}
+    raw_detail = record.get("detail")
+    detail: Mapping[str, Any] = (
+        raw_detail if isinstance(raw_detail, Mapping) else {}
+    )
     rows: list[tuple[str, str]] = []
     for key, label in (
         ("previous", "Previous"),

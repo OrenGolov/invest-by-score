@@ -76,3 +76,6 @@ data/.cache/
 # fail on a fresh clone.
 data/alerts.jsonl
 data/alert_deliveries.jsonl
+
+# The alert runner log, like data/collect.log: a local operational record.
+data/alerts.log

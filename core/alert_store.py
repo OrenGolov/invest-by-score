@@ -377,7 +377,7 @@ def query(
     nothing". ``start``/``end`` compare ISO date prefixes, which sorts correctly
     because ``detected_at`` is stored in UTC.
     """
-    items = list(rows) if rows is not None else load_alerts(path)
+    items = [dict(row) for row in rows] if rows is not None else load_alerts(path)
 
     if priority is not None:
         wanted = {priority} if isinstance(priority, str) else set(priority)
@@ -415,11 +415,13 @@ def query(
         shift = timedelta(minutes=int(utc_offset_minutes or 0))
         if start:
             lower = _day_bound(start, shift, end_of_day=False)
-            items = [r for r in items if _instant(r) is not None and _instant(r) >= lower]
+            dated = ((row, _instant(row)) for row in items)
+            items = [row for row, at in dated if at is not None and at >= lower]
         if end:
             # Inclusive of the whole end DAY in the viewer's zone.
             upper = _day_bound(end, shift, end_of_day=True)
-            items = [r for r in items if _instant(r) is not None and _instant(r) <= upper]
+            dated = ((row, _instant(row)) for row in items)
+            items = [row for row, at in dated if at is not None and at <= upper]
 
     if search:
         needle = str(search).strip().lower()

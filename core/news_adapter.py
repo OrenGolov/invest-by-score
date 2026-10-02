@@ -42,6 +42,9 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Mapping
+from typing import Any
+
 from datetime import datetime, timedelta, timezone
 
 from core.config import (
@@ -467,6 +470,149 @@ def aggregate_articles(credible: list[dict]) -> tuple[float | None, float]:
     return round(sentiment, 4), round(confidence, 4)
 
 
+def enrich_articles(
+    eligible: list[tuple[dict, datetime]],
+    ticker: str,
+    as_of_dt: datetime,
+) -> list[dict]:
+    """Score, classify and gate point-in-time-eligible records. PURE.
+
+    Extracted from `build_news_snapshot` so a caller that already HAS the raw
+    records -- the alert runner, reading what the collector captured into the W6
+    ledger -- can enrich them without spending a provider request.
+
+    MEASURED: the alert runner calling `build_news_snapshot` per ticker logged 62
+    HTTP 429s over 77 tickers, because each call is one request and the collector
+    had already spent ~40 of the free tier's 100 that day. Copying this pipeline
+    into the runner would have been a W5 violation; both callers use this.
+
+    Nothing here touches the network. Excluded articles STAY in the output with
+    an explicit `exclusion_reason`, because evidence that was considered and
+    rejected is different from evidence that never existed.
+    """
+    enriched: list[dict] = []
+    for record, published_dt in eligible:
+        tone, derivation = resolve_tone(record)
+        enriched.append({
+            "source_id": NEWS_SOURCE_ID,
+            "source_record_id": str(record.get("source_record_id", "")),
+            "published_time": str(record.get("published_time") or ""),
+            "published_dt": published_dt,
+            "cluster_date": published_dt.date().isoformat(),
+            "headline": str(record.get("headline", "")),
+            "url": str(record.get("url") or ""),
+            "category": classify_event(f"{record.get('headline', '')} {record.get('summary', '')}"),
+            "tone": tone,
+            "tone_derivation": derivation,
+            "relevance": resolve_relevance(record, ticker),
+            "source_weight": source_weight(record, published_dt, as_of_dt),
+            "included_in_aggregation": True,
+            "exclusion_reason": "",
+        })
+
+    # Deterministic order (recency, then record id) before the novelty dedupe
+    # so `first wins` is reproducible.
+    enriched.sort(key=lambda article: (article["published_dt"], article["source_record_id"]))
+    seen_headlines: set[str] = set()
+    for article in enriched:
+        normalized = re.sub(r"[^a-z0-9]+", " ", article["headline"].lower()).strip()
+        if normalized and normalized in seen_headlines:
+            article["included_in_aggregation"] = False
+            article["exclusion_reason"] = "duplicate_headline"
+        elif normalized:
+            seen_headlines.add(normalized)
+
+    # NOVELTY + relevance/credibility gates: excluded articles stay in the
+    # evidence with an explicit reason, but never enter the aggregation.
+    for article in enriched:
+        if not article["included_in_aggregation"]:
+            continue
+        if article["relevance"] <= 0.0:
+            article["included_in_aggregation"] = False
+            article["exclusion_reason"] = "zero_relevance"
+        elif article["source_weight"] <= 0.0:
+            article["included_in_aggregation"] = False
+            article["exclusion_reason"] = "zero_source_weight"
+
+    return enriched
+
+
+def enrich_captured_news(raw: Mapping[str, Any], ticker: str, as_of: str) -> dict:
+    """A snapshot built from ALREADY-CAPTURED records, with no provider call.
+
+    The alert runner reads the day's news out of the W6 raw ledger and needs it
+    in the same shape `build_news_snapshot` produces, so A9 reads one payload
+    format regardless of where the records came from.
+
+    The point-in-time filter still applies: a record published after `as_of` is
+    rejected here exactly as it would be on a live fetch, because replaying a
+    ledger must not relax the policy that governed its capture.
+    """
+    records = raw.get("records") if isinstance(raw, Mapping) else None
+    if not isinstance(records, list) or not records:
+        return _unavailable_snapshot(
+            ticker, as_of, reason="no captured news records", source_id=NEWS_SOURCE_ID
+        )
+
+    # A BARE DATE MEANS THE WHOLE DAY, NOT MIDNIGHT.
+    #
+    # CAUGHT BY TEST: `_parse_timestamp("2026-10-01")` returns 00:00:00, so an
+    # article published at 18:00 that same day was rejected as FUTURE-DATED and
+    # the replay reported INVALID with zero articles. Since the collector stores
+    # under a bare-date request key, that would have discarded essentially every
+    # captured article -- the replay path would have looked like a provider
+    # outage on every single ticker.
+    #
+    # The live path never hit this because `build_news_snapshot` receives an
+    # as_of that already carries a time.
+    text = str(as_of).strip()
+    as_of_dt = (
+        _parse_timestamp(f"{text}T23:59:59Z")
+        if len(text) == 10
+        else _parse_timestamp(text)
+    )
+    if as_of_dt is None:
+        return _unavailable_snapshot(
+            ticker, as_of, reason=f"unparseable as_of {as_of!r}",
+            source_id=NEWS_SOURCE_ID,
+        )
+
+    eligible, rejected = pit_filter(list(records), as_of_dt)
+    enriched = enrich_articles(eligible, ticker, as_of_dt)
+    credible = [a for a in enriched if a["included_in_aggregation"]]
+    contradictions = detect_contradictions(credible)
+
+    if rejected:
+        status, reason = "INVALID", (
+            f"{len(rejected)} captured record(s) violate the point-in-time "
+            f"policy; rejected fail-closed"
+        )
+    elif contradictions:
+        status, reason = "CONTRADICTORY", (
+            f"{len(contradictions)} same-day, same-category contradiction "
+            f"cluster(s) exceed the tone tolerance"
+        )
+    elif not credible:
+        status, reason = "INCOMPLETE", (
+            "no credible, on-entity captured articles inside the window"
+        )
+    else:
+        status, reason = "OK", ""
+
+    return {
+        "ticker": ticker,
+        "as_of": as_of,
+        "status": status,
+        "reason": reason,
+        "source_id": NEWS_SOURCE_ID,
+        "articles": [
+            {key: value for key, value in article.items() if key != "published_dt"}
+            for article in enriched
+        ],
+        "replayed_from_ledger": True,
+    }
+
+
 def _unavailable_snapshot(ticker: str, as_of: str, reason: str = UNAVAILABLE_REASON, source_id: str = UNAVAILABLE_SOURCE_ID) -> dict:
     """The explicit UNAVAILABLE contract.
 
@@ -525,49 +671,7 @@ def build_news_snapshot(ticker: str, as_of: str, timeout: float = NEWS_PROVIDER_
         )
 
     eligible, rejected = pit_filter(raw_records, as_of_dt)
-    enriched: list[dict] = []
-    for record, published_dt in eligible:
-        tone, derivation = resolve_tone(record)
-        enriched.append({
-            "source_id": NEWS_SOURCE_ID,
-            "source_record_id": str(record.get("source_record_id", "")),
-            "published_time": str(record.get("published_time") or ""),
-            "published_dt": published_dt,
-            "cluster_date": published_dt.date().isoformat(),
-            "headline": str(record.get("headline", "")),
-            "url": str(record.get("url") or ""),
-            "category": classify_event(f"{record.get('headline', '')} {record.get('summary', '')}"),
-            "tone": tone,
-            "tone_derivation": derivation,
-            "relevance": resolve_relevance(record, ticker),
-            "source_weight": source_weight(record, published_dt, as_of_dt),
-            "included_in_aggregation": True,
-            "exclusion_reason": "",
-        })
-
-    # Deterministic order (recency, then record id) before the novelty dedupe
-    # so `first wins` is reproducible.
-    enriched.sort(key=lambda article: (article["published_dt"], article["source_record_id"]))
-    seen_headlines: set[str] = set()
-    for article in enriched:
-        normalized = re.sub(r"[^a-z0-9]+", " ", article["headline"].lower()).strip()
-        if normalized and normalized in seen_headlines:
-            article["included_in_aggregation"] = False
-            article["exclusion_reason"] = "duplicate_headline"
-        elif normalized:
-            seen_headlines.add(normalized)
-
-    # NOVELTY + relevance/credibility gates: excluded articles stay in the
-    # evidence with an explicit reason, but never enter the aggregation.
-    for article in enriched:
-        if not article["included_in_aggregation"]:
-            continue
-        if article["relevance"] <= 0.0:
-            article["included_in_aggregation"] = False
-            article["exclusion_reason"] = "zero_relevance"
-        elif article["source_weight"] <= 0.0:
-            article["included_in_aggregation"] = False
-            article["exclusion_reason"] = "zero_source_weight"
+    enriched = enrich_articles(eligible, ticker, as_of_dt)
 
     credible = [article for article in enriched if article["included_in_aggregation"]]
     contradictions = detect_contradictions(credible)
