@@ -229,7 +229,8 @@ and `news` only — both cost zero requests — and you run the thesis detector
 deliberately:
 
 ```powershell
-python scriptsun_alerts.py --detectors thesis --tickers MSFT,NVDA,AVGO
+python scripts
+un_alerts.py --detectors thesis --tickers MSFT,NVDA,AVGO
 ```
 
 A handful of tickers at a time is affordable. The whole portfolio is not, until
@@ -261,6 +262,35 @@ So at the 20-day horizon exactly one event type can be sized, and the rest
 correctly report `UNKNOWN_IMPACT` → Medium. That is the honest answer, not a gap:
 a median estimate at n=3 spans a five-fold range across resamples. It improves as
 outcomes close.
+
+---
+
+## A note on which articles count
+
+Fifteen of your holdings have a ticker that is an English word or a colliding
+abbreviation — `V`, `BE`, `NOW`, `CAT`, `KO`, `ARM`, `MP`, `KEEL`, `STX`, `TER`,
+`NU`, `GLW`, `AEP`, `ANET`, `CEG`.
+
+Measured over 6,360 captured articles, matching on the bare symbol admitted 116
+articles for those tickers and **93 were not about the company at all** — a
+Chevrolet Corvette for ARM, cat memes for CAT, a boxing match for KO, a PyPI
+package for KEEL. For `V`, all ten were collisions.
+
+Those fifteen now require the **company name** or **finance language** alongside
+the symbol. The effect:
+
+| | before | after |
+|---|---|---|
+| articles admitted on those 15 | 116 | **10** |
+| articles admitted on the other 62 | 1,633 | **1,633** |
+
+Nothing changed for `NVDA`, `MSFT` or any other symbol that does not collide with
+ordinary English.
+
+If you add a holding whose ticker is a common word, add it to
+`NEWS_COLLISION_PRONE_TICKERS` in `core/config/_base.py` with the company name. A
+config validator refuses an entry with no name, because such a ticker would reject
+every article about it and go permanently dark.
 
 ---
 

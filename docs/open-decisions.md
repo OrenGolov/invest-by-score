@@ -323,60 +323,6 @@ being CLEANER than recorded. Progress must never fail a build.
    interpreter, the OS or the tool version, none of which the repository pins for
    a developer's machine.
 
-## 10. News entity resolution produces false positives — MEASURED, pre-existing
-
-**Raised:** 2026-10-02, while wiring A9. **Owner:** needs a decision on scope.
-
-`news_adapter.resolve_relevance` scores 1.0 when the ticker appears "as a token in
-the text". MEASURED over a full 77-ticker news sweep replayed from the W6 ledger,
-that rule matched **20 of 52 graded alerts on the bare symbol**, and several are
-plainly not about the holding:
-
-```
-AEP    [0day-rubbish] MultiTech Conduit AEP 6.3.6 Authenticated import_config ...
-ANET   CTF-ANET: Clinical Time Frequency Aware-Attention Network for cardiovascular ...
-CEG    Proton Experimental brings fixes for Crysis, Crysis Wars, CEG-protected games
-KEEL   keel-visual 0.9.0
-NOW    Silent epidemic spreading across the US may trigger suicidal urges... now ...
-```
-
-A CVE advisory, a medical paper, game DRM, a PyPI release, and the English word
-"now".
-
-**Why the portfolio is unusually exposed to this.** Twelve of the 77 tickers are
-English words or one-to-two characters:
-
-```
-ARM  BE  CAT  GLW  KEEL  KO  MP  NOW  NU  STX  TER  V
-```
-
-Eight of them produced a graded alert in the sweep. `V` and `BE` will match almost
-any text.
-
-**What it costs today.** Nothing severe, and that is why this is recorded rather
-than patched in place. Every such alert grades **UNKNOWN_IMPACT → Medium**, which
-routes to the daily digest rather than the inbox, because the `other` event type
-has no remembered 20-day outcomes to size it with. So the noise is visible and
-contained. It would start to matter as soon as event memories accumulate for more
-types, since a false positive would then inherit a real type's impact history.
-
-**Options, in increasing cost:**
-
-1. **Require the company name, not the symbol**, for tickers in a collision-prone
-   list. Cheapest, and `resolve_relevance` already returns 0.7 for a company-name
-   match, so the machinery exists.
-2. **Require two independent signals** (symbol AND a finance-domain source, or
-   symbol AND company name). Stricter, and loses genuine single-mention stories.
-3. **Score the source domain**, so a PyPI feed or an arXiv listing cannot reach
-   the relevance floor at all regardless of what it mentions.
-
-**Not acted on**, because it changes `resolve_relevance` — a function the scoring
-engine, N1 entity resolution and the event-memory builder all depend on — and
-re-scoring the existing 2,921 memories is a separate decision from wiring alerts.
-A9 was built to read the canonical resolver precisely so a fix here reaches it
-automatically.
-
-
 ## 7. Collection cadence — MEASURED in E1/E2, still an operator decision
 
 **Raised:** Sprint L (2026-09). **Owner:** operator.
@@ -700,6 +646,84 @@ is counted in ROWS while the horizon is in SESSIONS, so a 14-ticker panel's
 separation before fitting anything.
 
 ---
+
+## 12. Symbol collisions in entity resolution — FIXED 2026-10-02
+
+**Raised and fixed:** 2026-10-02, while wiring A9.
+
+`news_adapter.resolve_relevance` scored 1.0 whenever a ticker appeared "as a token
+in the text". MEASURED over 6,360 captured articles, that admitted **116 articles
+on the 15 holdings whose symbol is an English word or a colliding abbreviation, of
+which 93 were not about the company at all**:
+
+```
+ARM    35-Years-Owned 1972 Chevrolet Corvette Coupe Project
+CAT    27 Meowing Memes Ministering Mood Boosts for Cat People Like You
+KO     Tyson Fury vs Anthony Joshua ... smiles then KO
+MP     Proposed deal to resolve Drumcree dispute, says DUP MP
+KEEL   keel-workflow 1.25.0
+NOW    Surface Pro, 13-Inch (11th Edition) $1,747 @ Microsoft Store
+V      10 of 10 admitted articles were collisions
+```
+
+### I ARGUED AGAINST FIXING IT ON A BLAST RADIUS I HAD NOT CHECKED
+
+The first version of this entry said `resolve_relevance` is "shared with the
+scoring engine, N1 entity resolution and the memory builder", and used that as the
+reason to record rather than fix. **That was wrong.** Neither `score_engine.py`
+nor `event_memory.py` references it. There are two production call sites, both in
+the news path, plus `event_contract` reading the resulting *field*. The fix was
+tractable from the start, and the deferral was based on an assumption rather than
+a grep.
+
+### THE RULE, AND WHY IT IS THE RIGHT ONE
+
+For the 15 listed symbols only, a bare-token match must be CORROBORATED by the
+company name or a finance marker:
+
+```
+collision-prone tickers   116 -> 10 admitted
+the other 62 holdings    1633 -> 1633 (untouched)
+```
+
+The separation is what justifies it. AEP and CEG kept **100%** of their articles —
+every one was genuinely financial — while V, NOW, STX and BE kept **0%**, because
+none ever were. A rule that cut indiscriminately would have dropped the first
+group too.
+
+Verified both ways: **15 of 15** genuine articles admitted, **15 of 15** measured
+collisions rejected.
+
+### THE FIX WENT WRONG IN BOTH DIRECTIONS IN TURN
+
+Recorded because it is the useful part:
+
+- **Too permissive.** An unbounded marker match let `rally` match inside
+  *lite**rally*** and *neut**rally***, readmitting a baseball report for ARM.
+- **Too strict.** The boundary fix for that was written through a shell heredoc,
+  which turned its `\b` anchors into literal **backspace characters**. The
+  pattern then matched nothing, rejecting genuine coverage *and invalidating the
+  measurement taken against it* — with no test failing. Markers are now
+  precompiled once, in one visible place.
+
+A third defect surfaced while verifying: the company-name branch reads
+`record["company_name"]`, which MEASURED on live NewsAPI records is always `None`.
+So "Caterpillar raises full-year guidance" — no bare symbol, no provider ticker —
+had no path to admission at all once the symbol rule tightened.
+
+**A list, not a heuristic.** "Is this symbol an English word?" needs a dictionary
+and a judgement per word (is ARM a word? BE? MP?). The list is explicit and
+auditable, and each entry carries the name that corroborates it, which a heuristic
+would have needed anyway.
+
+**What is NOT changed:** the three-valued scale, the 0.7 floor, the 62 other
+holdings, and a provider-asserted ticker match — the provider resolved the entity
+itself, which is a stronger claim than the symbol appearing in text.
+
+**Still open underneath this:** the existing 2,921 event memories were built under
+the old rule, so some carry collision-sourced events. Re-scoring them is a separate
+decision; today it costs little because such events grade `UNKNOWN_IMPACT` and
+route to the digest.
 
 ## Closed
 
