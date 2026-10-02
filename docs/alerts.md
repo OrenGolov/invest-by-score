@@ -205,15 +205,35 @@ dedup means nothing is emailed twice.
 
 ## What the detectors can and cannot see
 
-| detector | what it finds | state today |
-|---|---|---|
-| `regime_change` | A4 — regime flips, confirmed over 3 sessions | **working** |
-| `news_event` | A9 — corporate news, graded by its type's realized history | **working** |
-| `forecast_change` | A1 — the forecast itself moving | needs a trained model |
-| `confidence_change` | A2 — how much to trust it, and *why* it is uncertain | needs a trained model |
-| `thesis_break` | A5 — evidence turning against the case | needs score attribution wired |
-| `event_impact` | A3 — high-impact events from stored outcomes | used *by* A9 |
-| `forecast_threshold` | A6 — all three conditions crossing, no veto | **cannot fire**: zero of twelve condition inputs exist |
+| detector | what it finds | state today | cost per ticker |
+|---|---|---|---|
+| `regime_change` | A4 — regime flips, confirmed over 3 sessions | **nightly** | 0 requests |
+| `news_event` | A9 — corporate news, graded by its type's realized history | **nightly** | 0 requests |
+| `thesis_break` | A5 — evidence turning against the case | **working, opt-in** | 1 news request |
+| `forecast_change` | A1 — the forecast itself moving | needs a trained model | — |
+| `confidence_change` | A2 — how much to trust it, and *why* it is uncertain | needs a trained model | — |
+| `event_impact` | A3 — high-impact events from stored outcomes | used *by* A9 | — |
+| `forecast_threshold` | A6 — all three conditions crossing, no veto | **cannot fire**: zero of twelve condition inputs exist | — |
+
+### Why `thesis_break` is opt-in
+
+It works. Measured on a live MSFT decision the attribution is real — operational
+**+6.41** (supports), narrative and macro neutral, carrier `operational` — and a
+second run correctly reads the prior from the ledger and reports `NONE` for an
+unchanged thesis.
+
+But it reaches that attribution through `orchestrate_score`, which **fetches
+news**: one request per ticker. Across 77 tickers against a 100/day tier that is
+the quota defect this runner already had once. So the nightly sweep runs `regime`
+and `news` only — both cost zero requests — and you run the thesis detector
+deliberately:
+
+```powershell
+python scriptsun_alerts.py --detectors thesis --tickers MSFT,NVDA,AVGO
+```
+
+A handful of tickers at a time is affordable. The whole portfolio is not, until
+the news budget question (`docs/open-decisions.md` item 7) is settled.
 
 A6 is honest about being dead: it reports `NOT_EVALUATED` rather than silence,
 because inferring calm from an unevaluable condition is how a live alert goes

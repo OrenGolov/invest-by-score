@@ -32,7 +32,16 @@ Usage:
     python scripts/run_alerts.py --no-email         # store only
     python scripts/run_alerts.py --tickers NVDA,MSFT
     python scripts/run_alerts.py --digest-only      # just send today's digest
-    python scripts/run_alerts.py --detectors regime,news
+    python scripts/run_alerts.py --detectors regime,news,thesis
+
+Detectors, and what each one costs:
+
+    regime   A4   cached price history        0 provider requests   DEFAULT
+    news     A9   replays the W6 ledger       0 provider requests   DEFAULT
+    thesis   A5   calls orchestrate_score     1 NEWS request/ticker opt-in
+
+`thesis` is correct and available but absent from the default sweep: 77 tickers
+against a 100/day news tier is the quota defect this runner already had once.
 """
 
 from __future__ import annotations
@@ -85,7 +94,19 @@ LOGGER = logging.getLogger("run_alerts")
 # The detectors this runner can drive. Named so `--detectors` reads clearly and
 # so adding one is a deliberate edit here rather than a discovery that silently
 # changes what a scheduled run does.
-DETECTORS: tuple[str, ...] = ("regime", "news")
+DETECTORS: tuple[str, ...] = ("regime", "news", "thesis")
+
+# WHAT A SCHEDULED RUN DOES BY DEFAULT, which is deliberately NOT every detector.
+#
+# `thesis` calls `orchestrate_score`, which FETCHES NEWS -- one provider request
+# per ticker. Over 77 tickers against a 100/day tier that is the defect just
+# fixed in `detect_news`, arriving by another route. It stays opt-in until the
+# news budget question in docs/open-decisions.md item 7 is settled.
+#
+# `regime` reads cached price history and `news` replays the W6 ledger, so both
+# cost ZERO provider requests and are safe to run nightly over the whole
+# portfolio.
+DEFAULT_DETECTORS: tuple[str, ...] = ("regime", "news")
 
 
 def _tickers(explicit: str) -> list[str]:
@@ -263,9 +284,68 @@ def detect_news(ticker: str, as_of: str, previous: dict | None) -> dict | None:
     )
 
 
+def detect_thesis(ticker: str, as_of: str, previous: dict | None) -> dict | None:
+    """A5: has the evidence carrying the thesis turned against it?
+
+    **COSTS A NEWS REQUEST PER TICKER**, because `orchestrate_score` fetches news
+    on its way to a score. That is the exact defect fixed in `detect_news`: 77
+    tickers against a 100/day tier. So this detector is OPT-IN -- it runs only
+    when `--detectors thesis` asks for it, and is deliberately absent from the
+    default sweep until the news budget question is settled.
+
+    MEASURED on a live MSFT decision: the attribution is real (operational +6.41
+    supports, narrative and macro_shock neutral, carrier `operational`), so the
+    detector has genuine evidence to compare. The prior comes from the ledger,
+    never from a recomputation.
+    """
+    from core.orchestrator import orchestrate_score
+    from core.score_engine import build_attribution
+    from core.thesis_alert import thesis_break_alert
+
+    decision = orchestrate_score(ticker, as_of).to_dict()
+    breakdown = decision.get("ensemble_breakdown")
+    if not breakdown:
+        return None
+    current = build_attribution(breakdown, float(decision.get("score") or 0.0))
+
+    # A5 stores its read buckets under `after`; wrapping them back up as an
+    # attribution reproduces the comparison exactly. VERIFIED: unchanged gives
+    # NONE, a sign flip gives REVERSAL at warn.
+    prior = None
+    if previous:
+        stored = (previous.get("detail") or {}).get("after")
+        if stored:
+            prior = {"buckets": stored}
+
+    alert = thesis_break_alert(prior, current)
+    alert["ticker"] = ticker
+    alert["as_of"] = as_of
+    return alert
+
+
 DETECTOR_FUNCTIONS = {
     "regime": detect_regime,
     "news": detect_news,
+    "thesis": detect_thesis,
+}
+
+# THE `alert` FIELD EACH DETECTOR STAMPS ON ITS OWN RECORD, declared rather than
+# derived from the detector name.
+#
+# CAUGHT BY RUNNING A5 TWICE: the first version guessed `f"{detector}_change"`
+# then `f"{detector}_event"`, which happens to match A4 (`regime_change`) and A9
+# (`news_event`) but NOT A5, whose record is `thesis_break`. So the ledger lookup
+# found nothing, the prior was always None, and every thesis alert reported
+# NOT_EVALUATED forever -- the identical failure the regime detector had, from a
+# different cause, two commits apart.
+#
+# A guessed name fails SILENTLY and looks like "no change yet", which is why this
+# is now data: a new detector must add its record name here, and the test below
+# asserts every declared detector has one.
+DETECTOR_RECORD_NAMES: dict[str, str] = {
+    "regime": "regime_change",
+    "news": "news_event",
+    "thesis": "thesis_break",
 }
 
 
@@ -307,9 +387,7 @@ def run_detection(
             function = DETECTOR_FUNCTIONS.get(detector)
             if function is None:
                 continue
-            previous = _previous_state(ticker, f"{detector}_change", existing)
-            if previous is None:
-                previous = _previous_state(ticker, f"{detector}_event", existing)
+            previous = _previous_state(ticker, DETECTOR_RECORD_NAMES[detector], existing)
             try:
                 alert = function(ticker, as_of, previous)
             except Exception as exc:
@@ -486,8 +564,15 @@ def send_digest_only(as_of: str, *, dry_run: bool) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tickers", default="")
-    parser.add_argument("--detectors", default=",".join(DETECTORS),
-                        help=f"comma-separated; known: {', '.join(DETECTORS)}")
+    parser.add_argument(
+        "--detectors",
+        default=",".join(DEFAULT_DETECTORS),
+        help=(
+            f"comma-separated; known: {', '.join(DETECTORS)}. "
+            f"Default: {', '.join(DEFAULT_DETECTORS)} -- 'thesis' is omitted "
+            f"because it costs one news request per ticker."
+        ),
+    )
     parser.add_argument("--as-of", default=date.today().isoformat())
     parser.add_argument("--dry-run", action="store_true",
                         help="detect and render, but send no email")

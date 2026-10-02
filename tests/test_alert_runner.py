@@ -159,6 +159,123 @@ class TheLedgerReplayPathTests(unittest.TestCase):
         self.assertTrue(snapshot["articles"][0]["exclusion_reason"])
 
 
+class TheLedgerLookupUsesDeclaredNamesTests(unittest.TestCase):
+    """The bug class that has now bitten twice, two commits apart.
+
+    A detector compares today against the prior it finds in the ledger. If the
+    lookup name is wrong the prior is always None, every alert reports
+    NOT_EVALUATED FOREVER, and the failure looks exactly like "no change yet" --
+    it is silent.
+
+    FIRST INSTANCE: the regime detector read `detail["after"]`, a key A4 never
+    writes. SECOND INSTANCE: the lookup guessed `f"{detector}_change"` then
+    `f"{detector}_event"`, which matches A4 (`regime_change`) and A9
+    (`news_event`) but not A5 (`thesis_break`).
+
+    So the names are DATA now, and these tests assert the mapping is complete
+    and that it matches what each detector actually stamps.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("run_alerts_mod", RUNNER)
+        cls.module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.module)
+
+    def test_every_detector_has_a_declared_record_name(self):
+        self.assertEqual(
+            set(self.module.DETECTOR_RECORD_NAMES),
+            set(self.module.DETECTORS),
+            "a detector with no declared record name gets a None prior and "
+            "reports NOT_EVALUATED forever, silently",
+        )
+
+    def test_every_detector_has_a_function(self):
+        self.assertEqual(
+            set(self.module.DETECTOR_FUNCTIONS), set(self.module.DETECTORS)
+        )
+
+    def test_the_declared_names_are_distinct(self):
+        names = list(self.module.DETECTOR_RECORD_NAMES.values())
+        self.assertEqual(len(set(names)), len(names))
+
+    def test_the_names_match_what_the_detectors_actually_stamp(self):
+        """The assertion that would have caught both instances.
+
+        Each A-module hard-codes its own `alert` field; this reads it from the
+        source rather than trusting the mapping.
+        """
+        expected = {
+            "regime": ("core/regime_alert.py", "regime_change"),
+            "news": ("core/news_event_alert.py", "news_event"),
+            "thesis": ("core/thesis_alert.py", "thesis_break"),
+        }
+        for detector, (module_path, name) in expected.items():
+            with self.subTest(detector=detector):
+                source = (REPO_ROOT / module_path).read_text(encoding="utf-8")
+                self.assertIn(
+                    f'"alert": "{name}"',
+                    source,
+                    f"{module_path} does not stamp alert={name!r}",
+                )
+                self.assertEqual(
+                    self.module.DETECTOR_RECORD_NAMES[detector], name
+                )
+
+    def test_the_lookup_no_longer_guesses_the_name(self):
+        """Asserted against CODE, not prose.
+
+        The comment explaining this bug necessarily quotes the old guessed
+        names, so a whole-file search matches them and proves nothing. The
+        check is that the `_previous_state` CALL uses the declared mapping.
+        """
+        source = RUNNER.read_text(encoding="utf-8")
+        calls = [
+            line.strip()
+            for line in source.splitlines()
+            if "_previous_state(ticker" in line
+            and not line.strip().startswith("def ")
+        ]
+        self.assertTrue(calls, "the ledger lookup call vanished")
+        for call in calls:
+            with self.subTest(call=call):
+                self.assertIn("DETECTOR_RECORD_NAMES[detector]", call)
+                self.assertNotIn("f\"{detector}", call)
+
+
+class TheDefaultSweepCostsNoProviderRequestsTests(unittest.TestCase):
+    """What a NIGHTLY run does, which is deliberately not every detector."""
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("run_alerts_mod2", RUNNER)
+        cls.module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.module)
+
+    def test_thesis_is_not_in_the_default_sweep(self):
+        # It calls orchestrate_score, which fetches news: one request per
+        # ticker, which over 77 tickers is the quota defect already fixed once.
+        self.assertNotIn("thesis", self.module.DEFAULT_DETECTORS)
+
+    def test_the_default_detectors_are_all_known(self):
+        for detector in self.module.DEFAULT_DETECTORS:
+            with self.subTest(detector=detector):
+                self.assertIn(detector, self.module.DETECTORS)
+
+    def test_the_zero_cost_detectors_are_the_default(self):
+        self.assertEqual(
+            set(self.module.DEFAULT_DETECTORS), {"regime", "news"}
+        )
+
+    def test_the_help_text_states_the_cost(self):
+        source = RUNNER.read_text(encoding="utf-8")
+        self.assertIn("one news request per ticker", source)
+
+
 class TheRunnerReportsHonestlyTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
