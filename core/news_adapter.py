@@ -51,8 +51,10 @@ from core.config import (
     NEWS_AGGREGATOR_VERSION,
     NEWS_BASE_SOURCE_CONFIDENCE,
     NEWS_CLASSIFIER_VERSION,
+    NEWS_COLLISION_PRONE_TICKERS,
     NEWS_CONTRADICTION_CONFIDENCE_FLOOR,
     NEWS_CONTRADICTION_TONE_DELTA,
+    NEWS_FINANCE_MARKERS,
     NEWS_CONTRACT_VERSION,
     NEWS_LOOKBACK_DAYS,
     NEWS_MAX_ARTICLES,
@@ -229,27 +231,98 @@ def resolve_tone(record: dict) -> tuple[float, str]:
     return lexicon_tone(text), f"lexicon:{NEWS_TONE_LEXICON_VERSION}"
 
 
+# Finance markers, precompiled WITH WORD BOUNDARIES, once at import.
+#
+# THE SUBSTRING BUG, CAUGHT TWICE. An unbounded match let "rally" match
+# inside "liteRALLY" and "neutRALLY", admitting a baseball report for ARM
+# and a developer-jargon article for KO. The fix for THAT was written through
+# a shell heredoc, which turned its word-boundary anchors into literal
+# BACKSPACE characters -- so the pattern then matched nothing instead of too
+# much, rejecting two genuine articles AND invalidating the measurement taken
+# against it.
+#
+# Hence one visible place, built once, with no interpolation at the call site.
+_WORD_BOUNDARY = chr(92) + "b"
+_MARKER_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(_WORD_BOUNDARY + re.escape(marker) + _WORD_BOUNDARY)
+    for marker in NEWS_FINANCE_MARKERS
+)
+
+
+def _corroborated(ticker: str, text: str) -> bool:
+    """Does anything beyond the bare symbol tie this text to the company?
+
+    Two independent signals, either of which suffices:
+
+    * THE COMPANY NAME. "Caterpillar" in an article mentioning CAT is decisive.
+    * A FINANCE MARKER. MEASURED, the marker list is deliberately broad and that
+      breadth does NOT reintroduce the collisions -- a cat-meme listicle contains
+      none of "stock", "earnings", "analyst" or "nasdaq", while genuine coverage
+      contains at least one. A narrow list would drop real articles instead.
+    """
+    low = text.lower()
+    # A company NAME may match as a substring: "coca-cola" and "arm holdings"
+    # are multi-word phrases, and bounding them adds nothing.
+    if any(name in low for name in NEWS_COLLISION_PRONE_TICKERS.get(ticker, ())):
+        return True
+    return any(pattern.search(low) for pattern in _MARKER_PATTERNS)
+
+
 def resolve_relevance(record: dict, ticker: str) -> float:
     """ENTITY RESOLUTION v1: how clearly the article is about `ticker`.
 
     1.0 when the ticker matches (provider-matched or present as a token in
     the text); 0.7 for a company-name token match; 0.0 otherwise. Relevance
     0 keeps the article in the evidence but excludes it from aggregation.
+
+    A BARE SYMBOL IS NOT ENOUGH FOR A COLLISION-PRONE TICKER. MEASURED over
+    6,360 captured articles, 93 of the 116 admitted on the 15 symbols that are
+    English words or colliding abbreviations were not about the company at all
+    -- a Chevrolet Corvette for ARM, cat memes for CAT, boxing for KO, a PyPI
+    package for KEEL, 10 of 10 for V. Those symbols require corroboration by the
+    company name or a finance marker; every other ticker is unaffected.
     """
     provider_ticker = str(record.get("ticker") or "").strip().upper()
     if provider_ticker == ticker:
+        # A PROVIDER-ASSERTED match needs no corroboration: the provider resolved
+        # the entity itself, which is a different and stronger claim than the
+        # symbol happening to appear in the text.
         return 1.0
-    tokens = set(re.findall(
-        r"[A-Za-z0-9]+",
-        f"{record.get('headline', '')} {record.get('summary', '')}".upper(),
-    ))
+    text = f"{record.get('headline', '')} {record.get('summary', '')}"
+    tokens = set(re.findall(r"[A-Za-z0-9]+", text.upper()))
     if ticker in tokens:
-        return 1.0
+        if ticker in NEWS_COLLISION_PRONE_TICKERS and not _corroborated(
+            ticker, text
+        ):
+            # The symbol appears but nothing confirms the article is about the
+            # company. Falls through to the company-name check below, which is
+            # the stricter test and the only one that can still admit it.
+            pass
+        else:
+            return 1.0
     name = str(record.get("company_name") or "").strip().upper()
     if name:
         name_tokens = {token for token in re.findall(r"[A-Za-z0-9]+", name) if len(token) > 1}
         if name_tokens and name_tokens.issubset(tokens):
             return 0.7
+
+    # THE CONFIGURED COMPANY NAME, for a collision-prone ticker whose article
+    # never prints the symbol at all.
+    #
+    # CAUGHT BY PROBE: "Caterpillar raises full-year guidance" has no bare CAT
+    # token, and the branch above reads `record["company_name"]`, which the real
+    # NewsAPI payload sets to None -- MEASURED on live records. So six genuine
+    # articles (Caterpillar, Coca-Cola, Visa, ServiceNow, American Electric
+    # Power, Bloom Energy) had NO path to admission once the symbol rule
+    # tightened. Naming the company is the strongest possible signal and must
+    # never score lower than the bare symbol it replaces.
+    if ticker in NEWS_COLLISION_PRONE_TICKERS:
+        low = text.lower()
+        if any(
+            candidate in low
+            for candidate in NEWS_COLLISION_PRONE_TICKERS[ticker]
+        ):
+            return 1.0
     return 0.0
 
 

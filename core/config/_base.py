@@ -262,6 +262,93 @@ NEWS_TONE_LEXICON_VERSION = "news-tone-lexicon-v1"
 NEWS_AGGREGATOR_VERSION = "news-aggregator-v1"
 NEWS_PIPELINE_VERSION = "news-pipeline-v1"
 
+# --- Symbol collisions in entity resolution -------------------------------------
+# MEASURED over 6,360 captured articles: for holdings whose ticker is an English
+# word or a colliding abbreviation, a bare-token symbol match admits articles that
+# are not about the company at all. 93 of the 116 admitted articles on these 15
+# tickers were collisions:
+#
+#     ARM    "35-Years-Owned 1972 Chevrolet Corvette Coupe Project"
+#     CAT    "27 Meowing Memes Ministering Mood Boosts for Cat People Like You"
+#     KO     "Tyson Fury vs Anthony Joshua ... smiles then KO"
+#     MP     "Proposed deal to resolve Drumcree dispute, says DUP MP"
+#     KEEL   "keel-workflow 1.25.0"
+#     V      10 of 10 admitted articles were collisions
+#
+# So for THESE tickers only, a symbol match must be CORROBORATED by the company
+# name or a finance marker. The rule separates cleanly rather than cutting
+# indiscriminately: AEP and CEG keep 100% of their articles (all genuinely
+# financial) while V, NOW, STX and BE keep 0% (none ever were).
+#
+# A LIST RATHER THAN A HEURISTIC. "Is this an English word?" needs a dictionary
+# and a judgement per word (is ARM a word? BE? MP?). The list is explicit and
+# auditable, and each entry carries the name that corroborates it -- which a
+# heuristic would have needed anyway.
+#
+# The other 62 holdings are UNTOUCHED: 1,633 admitted articles across 48 of them,
+# and NVDA or MSFT do not collide with ordinary English.
+NEWS_COLLISION_PRONE_TICKERS: dict[str, tuple[str, ...]] = {
+    "AEP": ("american electric power",),
+    "ANET": ("arista",),
+    "ARM": ("arm holdings", "arm ltd", "softbank"),
+    "BE": ("bloom energy",),
+    "CAT": ("caterpillar",),
+    "CEG": ("constellation energy",),
+    "GLW": ("corning",),
+    "KEEL": ("keel mining", "keel resources"),
+    "KO": ("coca-cola", "coca cola"),
+    "MP": ("mp materials",),
+    "NOW": ("servicenow",),
+    "NU": ("nu holdings", "nubank"),
+    "STX": ("seagate",),
+    "TER": ("teradyne",),
+    "V": ("visa",),
+}
+
+# Words that mark an article as financial coverage of a company. Deliberately
+# BROAD: the measurement showed that breadth does not reintroduce the collisions
+# (CAT kept 2 of 25, KO 2 of 12), because a cat-meme listicle contains none of
+# them. A narrow list would drop genuine coverage instead.
+NEWS_FINANCE_MARKERS: tuple[str, ...] = (
+    "stock", "shares", "earnings", "revenue", "guidance", "analyst",
+    "nasdaq", "nyse", "dividend", "quarterly", "investor", "market cap",
+    "upgrade", "downgrade", "price target", "buy rating", "sell rating",
+    "eps", "profit", "valuation", "rally", "ticker",
+)
+
+
+def _validate_news_collision_config() -> None:
+    """Import-time guard: every collision-prone ticker needs a corroborator."""
+    for ticker, names in NEWS_COLLISION_PRONE_TICKERS.items():
+        if not ticker or not ticker.isupper():
+            raise ValueError(
+                f"{ticker!r} must be an upper-case ticker symbol"
+            )
+        if not names:
+            raise ValueError(
+                f"{ticker} is listed as collision-prone but has no company "
+                f"name to corroborate with, so EVERY article about it would be "
+                f"rejected and the holding would go permanently dark"
+            )
+        for name in names:
+            if not name or name != name.lower():
+                raise ValueError(
+                    f"{ticker}: corroborating name {name!r} must be lower-case, "
+                    f"because matching is done on lowered text"
+                )
+    if not NEWS_FINANCE_MARKERS:
+        raise ValueError(
+            "at least one finance marker is required: with none, a holding whose "
+            "coverage never prints its full company name would go dark"
+        )
+    for marker in NEWS_FINANCE_MARKERS:
+        if marker != marker.lower():
+            raise ValueError(f"finance marker {marker!r} must be lower-case")
+
+
+_validate_news_collision_config()
+
+
 NEWS_PROVIDER_API_KEY_ENV = "NEWS_PROVIDER_API_KEY"
 NEWS_PROVIDER_URL = "https://newsapi.org/v2/everything"
 NEWS_PROVIDER_TIMEOUT_SECONDS = 10.0
