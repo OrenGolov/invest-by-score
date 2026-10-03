@@ -50,6 +50,8 @@ from datetime import datetime, timedelta, timezone
 from core.config import (
     NEWS_AGGREGATOR_VERSION,
     NEWS_BASE_SOURCE_CONFIDENCE,
+    FINNHUB_API_KEY_ENV,
+    FINNHUB_SOURCE_ID,
     NEWS_CLASSIFIER_VERSION,
     NEWS_COLLISION_PRONE_TICKERS,
     NEWS_CONTRADICTION_CONFIDENCE_FLOOR,
@@ -60,6 +62,7 @@ from core.config import (
     NEWS_MAX_ARTICLES,
     NEWS_PIPELINE_VERSION,
     NEWS_PROVIDER_API_KEY_ENV,
+    NEWS_PROVIDER_ORDER,
     NEWS_PROVIDER_TIMEOUT_SECONDS,
     NEWS_PROVIDER_URL,
     NEWS_RECENCY_HALF_LIFE_DAYS,
@@ -378,7 +381,11 @@ def source_weight(record: dict, published_dt: datetime, as_of_dt: datetime) -> f
 
 def resolve_news_provider(ticker: str, as_of: str) -> dict:
     """Resolve the active news provider, mirroring the fundamentals pattern."""
-    api_key = os.getenv(NEWS_PROVIDER_API_KEY_ENV)
+    # EITHER provider's key makes the pipeline live. Checking only NewsAPI's
+    # would report "no provider" on a machine configured solely for Finnhub.
+    api_key = os.getenv(NEWS_PROVIDER_API_KEY_ENV) or os.getenv(
+        FINNHUB_API_KEY_ENV
+    )
     if api_key:
         return {
             "provider": NEWS_PROVIDER_NAME,
@@ -707,6 +714,69 @@ def _unavailable_snapshot(ticker: str, as_of: str, reason: str = UNAVAILABLE_REA
     ).to_dict()
 
 
+def fetch_news_records(
+    ticker: str,
+    as_of_dt: datetime,
+    timeout: float = NEWS_PROVIDER_TIMEOUT_SECONDS,
+) -> dict:
+    """Fetch from the first provider in NEWS_PROVIDER_ORDER that answers.
+
+    Returns the usual disposition plus ``source_id`` naming the provider that
+    actually supplied the records, so the W6 ledger can record provenance rather
+    than filing everything under one id.
+
+    A provider with no key configured is SKIPPED rather than treated as a
+    failure: "not configured here" and "asked and refused" are different facts,
+    and only the second is a provider outage.
+
+    Finnhub leads when its key is present -- its free tier is 60 calls/minute
+    against NewsAPI's 100/day, and it resolves the entity itself. NewsAPI stays
+    as a genuine fallback because Finnhub covers North American companies only.
+    """
+    attempts: list[str] = []
+    for source_id in NEWS_PROVIDER_ORDER:
+        if source_id == FINNHUB_SOURCE_ID:
+            from core.finnhub_news import fetch_company_news
+
+            result = fetch_company_news(ticker, as_of_dt, timeout=timeout)
+        elif source_id == NEWS_SOURCE_ID:
+            result = fetch_provider_articles(ticker, as_of_dt, timeout=timeout)
+        else:  # pragma: no cover - the config validator forbids this
+            continue
+
+        status = result.get("status")
+        if status == "ok":
+            result["source_id"] = source_id
+            result["attempts"] = attempts
+            return result
+        if status == "provider_key_required":
+            attempts.append(f"{source_id}: not configured")
+            continue
+        attempts.append(f"{source_id}: {result.get('reason', 'failed')}")
+
+    # EVERY provider is exhausted. The reason names each one, because "news is
+    # unavailable" without saying which provider failed is unactionable.
+    #
+    # NOT CONFIGURED IS NOT FAILED. CAUGHT BY PROBE: the first version keyed on
+    # whether `attempts` was non-empty, but a skipped provider appends an attempt
+    # too -- so a machine with NO keys at all reported `provider_request_failed`,
+    # which reads as "the provider refused us" and sends a reader looking for an
+    # outage that never happened. The status now turns on whether anything was
+    # actually ASKED.
+    asked = any("not configured" not in note for note in attempts)
+    return {
+        "status": "provider_request_failed" if asked else "provider_key_required",
+        "records": [],
+        "reason": (
+            "; ".join(attempts)
+            if attempts
+            else "no news provider is configured"
+        ),
+        "source_id": NEWS_SOURCE_ID,
+        "attempts": attempts,
+    }
+
+
 def build_news_snapshot(ticker: str, as_of: str, timeout: float = NEWS_PROVIDER_TIMEOUT_SECONDS) -> dict:
     """Run the full N1 news pipeline for one ticker at one point in time."""
     ticker = str(ticker).upper()
@@ -719,18 +789,22 @@ def build_news_snapshot(ticker: str, as_of: str, timeout: float = NEWS_PROVIDER_
     if resolution.get("status") != "live_provider":
         return _unavailable_snapshot(ticker, as_of_text)
 
-    fetched = fetch_provider_articles(ticker, as_of_dt, timeout=timeout)
+    fetched = fetch_news_records(ticker, as_of_dt, timeout=timeout)
+    # THE PROVIDER THAT ANSWERED, not a hardcoded one. Filing a Finnhub record
+    # under the NewsAPI id would make the two indistinguishable in the very
+    # store that exists to prove provenance.
+    answering_source = str(fetched.get("source_id") or NEWS_SOURCE_ID)
     if fetched["status"] != "ok":
         return _unavailable_snapshot(
             ticker,
             as_of_text,
             reason=f"News provider unavailable: {fetched['reason']}",
-            source_id=NEWS_SOURCE_ID,
+            source_id=answering_source,
         )
 
     raw_records = fetched["records"]
     append_raw_records(
-        source_id=NEWS_SOURCE_ID,
+        source_id=answering_source,
         request_key=f"{ticker}_{as_of_dt.date().isoformat()}",
         records=raw_records,
     )

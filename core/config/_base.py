@@ -380,6 +380,98 @@ NEWS_MAX_ARTICLES = 50
 NEWS_SCORE_BASE = 5.0
 NEWS_SCORE_SPAN = 5.0
 
+# --- Finnhub company news (the provider that fits the need) ---------------------
+# MEASURED: NewsAPI's free tier allows 100 requests/day and this portfolio needs
+# roughly 150 (77 tickers plus ad-hoc scoring). That gap cost five consecutive
+# nights of permanently lost news before the schedule was fixed, and still forces
+# the collector to rotate 40 of 75 eligible tickers per run. NewsAPI's only paid
+# tier is $449/month for 250,000 requests -- about 55x more quota than this system
+# needs, at $5,388/year.
+#
+# Finnhub's free tier is 60 calls per MINUTE (~86,000/day). The constraint
+# disappears at no cost.
+#
+# IT ALSO FIXES ENTITY RESOLUTION AT THE SOURCE. `/company-news` is queried BY
+# SYMBOL and returns a `related` field naming the tickers an article is about.
+# NewsAPI is a keyword search, which is why MEASURED 93 of 116 articles on
+# collision-prone tickers were about Chevrolet Corvettes, cat memes and boxing.
+# The NewsAPI source id, declared HERE rather than imported from
+# core/news_adapter.py: config must not depend on a module that imports
+# config. A test asserts the adapter's own constant still matches.
+NEWSAPI_SOURCE_ID = "newsapi_news"
+FINNHUB_SOURCE_ID = "finnhub_news"
+FINNHUB_PROVIDER_NAME = "Finnhub"
+FINNHUB_NEWS_URL = "https://finnhub.io/api/v1/company-news"
+FINNHUB_API_KEY_ENV = "FINNHUB_API_KEY"
+
+# The cap per ticker per fetch. Matched to NEWS_MAX_ARTICLES so swapping the
+# provider cannot quietly change how much evidence a decision rests on -- the
+# aggregation and contradiction thresholds downstream were measured against that
+# volume.
+FINNHUB_MAX_ARTICLES = NEWS_MAX_ARTICLES
+
+# NORTH AMERICA ONLY, per Finnhub's own documentation. A holding it cannot cover
+# falls back to NewsAPI rather than being reported as having no news: "we could
+# not look here" is not "nothing happened".
+FINNHUB_COVERS_NORTH_AMERICA_ONLY = True
+
+# WHICH PROVIDER IS TRIED FIRST. Finnhub leads when its key is present, because
+# it is the one whose quota fits and whose entity resolution is provider-side.
+# NewsAPI remains a real fallback rather than dead code: it covers non-North
+# American holdings, and a two-provider path is what keeps a single provider
+# outage from costing a day of PERISHABLE news.
+NEWS_PROVIDER_ORDER: tuple[str, ...] = (FINNHUB_SOURCE_ID, NEWSAPI_SOURCE_ID)
+
+
+def _validate_finnhub_config() -> None:
+    """Import-time guard for the Finnhub provider contract."""
+    if not FINNHUB_NEWS_URL.startswith("https://"):
+        raise ValueError(
+            "the news endpoint must be HTTPS: the API key travels in the query "
+            "string, so plain HTTP would put the credential on the wire"
+        )
+    if "company-news" not in FINNHUB_NEWS_URL:
+        raise ValueError(
+            f"{FINNHUB_NEWS_URL!r} is not the company-news endpoint; the "
+            f"market-news endpoint returns general headlines with no `related` "
+            f"symbols, which is the field that makes entity resolution "
+            f"provider-side"
+        )
+    if not FINNHUB_API_KEY_ENV or not FINNHUB_API_KEY_ENV.isupper():
+        raise ValueError(
+            f"{FINNHUB_API_KEY_ENV!r} must be a non-empty upper-case environment "
+            f"variable name; a credential must never live in configuration"
+        )
+    if FINNHUB_SOURCE_ID == NEWSAPI_SOURCE_ID:
+        raise ValueError(
+            "the two providers must have distinct source ids, or the W6 raw "
+            "ledger cannot say which one supplied a record"
+        )
+    if FINNHUB_MAX_ARTICLES != NEWS_MAX_ARTICLES:
+        raise ValueError(
+            f"the per-fetch cap must match NEWS_MAX_ARTICLES "
+            f"({NEWS_MAX_ARTICLES}), got {FINNHUB_MAX_ARTICLES}: the "
+            f"aggregation and contradiction thresholds were measured against "
+            f"that volume, so changing it per provider changes what a decision "
+            f"rests on"
+        )
+    if len(set(NEWS_PROVIDER_ORDER)) != len(NEWS_PROVIDER_ORDER):
+        raise ValueError("a provider appears twice in the fallback order")
+    for source_id in NEWS_PROVIDER_ORDER:
+        if source_id not in (FINNHUB_SOURCE_ID, NEWSAPI_SOURCE_ID):
+            raise ValueError(f"unknown provider {source_id!r} in the order")
+    if NEWSAPI_SOURCE_ID not in NEWS_PROVIDER_ORDER:
+        raise ValueError(
+            "NewsAPI must stay in the order as a fallback: Finnhub covers North "
+            "American companies only, and dropping the fallback would report a "
+            "non-covered holding as having no news rather than as unlooked-at"
+        )
+
+
+_validate_finnhub_config()
+
+
+
 # --- Macroeconomic agent (N3) ---------------------------------------------------
 # Vintage-aware economic data with PIT filtering by published_time (first-release
 # semantics). Every series carries provenance: source, publication lag, frequency,

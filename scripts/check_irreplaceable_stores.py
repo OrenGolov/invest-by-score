@@ -14,11 +14,24 @@ exactly like "we have no history yet" rather than "the history was deleted".
 THAT SILENCE IS THE DEFECT THIS GATE CLOSES. A store that is expensive or
 impossible to rebuild must announce its own absence.
 
-**IT IS A NOTICE, NOT A FAILURE, ON A FRESH CLONE.** A new checkout legitimately
-has none of these files, and failing there would make the gate fire for everyone
-who ever clones the repository -- the checkout-dependence trap this project has
-hit five times. So absence is only an ERROR when the repository shows evidence
-the store once existed here: a sibling ledger, a log, or a recorded run.
+**IT ALWAYS EXITS 0. IT REPORTS; IT DOES NOT DECIDE THE BUILD.**
+
+The first version exited 1 when a store was missing while its witness was present.
+D5 -- the gate built to catch exactly this -- found it immediately: that is an exit
+status that depends on the CHECKOUT rather than the repository, the bug class that
+has already cost four red builds. I reintroduced it while writing the gate meant
+to protect against data loss.
+
+The tension is genuine. This gate exists to notice that a store VANISHED, so
+absence is the signal; but a fresh clone has none of these files, is not a loss,
+and CI is always a fresh clone. A build status cannot tell "deleted here" from
+"never existed here" without reading the checkout, so it must not try.
+
+What it CAN do -- and what the two deletions in this session actually needed -- is
+make the loss VISIBLE the moment anyone looks, instead of letting it hide behind an
+UNKNOWN_IMPACT that reads like "no history yet". So the warning prints at full
+volume with the rebuild command, and the exit code stays 0. A smoke detector, not
+a circuit breaker.
 
 **REBUILDABLE AND IRREPLACEABLE ARE DIFFERENT.** Each store declares which it is,
 and the message says how to rebuild the ones that can be. A store with no rebuild
@@ -110,7 +123,7 @@ def main() -> int:
             missing_fresh.append(store)
 
     if missing_with_witness:
-        print("IRREPLACEABLE STORE GATE: FAILED")
+        print("IRREPLACEABLE STORE GATE: *** A STORE IS MISSING ***")
         for store in missing_with_witness:
             print()
             print(f"  {store['path']} is MISSING")
@@ -125,7 +138,12 @@ def main() -> int:
         print("  A gitignored store cannot be restored by git. If this was a")
         print("  deliberate reset, rebuild it with the command above; if it was")
         print("  an accident, that is what this gate exists to surface.")
-        return 1
+        print()
+        print("  Exiting 0 DELIBERATELY: a build status cannot tell 'deleted")
+        print("  here' from 'never existed here' without reading the checkout,")
+        print("  and CI is always a fresh clone. This gate reports; it does not")
+        print("  decide the build.")
+        return 0
 
     print("irreplaceable store gate: OK")
     print(f"  stores watched                    {len(STORES)}")
