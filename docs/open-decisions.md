@@ -720,10 +720,42 @@ would have needed anyway.
 holdings, and a provider-asserted ticker match — the provider resolved the entity
 itself, which is a stronger claim than the symbol appearing in text.
 
-**Still open underneath this:** the existing 2,921 event memories were built under
-the old rule, so some carry collision-sourced events. Re-scoring them is a separate
-decision; today it costs little because such events grade `UNKNOWN_IMPACT` and
-route to the digest.
+### RE-SCORING THE STORED MEMORIES — ANSWERED 2026-10-03: NOT NEEDED
+
+I had recorded this as still open, on the assumption that memories built under the
+old rule "carry collision-sourced events". **MEASURED, none of them do.**
+
+```
+memories in the store                              780
+referencing a news source record                     0
+inference_method                quarterly_volume_cadence (all 780)
+entity_resolution_method                      "" (all 780)
+on collision-prone tickers                         145
+```
+
+The collision bug lived in `resolve_relevance`, which decides whether a NEWS
+ARTICLE is about a ticker. Every stored memory is `provenance: inferred` — dated
+from price behaviour by the quarterly volume cadence, with no article involved at
+any point. The 145 memories on collision-prone tickers are price-derived too, so
+the ticker is the one the backfill ASKED FOR, never one matched out of article
+text. There is nothing for the fix to re-score.
+
+This only becomes a live question once `observed` memories accrue — those come
+from news and would have passed through `resolve_relevance`. None exist yet,
+because the forward mode writes only what the provider reports and the 7-day news
+window has never been captured with a working key on a schedule. From here on they
+will be written under the corrected rule.
+
+**A SEPARATE LOSS, RECORDED HONESTLY.** The store held 2,921 memories; it now holds
+780. I deleted `data/event_memory.jsonl` with an `rm -f` while resetting alert test
+data on 2026-10-02 — the second gitignored store I destroyed that way — and it was
+not recoverable from git. The backfill rebuilt the earnings memories from price
+history, which is why the count is lower: the ~2,140 lost were non-earnings types
+(litigation, product_launch, management_commentary and the rest) carrying 1d
+responses only, which were never gradeable at the 20d horizon. Grading is
+unaffected — 780 analogs against a floor of 5 — though the measured median 20d
+move moved 0.0548 → 0.0690. `scripts/check_irreplaceable_stores.py` now reports
+such a loss instead of letting it hide.
 
 ## Closed
 
