@@ -587,6 +587,96 @@ rather than a test, and it behaved as designed. No change needed.
 
 ---
 
+## 20. Many sources is the goal — and the outlet is dropped before it can be judged
+
+**Raised:** 2026-10-04. **Owner:** operator + next sprint.
+**Supersedes the "what it would take" clause of item 4.**
+
+The operator's stated goal: **as many different news sources as possible, then
+filter and investigate them** — which is what L4's source-reliability
+estimator was built for. MEASURED 2026-10-04 against the first real news day,
+the breadth already arrived and the machinery cannot see it.
+
+**The corpus is already broad, and already mostly noise:**
+
+```
+distinct source_name values            369  (was 50 on 2026-09-21)
+articles in one day                  1,637
+from a recognisable financial outlet   114  (7.0%)
+
+top outlets by volume
+  265  Biztoc.com            aggregator, republishes others
+   96  Pypi.org              the Python package index
+   62  The Times of India
+   57  PRNewswire
+   48  Rlsbb.cc              filesharing site
+   32  Bringatrailer.com     classic car auctions
+    8  Biblegateway.com
+```
+
+A real headline from the ledger, stored as market news:
+
+> "Xiaomi Redmi Note 17 Pro 5G 6GB RAM/256GB Storage $406.80 @ Mobileciti"
+> — Ozbargain.com.au
+
+**Three measured blockers, in the order they bite:**
+
+```
+1. source_quality populated      0 of 1,637  (100% None)
+2. ticker populated              0 of 1,637  (100% None)
+3. Event.source                  "newsapi_news" at 7 hardcoded call sites
+```
+
+**(1) means every outlet is weighted identically.** `source_weight()` treats a
+`None` quality as the neutral factor **1.0**, so Bringatrailer.com and CNBC
+carry the same weight into every score. Documented as neutral semantics, which
+is correct in isolation and wrong at 369 outlets.
+
+**(2) is item 4, unchanged at 1,637 articles.** No article joins to a price
+outcome, so no outlet can ever be credited or blamed.
+
+**(3) is the newly located root cause.** `core/news_adapter.py` hardcodes
+`NEWS_SOURCE_ID = "newsapi_news"` and passes it as `source_id` at seven call
+sites. The per-article `source_name` IS captured in the raw ledger and IS
+read by `_normalize_provider_payload`, but it never reaches an `Event` —
+`Event.source` therefore records the PROVIDER, not the OUTLET.
+
+**Why that last one matters most.** `Event` already HAS `source` and
+`source_quality` fields, and `event_from_article` already reads
+`article["source_weight"]`. The plumbing exists end to end; one constant
+overwrites the outlet on the way through. L4 is not missing a feature — it is
+being handed the provider's name 1,637 times and correctly reporting
+REGISTRY_PRIOR because it has one "source" with no variation to learn from.
+
+**What breadth actually requires, in dependency order:**
+
+1. **Carry the outlet.** Pass `source_name` as `Event.source` and keep the
+   provider in a separate `provider` field. Cheap, unblocks everything below.
+2. **Resolve the ticker at ingestion** (item 4's requirement). Closes the
+   source → outcome join, so an outlet's record can be MEASURED instead of
+   asserted.
+3. **Let L4 learn.** It already shrinks per-outlet rates toward a global rate
+   with k=20 pseudo-counts and reports NO_EVIDENCE / REGISTRY_PRIOR / GLOBAL /
+   CONDITIONAL. Once (1) and (2) land it starts learning with no new estimator.
+4. **Add providers, not filters.** Each new provider widens the corpus; L4
+   then demotes the noise FROM EVIDENCE rather than from a hand-written
+   allowlist.
+
+**Why not a quality allowlist.** Ranking 369 outlets by judgement — and the
+list grows daily — is the survivorship-bias-by-construction trap item 3
+refuses for breadth features, and it discards the only thing that makes the
+noise informative: whether an outlet's stories actually precede price moves.
+`SOURCE_RELIABILITY_ABSENT_IS_ZERO = False` already encodes this: an
+unmeasured outlet and a useless one are different facts.
+
+**Finnhub's role is narrower than it looked.** It fixes (2) at the source via
+a provider-side `related` ticker field, and removes the 100-request quota. It
+does NOT fix (1) or (3) — those are this repo's code, and no provider choice
+substitutes for carrying the outlet through.
+
+
+---
+
 ## Closed
 
 - ~~**Live runs must use today's chart state.**~~ Fixed in `ad75f48`. The
