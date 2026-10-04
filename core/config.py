@@ -9340,3 +9340,85 @@ def _validate_alert_delivery_config() -> None:
 
 
 _validate_alert_delivery_config()
+
+
+# ---------------------------------------------------------------------------
+# TELEGRAM DELIVERY — the channel that works on the operator's network
+# ---------------------------------------------------------------------------
+# MEASURED 2026-10-04, why this exists beside the email channel: outbound
+# SMTP is INTERCEPTED on the operator's network. All three SMTP ports
+# accepted a TCP connection and then sent no greeting, while HTTPS to
+# Google returned 200. No SMTP channel can deliver from that machine
+# whatever the provider (see open item 11).
+#
+# Telegram rides port 443, and the same probe run against it:
+#
+#     tcp api.telegram.org:443   OPEN  (149.154.166.110)
+#     https GET                  the host answered
+#
+# WHY TELEGRAM AND NOT THE GMAIL REST API. Both ride 443. Telegram needs no
+# OAuth flow, no business verification and no paid provider — a bot token
+# from @BotFather is the whole credential — and it produces a real PHONE
+# PUSH, which is the operator's actual requirement: they are not always
+# with the laptop, but always with the phone.
+#
+# WHY NOT A PHONE APP. The scoring engine needs pandas, numpy, sklearn and
+# pyarrow against a 143MB local store, so it cannot run ON a phone. Any app
+# would be a thin client to a server that still has to run somewhere, which
+# is a hosting problem wearing an app costume. A push channel delivers the
+# same monitoring with no server, no store and no app.
+TELEGRAM_DELIVERY_VERSION = "telegram-delivery-v1"
+
+TELEGRAM_BOT_TOKEN_ENV = "ALERT_TELEGRAM_TOKEN"
+TELEGRAM_CHAT_ID_ENV = "ALERT_TELEGRAM_CHAT_ID"
+
+TELEGRAM_API_BASE = "https://api.telegram.org"
+TELEGRAM_TIMEOUT_SECONDS = 20.0
+
+# Telegram refuses a message above 4096 characters outright. An alert that
+# is silently dropped for being long is worse than a truncated one, so the
+# renderer truncates and SAYS it truncated.
+TELEGRAM_MAX_MESSAGE_CHARS = 4096
+TELEGRAM_TRUNCATION_NOTICE = "\n\n[truncated]"
+
+# A bot token looks like "<digits>:<35+ chars>". Checked before sending for
+# the reason the email channel checks its password shape: a malformed
+# credential should be named as malformed, not reported as a rejection.
+TELEGRAM_TOKEN_MIN_LENGTH = 40
+
+# The four delivery statuses mirror the email channel deliberately. A
+# caller must not have to learn two vocabularies to ask "did it send?",
+# and `unconfigured` must never read as success in either.
+TELEGRAM_DELIVERY_STATUSES = ALERT_DELIVERY_STATUSES
+
+
+def _validate_telegram_config() -> None:
+    if TELEGRAM_DELIVERY_STATUSES != ALERT_DELIVERY_STATUSES:
+        raise ValueError(
+            "both channels must report the SAME status vocabulary: a caller "
+            "asking 'did it send?' cannot be made to learn two answers"
+        )
+    if not TELEGRAM_API_BASE.startswith("https://"):
+        raise ValueError(
+            "a bot token must never cross the wire in clear text — and "
+            "https is also why this channel works where SMTP does not"
+        )
+    if TELEGRAM_MAX_MESSAGE_CHARS > 4096:
+        raise ValueError(
+            "Telegram refuses a message above 4096 characters; declaring a "
+            "larger budget would silently drop long alerts"
+        )
+    if not TELEGRAM_TRUNCATION_NOTICE.strip():
+        raise ValueError(
+            "a truncated alert must SAY it was truncated: a reader who "
+            "cannot see that the message was cut will act on a partial one"
+        )
+    if TELEGRAM_TIMEOUT_SECONDS <= 0:
+        raise ValueError("TELEGRAM_TIMEOUT_SECONDS must be positive")
+    if TELEGRAM_TOKEN_MIN_LENGTH < 10:
+        raise ValueError("the token length guard is too weak to catch a typo")
+    if TELEGRAM_BOT_TOKEN_ENV == TELEGRAM_CHAT_ID_ENV:
+        raise ValueError("the token and the chat id need separate variables")
+
+
+_validate_telegram_config()

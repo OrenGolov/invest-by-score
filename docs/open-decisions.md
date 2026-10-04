@@ -777,6 +777,79 @@ look like a correct exclusion.
 
 ---
 
+## 23. A phone app is the wrong shape for phone monitoring — CLOSED (decided)
+
+**Raised:** 2026-10-04. **Decided:** same day, by the operator.
+
+The operator asked for a phone app that would "start the server", because
+they are not always with the laptop but always with the phone.
+
+**Why an app cannot do that.** The scoring engine needs pandas, numpy,
+sklearn and pyarrow against a 143MB local store. None of that runs on a
+phone, so any "app" is a thin client talking to a server that still has to
+run somewhere — a hosting problem wearing an app costume.
+
+The three real options, measured against the stated need:
+
+| option | runs 24/7 | cost | on-demand score | work |
+|---|---|---|---|---|
+| push alerts to the phone | no (laptop) | free | no | one channel |
+| cloud host + mobile web | yes | $5-10/mo | yes | secrets, auth, deploy, 143MB store |
+| Tailscale to the laptop | no (laptop) | free | yes | bind address only |
+
+**Decided: push alerts.** It delivers the actual requirement — knowing when
+something happens while away from the laptop — with no server, no store and
+no app. What it does NOT give is an on-demand score; the operator receives
+what the last scheduled run computed.
+
+Worth recording for later: `index.html` ALREADY carries
+`<meta name="viewport">` and two media queries (900px, 640px), so the
+existing UI is substantially mobile-ready if the cloud-host option is ever
+revisited.
+
+## 24. Telegram is blocked on the Aman network too — DECISION
+
+**Raised:** 2026-10-04. **Owner:** operator. **Sibling of item 11.**
+
+The Telegram channel was built as the answer to item 11 (SMTP intercepted).
+It is blocked on the same network, by the same appliance, and the operator
+will run it from their home network instead.
+
+MEASURED 2026-10-04:
+
+```
+tcp api.telegram.org:443       OPEN  (149.154.166.110)
+POST /bot<token>/getMe         HTTP 503, an HTML captive-portal page
+api.telegram.org cert issuer   palo-decrypt.scp.co.il
+gmail.googleapis.com issuer    Google Trust Services (WR2)
+```
+
+A certificate issued by an appliance rather than a public CA means TLS is
+terminated and inspected locally. Google hosts present genuine certificates,
+so this is **category-based filtering of messaging apps**, not a general
+egress block.
+
+**A LESSON ABOUT THE PROBE, not just the network.** Before building, a
+reachability check reported `tcp 443 OPEN` and "the host answered", and that
+was taken as proof the channel would work. It proved only that SOMETHING
+answered — the appliance. A probe that cannot distinguish the real endpoint
+from an interceptor is not a reachability probe. `diagnose_interception()`
+now inspects the certificate issuer, which is the check that would have
+caught this before a line of transport was written.
+
+**What this does NOT mean.** The token is UNTESTED, not rejected: the
+request never reached Telegram. That distinction is exactly why
+`auth_failed` and `failed` are separate statuses, and the second time in one
+session that the split paid for itself.
+
+**Status: the channel code is complete and tested** (35 tests, transport
+substituted, nothing touching the network). It needs to be RUN from a
+network the operator controls. No further probing of the Aman network is to
+be done — the operator has said so twice.
+
+
+---
+
 ## Closed
 
 - ~~**Live runs must use today's chart state.**~~ Fixed in `ad75f48`. The
