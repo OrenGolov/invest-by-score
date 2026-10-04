@@ -974,6 +974,113 @@ is what makes scheduling matter at all.
 
 ---
 
+## 28. What accuracy actually requires — the X-sprint findings, consolidated
+
+**Raised:** 2026-10-04. **Owner:** operator + whoever owns the next sprint.
+**This is the close-out the X sprint never got.**
+
+X1-X8 measured more about this system's limits than any register entry
+recorded, and those findings lived only in commit messages.
+
+### The deciding measurement (X1)
+
+Eight estimators, 20d horizon, 120 validation observations, 96-day embargo —
+PIT-clean, so these are not leakage artefacts:
+
+```
+estimator            rmse      95% bootstrap CI     dir_acc
+historical_mean   0.12164   [0.09741, 0.14757]      0.5500   <- BASELINE
+random_forest     0.13192   [0.10390, 0.16231]      0.4583
+gradient_boosting 0.14657   [0.11887, 0.17134]      0.4750
+ridge             0.15769   [0.13414, 0.18321]      0.5000
+momentum          0.17255   [0.15174, 0.19451]      0.5750
+elastic_net       0.17850   [0.15316, 0.20415]      0.5333
+mean_reversion    0.19152   [0.16585, 0.22028]      0.4250
+logistic          0.19178   [0.16519, 0.22092]      0.4750
+```
+
+**Zero of seven learned estimators beat a no-feature baseline.** All eight
+directional accuracies fall inside the +/-0.0895 coin-flip band at n=120. A
+10,000-shuffle permutation test on the best (momentum, 0.5750) gives p=0.0625
+— failing before any correction for having tested eight.
+
+### Why this is a DATA problem, not a model problem
+
+```
+dataset rows                           406
+features                                16  (ALL price-derived)
+feature groups the task names             5
+feature groups actually present           1  (technicals)       [X5]
+horizons trained                          1  (20d of 5)         [X6]
+walk-forward folds                        1                     [X1]
+trials registered vs estimators trained 1 vs 8                  [X7]
+regime recoverable from a fold           NO                     [X3]
+event data joinable to a fold            NO                     [X4]
+calibration measured out-of-sample       NO (in-sample ECE = 0)  [X2]
+```
+
+Four of five feature groups were never there to ablate. So the honest reading
+of X1 is not "the models are bad" — it is **"16 price features on 406 rows
+cannot predict 20-day returns, and nothing else has been tried yet."**
+
+### The sample sizes accuracy would require
+
+To distinguish a true directional edge from a coin flip at 95%:
+
+```
+true accuracy 0.55  ->    385 independent observations
+true accuracy 0.54  ->    601
+true accuracy 0.53  ->  1,068
+true accuracy 0.52  ->  2,401
+```
+
+Rows are NOT independent. A 20d forward return sampled daily overlaps its
+neighbour by 19 of 20 days:
+
+```
+             rows     ~independent 20d windows
+1 month     1,617                      80
+1 quarter   4,851                     242
+1 year     19,404                     970
+3 years    58,212                   2,910
+```
+
+Cross-sectional correlation makes it worse: 77 mostly-US-large-cap-tech names
+move together, so 77 same-day rows are far fewer than 77 independent draws.
+
+**Stated plainly: detecting a realistic edge (52-54%) needs on the order of
+1-3 YEARS of accrued, matured outcomes.** No modelling choice shortens that.
+This is the single most important fact for setting expectations about this
+system.
+
+### What to do, in dependency order
+
+1. **Accrue data on a schedule** (item 7/18). Everything else is downstream.
+2. **Add the four missing feature groups** (X5). Fundamentals and macro
+   adapters already exist; news now resolves to tickers (item 4 closed). This
+   is the highest-value modelling work BECAUSE it is the only untested
+   hypothesis — price features have been tested and failed.
+3. **Carry ticker, timestamp and regime onto each fold** (X3/X4). Cheap, and
+   it unblocks two robustness gates that cannot run at all today.
+4. **Train the other four horizons** (X6). 1d and 5d need far less data per
+   conclusion than 20d, and multi-horizon agreement is itself evidence.
+5. **Fix out-of-sample calibration** (X2). An in-sample ECE of 0.0000 is
+   structurally incapable of being anything else.
+6. **Register every trial** (X7). 1 registered vs 8 trained means the system
+   cannot know how many tests it ran, so it cannot correct for them.
+
+### What NOT to do
+
+- **Do not add estimators.** X1 tested eight; the chance of a spurious winner
+  among eight noise draws is 33.7%. A ninth worsens selection bias.
+- **Do not open the sealed holdout** (X8). At 60 rows a fair coin posts 62.7%
+  inside the band.
+- **Do not report a directional accuracy without its band.** Every number in
+  the X1 table is inside the noise, and the band is what says so.
+
+
+---
+
 ## Closed
 
 - ~~**Live runs must use today's chart state.**~~ Fixed in `ad75f48`. The
