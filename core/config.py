@@ -9486,3 +9486,102 @@ def _validate_collection_monitor_config() -> None:
 
 
 _validate_collection_monitor_config()
+
+
+# ---------------------------------------------------------------------------
+# TRAINING FEATURE ROUTING (Priority 2) — which domains reach a training row
+# ---------------------------------------------------------------------------
+# MEASURED 2026-10-04, the X5 blocker located precisely. X5 reported "four of
+# five feature groups have nothing to remove", and the cause was NOT that the
+# features were unbuilt — the default registry already declares all 40:
+#
+#     market 31 | fundamental 5 | macro 1 | news 1 | sentiment 1 | regime 1
+#
+# The cause is that TRAINING NEVER SEES THEM. build_training_dataset reads
+# `_exposed_feature_surface` (chart contracts published under
+# feature_metadata) and never calls `contextual_feature_surface`, which is
+# where news, macro, regime and sentiment live:
+#
+#     exposed surface      16 features
+#     contextual surface    1 feature  (regime_probability_proxy, status OK)
+#     OVERLAP               0
+#
+# So the two surfaces are disjoint and only one is offered to a training row.
+TRAINING_FEATURE_ROUTING_VERSION = "training-feature-routing-v1"
+
+# Include the contextual surface (news/macro/regime/sentiment) alongside the
+# chart surface when assembling a training row.
+TRAINING_INCLUDE_CONTEXTUAL_FEATURES = True
+
+# Include the five registered fundamental features.
+#
+# OFF, AND THIS IS THE LOAD-BEARING DECISION HERE. MEASURED 2026-10-04 with
+# no ALPHAVANTAGE_API_KEY, every one of the 14 underlying valuation metrics
+# is null, and _build_fundamental_features substitutes NEUTRAL DEFAULTS that
+# look like measurements:
+#
+#     ticker   revenue margin  fcf  balance  valuation
+#     AAPL       5.0    5.0    3.0   10.0      7.0
+#     MSFT       5.0    5.0    3.0   10.0      7.0
+#     NVDA       5.0    5.0    3.0   10.0      7.0
+#     KO         5.0    5.0    3.0   10.0      7.0
+#     LLY        5.0    5.0    3.0   10.0      7.0
+#
+#     DISTINCT vectors across 5 tickers: 1
+#
+# Zero cross-sectional variance: these are constants, not features. Feeding
+# them to training would add five columns that cannot carry information,
+# while letting the system REPORT fundamental coverage it does not have —
+# and X5's ablation would then "remove" a group that was never contributing,
+# which is the exact confusion X5 exists to prevent.
+#
+# The gate below turns this on automatically once the metrics are real, so
+# the flag is a measured state rather than a preference.
+TRAINING_INCLUDE_FUNDAMENTAL_FEATURES = False
+
+# A feature whose value is identical across every row carries no information.
+# Variance is checked at dataset build time and a zero-variance column is
+# REPORTED rather than silently trained on — a constant column does not break
+# a fit, it just quietly dilutes it and inflates the apparent feature count.
+TRAINING_REPORT_ZERO_VARIANCE_FEATURES = True
+
+# A contextual feature is absent far more often than a chart feature (a
+# provider key may be unset, or an agent may report UNAVAILABLE). Requiring
+# every declared feature on every row would therefore drop ALL rows the
+# moment one contextual domain went dark — so contextual features are
+# OPTIONAL per row while chart features stay required.
+#
+# This is the one place TRAINING_REQUIRE_COMPLETE_FEATURES is deliberately
+# relaxed, and only for domains that can legitimately be unavailable.
+TRAINING_CONTEXTUAL_FEATURES_OPTIONAL = True
+
+
+def _validate_training_feature_routing() -> None:
+    if not TRAINING_INCLUDE_CONTEXTUAL_FEATURES:
+        raise ValueError(
+            "the contextual surface is the only path by which news, macro, "
+            "regime and sentiment can reach a training row: MEASURED, the "
+            "chart and contextual surfaces share 0 features, so disabling "
+            "this restores the X5 blocker it was added to fix"
+        )
+    if TRAINING_INCLUDE_FUNDAMENTAL_FEATURES and not TRAINING_REPORT_ZERO_VARIANCE_FEATURES:
+        raise ValueError(
+            "fundamental features may only be trained on while zero-variance "
+            "reporting is active: MEASURED, with no provider key all five "
+            "collapse to one constant vector across every ticker, and nothing "
+            "else would notice"
+        )
+    if not TRAINING_REPORT_ZERO_VARIANCE_FEATURES:
+        raise ValueError(
+            "a constant column does not break a fit, it dilutes it silently "
+            "and inflates the apparent feature count"
+        )
+    if TRAINING_CONTEXTUAL_FEATURES_OPTIONAL and not TRAINING_REQUIRE_COMPLETE_FEATURES:
+        raise ValueError(
+            "contextual features are optional PER ROW as an exception to the "
+            "completeness rule; with that rule already off the exception is "
+            "meaningless and the relaxation is hiding something"
+        )
+
+
+_validate_training_feature_routing()

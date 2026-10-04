@@ -65,6 +65,7 @@ from core.config import (
     TRAINING_DATASET_SCHEMA_VERSION,
     TRAINING_DATASET_VERSION,
     TRAINING_DEFAULT_TARGET_HORIZON,
+    TRAINING_FEATURE_ROUTING_VERSION,
     TRAINING_REQUIRE_COMPLETE_FEATURES,
 )
 from core.feature_registry import (
@@ -149,6 +150,10 @@ class TrainingDataset:
     # sense, but a MULTI-ticker one silently can: every name someone types
     # today is a name that survived to be typed.
     survivorship: dict[str, Any] = field(default_factory=dict)
+    # PRIORITY 2: which feature domains actually reached the rows, and which
+    # columns turned out to be constant. Recorded rather than inferred: a
+    # zero-variance column does not break a fit, so nothing else notices it.
+    feature_routing: dict[str, Any] = field(default_factory=dict)
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -166,6 +171,7 @@ class TrainingDataset:
             "versions": dict(self.versions),
             "rows": [row.to_dict() for row in self.rows],
             "survivorship": dict(self.survivorship),
+            "feature_routing": dict(self.feature_routing),
         }
 
     def report(self) -> dict[str, Any]:
@@ -185,6 +191,7 @@ class TrainingDataset:
             "exclusion_reasons": dict(sorted(reasons.items())),
             "versions": dict(self.versions),
             "survivorship": dict(self.survivorship),
+            "feature_routing": dict(self.feature_routing),
         }
 
 
@@ -291,6 +298,7 @@ def build_training_row(
     label_set: dict,
     feature_names: Iterable[str],
     target_horizon: str = TRAINING_DEFAULT_TARGET_HORIZON,
+    optional_features: set[str] | None = None,
 ) -> tuple[TrainingRow | None, str]:
     """Assemble one row, or explain why it cannot exist.
 
@@ -310,15 +318,21 @@ def build_training_row(
 
     features: dict[str, float] = {}
     contracts: dict[str, dict] = {}
+    # PRIORITY 2: a contextual or fundamental feature is legitimately
+    # absent when a provider key is unset or an agent reports UNAVAILABLE.
+    # Requiring it would drop EVERY row the moment one domain went dark,
+    # so those names are optional while chart features stay required: a
+    # row without its chart state is not a row.
+    optional_features = set(optional_features or ())
     for name in sorted({str(entry) for entry in feature_names}):
         contract = (feature_surface or {}).get(name)
         if not isinstance(contract, dict):
-            if TRAINING_REQUIRE_COMPLETE_FEATURES:
+            if TRAINING_REQUIRE_COMPLETE_FEATURES and name not in optional_features:
                 return None, "feature_contract_missing"
             continue
         value = _numeric(contract.get("value"))
         if value is None:
-            if TRAINING_REQUIRE_COMPLETE_FEATURES:
+            if TRAINING_REQUIRE_COMPLETE_FEATURES and name not in optional_features:
                 return None, "feature_value_missing"
             continue
         features[name] = value
@@ -365,6 +379,12 @@ def build_training_dataset(
     from core.backtest.engine import _exposed_feature_surface, offline_replay_seam
     from core.labels import build_outcome_labels
     from core.score_engine import CURRENT_SCORE_FEATURES, LONG_TERM_SCORE_FEATURES, build_score
+    from core.training_features import (
+        ROUTABLE_FEATURE_NAMES,
+        merged_feature_surface,
+        optional_feature_names,
+        zero_variance_features,
+    )
 
     active = registry if registry is not None else build_default_registry()
 
@@ -379,6 +399,30 @@ def build_training_dataset(
         if feature_names is not None
         else sorted({*CURRENT_SCORE_FEATURES, *LONG_TERM_SCORE_FEATURES})
     )
+    # PRIORITY 2: the routable domains join the declared set unless the
+    # caller named an explicit list. They are REGISTERED features (the
+    # default registry declares all 40), so the M1 gate below still
+    # governs them — this widens what may be asked for, never what may
+    # bypass the registry.
+    if feature_names is None:
+        # ...but only the ones the CONSUMING MODEL FAMILY accepts. MEASURED
+        # by 15 test failures when this routed unconditionally: the
+        # contextual features declare model_compatibility of
+        # ['linear','logistic','tree','boosting'] and deliberately NOT
+        # 'baseline_mean' or 'momentum', because a feature-free baseline
+        # has no business consuming a news score — that is what makes it a
+        # reference point. Routing them into a baseline made the registry
+        # refuse the whole training request, which was the gate working.
+        #
+        # So compatibility is respected rather than overridden: a baseline
+        # keeps its chart-only feature set and the learned families gain
+        # the contextual domains.
+        routable = [
+            name
+            for name in ROUTABLE_FEATURE_NAMES
+            if not model_feature_problems([name], active, model_family)
+        ]
+        declared = sorted({*declared, *routable})
     # M1 gate: an unregistered feature cannot enter a dataset, exactly as it
     # cannot enter a production model.
     gate_problems = model_feature_problems(declared, active, model_family)
@@ -390,6 +434,7 @@ def build_training_dataset(
 
     rows: list[TrainingRow] = []
     excluded: list[dict[str, str]] = []
+    routing_reports: list = []
 
     with offline_replay_seam(history_by_ticker):
         for ticker in sorted(prediction_times_by_ticker):
@@ -405,7 +450,15 @@ def build_training_dataset(
                     })
                     continue
 
+                # PRIORITY 2: route the contextual and fundamental surfaces
+                # in beside the chart one. MEASURED 2026-10-04, these two
+                # surfaces shared ZERO features, so news, macro, regime and
+                # sentiment were computed and then discarded one call short
+                # of the dataset — which is what made four of X5's five
+                # feature groups look absent.
                 surface = _exposed_feature_surface(score_result)
+                surface, routing = merged_feature_surface(surface, score_result)
+                routing_reports.append(routing)
                 try:
                     label_set = build_outcome_labels(ticker, prediction_time)
                 except Exception as exc:
@@ -418,7 +471,10 @@ def build_training_dataset(
                     continue
 
                 row, reason = build_training_row(
-                    ticker, prediction_time, surface, label_set, declared, target_horizon
+                    ticker, prediction_time, surface, label_set, declared,
+                    target_horizon,
+                    optional_features=set(ROUTABLE_FEATURE_NAMES)
+                    | optional_feature_names(surface),
                 )
                 if row is None:
                     excluded.append({
@@ -444,14 +500,65 @@ def build_training_dataset(
     survivorship = _survivorship_verdict(
         sorted(prediction_times_by_ticker), rows, require_survivorship_safe
     )
+
+    # PRIORITY 2: what actually reached the rows, MEASURED from the rows
+    # themselves rather than from the config flags that requested it. A
+    # feature can be declared, routed and still never arrive — and a
+    # column that arrived constant carries no information while inflating
+    # the feature count.
+    present: set[str] = set()
+    for row in rows:
+        present.update(row.features)
+    constants = zero_variance_features([row.features for row in rows])
+    routed_contextual = sorted(
+        name for report in routing_reports for name in report.contextual_features
+    )
+    routed_fundamental = sorted(
+        name for report in routing_reports for name in report.fundamental_features
+    )
+    skip_reasons: dict[str, str] = {}
+    for report in routing_reports:
+        skip_reasons.update(report.skipped)
+    feature_routing = {
+        "version": TRAINING_FEATURE_ROUTING_VERSION,
+        "declared": sorted({str(name) for name in declared}),
+        "present_in_rows": sorted(present),
+        "absent_from_every_row": sorted(
+            {str(name) for name in declared} - present
+        ),
+        "routed_contextual": sorted(set(routed_contextual)),
+        "routed_fundamental": sorted(set(routed_fundamental)),
+        "zero_variance": constants,
+        "skipped": dict(sorted(skip_reasons.items())),
+    }
+
+    # FEATURE_NAMES IS WHAT THE ROWS ACTUALLY CARRY, not what was declared.
+    # Caught by 66 test failures when this first recorded `declared`: a
+    # routed feature that never arrives (a dark contextual agent, an
+    # unset provider key) left `feature_names` naming a column absent from
+    # every row, and core.training builds its matrix as
+    #     [[row.features[name] for name in feature_names] ...]
+    # which raised KeyError. Declaring a feature is a REQUEST; the rows are
+    # the evidence of what was delivered, and the dataset must describe
+    # itself by the latter.
+    #
+    # Rows are complete and identical in their key set by construction:
+    # build_training_row admits a row only when every REQUIRED feature is
+    # present, and an optional one is either present on all rows (the agent
+    # was up) or absent from all (it was not) for a single build.
+    present_names = sorted(present) if rows else sorted(
+        {str(name) for name in declared}
+    )
+
     return TrainingDataset(
         rows=rows,
-        feature_names=sorted({str(name) for name in declared}),
+        feature_names=present_names,
         target_horizon=target_horizon,
         excluded=excluded,
         dataset_hash=dataset_hash(rows, feature_digest, target_horizon),
         feature_set_hash=feature_digest,
         survivorship=survivorship,
+        feature_routing=feature_routing,
         versions={
             "dataset": TRAINING_DATASET_VERSION,
             "schema": TRAINING_DATASET_SCHEMA_VERSION,

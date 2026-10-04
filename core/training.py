@@ -333,7 +333,7 @@ def training_request_problems(
             "training data is not reproducible"
         )
 
-    feature_names = list(getattr(dataset, "feature_names", []) or [])
+    feature_names = estimator_feature_names(dataset, estimator, active)
     if not feature_names:
         problems.append("dataset declares no features")
     else:
@@ -343,6 +343,55 @@ def training_request_problems(
             model_feature_problems(feature_names, active, _FAMILY_BY_ESTIMATOR[estimator])
         )
     return problems
+
+
+def estimator_feature_names(
+    dataset,
+    estimator: str,
+    registry: FeatureRegistry | None = None,
+) -> list[str]:
+    """The dataset features THIS estimator's model family may consume.
+
+    One dataset serves every estimator, but the families do not accept the
+    same inputs. MEASURED 2026-10-04, the contextual features declare
+    model_compatibility of ['linear','logistic','tree','boosting'] and
+    deliberately NOT 'baseline_mean' or 'momentum': a feature-free baseline
+    consuming a news score would stop being a reference point.
+
+    So routing a contextual feature into the shared dataset must not force
+    it into a baseline. This selects per estimator instead of weakening the
+    registry gate — the baselines keep their chart-only inputs and the
+    learned families gain the new domains.
+
+    Falls back to every dataset feature when the family is unknown, so an
+    unrecognised estimator fails loudly in the gate rather than silently
+    training on nothing.
+    """
+    active = registry if registry is not None else build_default_registry()
+    declared = [str(name) for name in (getattr(dataset, "feature_names", []) or [])]
+    family = _FAMILY_BY_ESTIMATOR.get(estimator)
+    if family is None:
+        return sorted(declared)
+
+    # UNREGISTERED IS NOT THE SAME AS FAMILY-INCOMPATIBLE, and this filter
+    # must only ever remove the second. Caught by
+    # test_unregistered_feature_aborts_training: a first version filtered on
+    # any problem at all, which silently DROPPED an unregistered feature and
+    # defeated the M1 gate that exists to abort on one.
+    #
+    #   unregistered        -> a governance failure; training must refuse
+    #   family-incompatible -> a legitimate per-family selection
+    #
+    # So an unknown name is kept, and the gate downstream rejects the
+    # request naming it.
+    selected: list[str] = []
+    for name in declared:
+        if not active.is_registered(name):
+            selected.append(name)
+            continue
+        if not model_feature_problems([name], active, family):
+            selected.append(name)
+    return sorted(selected)
 
 
 def train_baseline(
@@ -371,7 +420,10 @@ def train_baseline(
             f"invalid training request for {estimator!r}: " + "; ".join(problems)
         )
 
-    feature_names = sorted(dataset.feature_names)
+    # Per-family selection, not every dataset column: see
+    # estimator_feature_names for why a baseline must not consume a
+    # contextual feature.
+    feature_names = estimator_feature_names(dataset, estimator, active)
     rows = sorted(dataset.rows, key=lambda row: (row.prediction_time, row.ticker))
     matrix = np.array(
         [[float(row.features[name]) for name in feature_names] for row in rows],
