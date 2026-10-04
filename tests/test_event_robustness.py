@@ -364,10 +364,68 @@ class RenderTests(unittest.TestCase):
 class ShippedDataTests(unittest.TestCase):
     """The blocking measurement, against what the repo actually ships."""
 
-    def test_there_are_no_event_memories(self):
+    def test_no_fold_carries_the_join_key_event_robustness_needs(self):
+        """X4's blocker, restated against what actually blocks it.
+
+        This test asserted `len(load_memories()) == 0` — "the event data
+        does not exist at all", which was X4's FIRST blocker. That premise
+        expired on 2026-10-04 when NEWS_PROVIDER_API_KEY was set and the
+        first news collection wrote 361 OBSERVED memories. The test failed,
+        which is the staleness detector doing its job.
+
+        But X4 named TWO blockers and said explicitly that fixing only the
+        first "still leaves nothing joinable". The second is untouched:
+        MEASURED 2026-10-04, across all 8 shipped runs a fold carries only
+
+            actuals, fold_id, metrics, predictions, train_end_time,
+            train_rows, validation_rows, validation_start_time
+
+        — no event id, no source, no ticker, no timestamp. So an event
+        memory cannot be attached to a validation observation even now that
+        the memories exist, and X4 still reports NOT_EVALUATED.
+
+        Asserting the join key is absent is the honest form of the original
+        claim: it is the condition that actually gates the gate, and it will
+        fail the day folds start carrying attribution — which is when X4
+        becomes computable and this test should be revisited.
+        """
+        from core.training import load_training_runs
+
+        runs = load_training_runs()
+        if not runs:
+            self.skipTest("no training runs on disk")
+
+        join_keys = ("event_ids", "event_id", "sources", "source", "tickers")
+        for run in runs:
+            fold = run["folds"][0]
+            with self.subTest(estimator=run["estimator"]):
+                present = [key for key in join_keys if key in fold]
+                self.assertEqual(
+                    present,
+                    [],
+                    "a fold now carries event attribution, so X4 may be "
+                    "computable: re-read the X4 commit and decide whether "
+                    "the gate can move off NOT_EVALUATED",
+                )
+
+    def test_observed_event_memories_are_news_derived_once_they_exist(self):
+        """A memory on disk must declare how it was inferred.
+
+        Not an assertion about COUNT — that grows daily and a test pinned to
+        it would fail every collection. What matters is that an OBSERVED
+        memory is distinguishable from a price-inferred one, because X4's
+        event axis can only ever use the former.
+        """
         from core.event_memory import load_memories
 
-        self.assertEqual(len(load_memories()), 0)
+        memories = load_memories()
+        if not memories:
+            self.skipTest("no event memories on disk")
+
+        for memory in memories[:50]:
+            with self.subTest(event_id=memory.get("event_id")):
+                self.assertIn("provenance", memory)
+                self.assertIn("entity_resolution_method", memory)
 
     def test_no_shipped_fold_carries_event_attribution(self):
         from core.training import load_training_runs

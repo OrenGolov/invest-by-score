@@ -431,6 +431,82 @@ Corrected in `build_event_memory.py`, `check_data_coverage.py` and
 
 ---
 
+## 16. The first OBSERVED event memories exist — and carry no gradeable horizon yet
+
+**Raised:** 2026-10-04. **Status:** informational; closes itself with time.
+
+`NEWS_PROVIDER_API_KEY` was set and the first news collection ran. MEASURED
+2026-10-04, immediately after:
+
+```
+raw news days in the ledger                 1  (2026-10-04, was 0 EVER)
+event memories written                    361
+provenance                           observed  (was 100% price-inferred)
+inference_method                             "" (not quarterly_volume_cadence)
+distinct tickers                            26
+entity_resolution_method   none 243 | ticker 63 | alias 34
+                           ambiguous 18 | legal_name 3
+```
+
+**The horizons are the thing to understand.** Of 361 memories, **318 carry
+only a 1d response** and 43 carry 1d+5d. None reach 20d or 60d:
+
+```
+published dates   2026-09-27 .. 2026-10-02
+```
+
+This is not a defect — a 20d outcome needs 20 sessions *after* the event, and
+the newest news is days old, so those horizons **cannot** exist yet by
+construction. They accrue as sessions pass, which is the argument for
+scheduling rather than an argument against the data.
+
+**What it means for grading today.** `EVENT_MEMORY_MIN_ANALOGS = 5` at the 20d
+horizon still has nothing to work from. The 780-memory price-inferred store
+previously reported a median 20d move; these 361 cannot contribute to that
+number for about a month.
+
+**Watch `entity_resolution_method: none` at 243 of 361 (67%).** That is the
+figure the Finnhub swap was meant to improve — Finnhub returns a provider-side
+`related` ticker field rather than requiring keyword resolution. Worth
+re-measuring once more days accrue, since one day's sample over 26 tickers is
+thin evidence for a provider decision.
+
+## 17. X4's "no event memories" assertion expired the day news arrived — CLOSED
+
+**Raised:** 2026-10-04. **Fixed:** same day.
+
+`tests/test_event_robustness.py::test_there_are_no_event_memories` asserted
+`len(load_memories()) == 0` and failed (`361 != 0`) on the first collection
+run. **The test was right to fail** — it was X4's blocking measurement, and
+the premise expired.
+
+X4 named TWO blockers and said explicitly that fixing only the first "still
+leaves nothing joinable". MEASURED 2026-10-04, the second is untouched across
+all 8 shipped runs:
+
+```
+fold keys: actuals, fold_id, metrics, predictions, train_end_time,
+           train_rows, validation_rows, validation_start_time
+event_id / source / ticker / timestamp:  ABSENT
+```
+
+So X4 still reports NOT_EVALUATED, for the surviving half of its original
+reason. The test now asserts **the join key is absent** rather than that the
+data is absent — the condition that actually gates the gate, and one that
+fires the day folds start carrying attribution.
+
+**The replacement was sabotage-tested before being trusted:** injecting
+`event_ids` into each fold makes it fail with 8 subtest failures naming X4,
+so it is reachable rather than an inert probe (open item 9's convention,
+applied).
+
+A second test was added asserting an on-disk memory declares `provenance` and
+`entity_resolution_method` — deliberately NOT pinned to a count, which grows
+daily and would fail every collection.
+
+
+---
+
 ## Closed
 
 - ~~**Live runs must use today's chart state.**~~ Fixed in `ad75f48`. The
