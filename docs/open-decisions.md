@@ -850,6 +850,130 @@ be done — the operator has said so twice.
 
 ---
 
+## 25. The raw ledger stores 99.6% redundant price data — DECISION
+
+**Raised:** 2026-10-04. **Owner:** operator. **Bites:** in about a year.
+
+MEASURED 2026-10-04, comparing the same request across two collection days:
+
+```
+AAPL_5y_1d on 2026-09-27     1,255 bars
+AAPL_5y_1d on 2026-10-04     1,255 bars
+overlapping bar_time         1,250
+genuinely new                    5   (2026-09-28 .. 10-02)
+REDUNDANCY                    99.6%
+payload_sha256               DIFFERENT, so dedup-by-hash cannot catch it
+```
+
+Every run re-fetches 5 years of daily bars per ticker and appends the whole
+series. The W6 store supersedes older versions **by payload hash**, and the
+hash changes whenever a single new bar arrives, so each day's file is a
+near-complete copy of the previous one.
+
+**The cost, measured from the first full collection day:**
+
+```
+news  per business day    1.13 MB
+price per business day    6.90 MB
+TOTAL                     8.03 MB/day
+
+1 month    0.16 GB
+1 year     1.98 GB
+5 years    9.88 GB
+```
+
+**Why this is a DECISION and not a defect.** The append-only ledger is W6's
+provenance guarantee and the rebuild-from-raw proof depends on it. Trimming
+it is a deliberate trade of provenance for disk, not a bug fix. Three
+options, in increasing effort:
+
+1. **Accept it.** 2 GB/year is tolerable on a laptop; revisit at 5 GB.
+2. **Fetch incrementally** — request only bars since the last stored
+   `bar_time`, keeping one full history per ticker plus daily deltas. Cuts
+   price storage by ~99% and is the obvious fix, but it changes what
+   "rebuild from raw" replays and needs the W6 proof re-verified.
+3. **Compress the ledger** (gzip per day). ~10x for free, no semantic
+   change, and `load_raw_records` would need to read both forms.
+
+Option 3 is the cheapest real win and carries no provenance risk. Option 2
+is the correct long-term answer and should not be done casually.
+
+**Not urgent:** at 8 MB/day this is a next-quarter decision, not a
+tomorrow one. Recorded now because the measurement only became possible
+once collection actually ran for a full universe.
+
+## 26. Four dashboard panels read fields the API never sends — OPEN
+
+**Raised:** 2026-10-04. **Owner:** unassigned.
+
+MEASURED 2026-10-04 by diffing the fields `index.html` reads against what
+`orchestrate_score` returns:
+
+```
+UI expects, API never sends:
+  - confidence_breakdown
+  - insights              (bullish_signals / bearish_signals)
+  - recommended_actions   (primary / options)
+  - source_reliability    (sources / cross_validation)
+
+API sends, UI ignores:
+  + snapshot_hash
+  + source_record_ids
+  + summary
+```
+
+All four read with optional chaining and fall back to "None listed." or
+"N/A", so nothing crashes — the panels are simply **permanently empty**. A
+reader cannot tell "the system has no insights for this ticker" from "this
+panel has never been wired", which is the same ambiguity E2 exists to
+prevent in entity resolution.
+
+**Why `source_reliability` is now the interesting one.** Steps 1 and 2
+(2026-10-04) made the outlet and the resolved ticker flow through, so L4
+can finally compute per-outlet reliability. The panel to display it already
+exists and has existed all along.
+
+**What would settle it:** either wire each field, or remove the panel and
+say why. An empty panel that looks like a feature is worse than an absent
+one. The three ignored API fields are also worth surfacing —
+`snapshot_hash` and `source_record_ids` are exactly the provenance a reader
+needs to trust a score.
+
+## 27. A 7-day news window makes every-other-day polling lossless
+
+**Raised:** 2026-10-04. **Status:** informational; settles part of item 18.
+
+MEASURED 2026-10-04, the publish dates present in a single day's fetch:
+
+```
+2026-09-27   51
+2026-09-28  114
+2026-09-29  139
+2026-09-30  175
+2026-10-01  251
+2026-10-02  501
+2026-10-03  406
+```
+
+One request returns a **7-day history**, not just today's news
+(`NEWS_LOOKBACK_DAYS = 7`). So a ticker polled on Monday still sees the
+previous Thursday's articles.
+
+**Why this matters for the cadence decision (item 18).** The earlier
+recommendation of *daily* collection was argued from "news perishes at 7
+days", which is true of the PROVIDER's window but not of a given run. With
+40 of 75 tickers per run and a rotating cursor, every ticker is polled
+every other day and **still loses nothing** — the gap only becomes lossy
+above ~7 days.
+
+That removes the urgency from daily-vs-alternate-day, and leaves the real
+constraint where item 18 put it: the 100-request quota, not the schedule.
+A gap of 7+ business days (like 2026-09-27 to 2026-10-04) IS lossy, which
+is what makes scheduling matter at all.
+
+
+---
+
 ## Closed
 
 - ~~**Live runs must use today's chart state.**~~ Fixed in `ad75f48`. The
