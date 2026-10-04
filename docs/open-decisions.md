@@ -507,6 +507,86 @@ daily and would fail every collection.
 
 ---
 
+## 18. Polling cadence is a QUOTA decision, not a scheduling one — DECISION
+
+**Raised:** 2026-10-04. **Owner:** operator. **Supersedes part of item 7.**
+
+The operator asked whether collection could run every 2 hours instead of once
+at 22:00, so alerting behaves like monitoring. MEASURED the same day, by
+exhausting the quota accidentally:
+
+```
+HTTP 429  code: rateLimited
+"Developer accounts are limited to 100 requests over a 24 hour period
+ (50 requests available every 12 hours)"
+```
+
+Two facts that change the answer:
+
+1. The limit is **100/24h enforced as 50/12h**, and it is a **ROLLING**
+   window — not a midnight reset. A schedule cannot "start fresh" at 00:00.
+2. 75 tickers are news-eligible, so **one full sweep costs 75 of the 100**.
+
+The cadence arithmetic, against `COLLECT_NEWS_BATCH_SIZE = 40`:
+
+| schedule | requests/run | full sweep | verdict |
+|---|---|---|---|
+| every 2h (12 runs) | 8 | 18h | starves every run |
+| every 2h, market hours (6 runs) | 16 | 9h | thin but viable |
+| 2 runs/day (12h-aligned) | 50 | 18h | matches the window |
+| 1 run/day (today) | 40–75 | 1–2 days | current |
+
+**More frequent polling does not mean fresher data on the free tier.** The
+quota is the binding constraint, so 12 runs/day means each run sees 8 tickers
+and any given ticker is polled less often than it is today. Frequency and
+coverage trade directly against each other.
+
+**What the operator's filtering instinct gets right.** A relevance-ranked
+subset is exactly the mechanism that makes frequent polling coherent — poll
+10 high-signal names every 2h, sweep the rest daily. The parts already exist:
+`--tickers`, `--limit`, `COLLECT_NEWS_BATCH_SIZE`, the rotation cursor, and
+`COLLECT_NEWS_TRACK_ANYWAY` as precedent for a named exception list. What does
+NOT exist is a *defensible ranking* — and picking the "most relevant" tickers
+by judgement would be the survivorship-bias-by-construction trap that register
+item 3 refuses for breadth features.
+
+**What would settle it:** either
+(a) accept 1–2 runs/day on the free tier and keep 22:00, or
+(b) make the Finnhub swap first (item 16), whose free tier is ~86,000
+    calls/day — which makes 2-hourly polling of the FULL universe possible
+    and removes the ranking problem entirely rather than solving it.
+
+(b) is the recommendation: the quota, not the schedule, is what blocks
+monitoring-grade alerting, and Finnhub removes the quota.
+
+**A prerequisite either way:** item 12 — nothing on the live path calls an
+alert evaluator, so no polling frequency produces an alert yet.
+
+## 19. Quota exhaustion was handled correctly — CLOSED (verified, no change)
+
+**Raised:** 2026-10-04. **Verified:** same day.
+
+The second manual run hit the 429 mid-sweep. MEASURED immediately after:
+
+```
+cursor                     5   (NOT advanced past the failed tickers)
+event_memory.jsonl       361   (intact; the prior run's memories survived)
+news ledger days           1   (2026-10-04 preserved)
+exit code                  1   (fail-loud: perishable loss reported)
+report                     quota_exhausted: True
+```
+
+The collector detected the 429, reported `PROVIDER QUOTA EXHAUSTED`,
+**suppressed the cursor advance** so the unfetched tickers are retried rather
+than skipped, and left prior data untouched. Prices and fundamentals still
+captured for all 77 tickers — fail-soft per source held.
+
+Recorded because it is the first time the quota path ran against a real 429
+rather than a test, and it behaved as designed. No change needed.
+
+
+---
+
 ## Closed
 
 - ~~**Live runs must use today's chart state.**~~ Fixed in `ad75f48`. The
