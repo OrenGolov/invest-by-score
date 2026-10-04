@@ -9422,3 +9422,67 @@ def _validate_telegram_config() -> None:
 
 
 _validate_telegram_config()
+
+
+# ---------------------------------------------------------------------------
+# COLLECTION MONITORING — notice when the collector stops
+# ---------------------------------------------------------------------------
+# MEASURED 2026-10-04, before the collector was scheduled: 10 of 25 business
+# days had no record at all, and the 2026-09-27 -> 2026-10-04 gap lost 7
+# calendar days of news permanently. check_data_coverage.py detects this, but
+# a CI gate runs only when somebody pushes — the wrong trigger for a job
+# whose failure mode is silence.
+COLLECTION_MONITOR_VERSION = "collection-monitor-v1"
+
+# Perishable loss is the alert that matters: news is gone after
+# NEWS_LOOKBACK_DAYS and the day never returns.
+COLLECTION_ALERT_ON_PERISHABLE_LOSS = True
+
+# QUOTA EXHAUSTION IS NOT AN ALERT, and this is the judgement most likely to
+# be questioned. MEASURED: the free tier is 100 requests/24h on a rolling
+# window and one full sweep of 75 eligible tickers costs 75, so a quota day
+# is the EXPECTED steady state rather than an incident. The rotation cursor
+# is deliberately not advanced on a 429, so the unvisited tickers are retried
+# next run. Alerting here would produce a daily notification the operator
+# cannot act on, and would bury the perishable-loss alert underneath it —
+# A7 measured that an unsuppressed channel emits 15.01 alerts per episode
+# and nobody reads the fifteenth.
+COLLECTION_ALERT_ON_QUOTA = False
+
+# How many BUSINESS days of no successful news capture before the collector
+# is presumed stopped. Two allows one missed run plus its retry; at three the
+# 7-day provider window is already eroding.
+#
+# Business days, not calendar: a Saturday with no collection is not a
+# failure, and a monitor that cannot tell a weekend from an outage reports an
+# outage every Monday.
+COLLECTION_MAX_SILENT_BUSINESS_DAYS = 2
+
+
+def _validate_collection_monitor_config() -> None:
+    if not COLLECTION_ALERT_ON_PERISHABLE_LOSS:
+        raise ValueError(
+            "perishable loss is the one collection failure that cannot be "
+            "repaired later: MEASURED, a 7-day gap in 2026-09 lost that "
+            "week's news permanently. Not alerting on it defeats the monitor"
+        )
+    if COLLECTION_ALERT_ON_QUOTA:
+        raise ValueError(
+            "a quota day is the expected steady state on a 100/day tier "
+            "(one sweep costs 75), so alerting on it emits a daily "
+            "notification nobody can act on and buries the losses that matter"
+        )
+    if COLLECTION_MAX_SILENT_BUSINESS_DAYS < 1:
+        raise ValueError(
+            "a threshold below 1 alerts on the first missed run, including "
+            "the quota retries that are expected to miss"
+        )
+    if COLLECTION_MAX_SILENT_BUSINESS_DAYS > 5:
+        raise ValueError(
+            f"{COLLECTION_MAX_SILENT_BUSINESS_DAYS} business days exceeds "
+            f"the {NEWS_LOOKBACK_DAYS}-day provider window, so the monitor "
+            f"would fire only after the recoverable news had already expired"
+        )
+
+
+_validate_collection_monitor_config()

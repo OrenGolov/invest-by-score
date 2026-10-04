@@ -89,9 +89,19 @@ Write-Host "  imports OK (pandas, numpy, sklearn, pyarrow)"
 
 $log = Join-Path $repo "data\collect.log"
 $script = Join-Path $repo "scripts\daily_collect.py"
+$monitor = Join-Path $repo "scripts\monitor_collection.py"
 
 # cmd /c so the redirection is handled by a shell rather than the scheduler.
-$command = "/c cd /d `"$repo`" && `"$python`" `"$script`" >> `"$log`" 2>&1"
+#
+# THE MONITOR RUNS WITH `&` RATHER THAN `&&`, deliberately. The collector
+# exits 1 whenever anything PERISHABLE was lost, which is exactly the case
+# the monitor exists to report — chaining with && would skip the alert in
+# the only situation that needs one. `&` runs it regardless of exit code.
+#
+# The monitor's own exit code is what the scheduler records, and it reflects
+# COLLECTION health rather than delivery success, so a blocked notification
+# channel cannot make a healthy collection look broken.
+$command = "/c cd /d `"$repo`" && `"$python`" `"$script`" >> `"$log`" 2>&1 & `"$python`" `"$monitor`" >> `"$log`" 2>&1"
 
 $action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument $command
 $trigger = New-ScheduledTaskTrigger -Weekly `
@@ -120,7 +130,7 @@ Write-Host ""
 Write-Host "Verify with:  Get-ScheduledTask -TaskName '$TaskName'"
 Write-Host "Run it now :  Start-ScheduledTask -TaskName '$TaskName'"
 Write-Host ""
-Write-Host "NOTE: news collection needs NEWSAPI_KEY in the environment."
+Write-Host "NOTE: news collection needs NEWS_PROVIDER_API_KEY in the environment."
 Write-Host "      Without it the task still captures prices, fundamentals and"
 Write-Host "      macro, but every day of news is lost permanently and no"
 Write-Host "      OBSERVED event memory can ever be recorded."

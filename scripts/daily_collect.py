@@ -62,6 +62,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 import time
 from datetime import date, datetime, timezone
@@ -80,6 +81,7 @@ from core.config import (  # noqa: E402
     COLLECT_REPORT_PATH,
     COLLECT_SOURCES,
     COLLECT_THROTTLE_SECONDS,
+    NEWS_PROVIDER_API_KEY_ENV,
 )
 
 LOGGER = logging.getLogger("daily_collect")
@@ -469,9 +471,27 @@ def main() -> int:
         for source in report["perishable_lost"]:
             print(f"      {source} — this day cannot be recovered later")
         if "news" in report["perishable_lost"]:
-            print("      News needs NEWS_PROVIDER_API_KEY. Until it is set, no OBSERVED")
-            print("      event memory can ever exist, and F5 has only inferred")
-            print("      analogs to work from.")
+            # WHY THE CAUSE IS NAMED RATHER THAN ASSUMED. This used to print
+            # "News needs NEWS_PROVIDER_API_KEY" unconditionally. MEASURED
+            # 2026-10-04 on the first scheduled run, the key WAS set and the
+            # real cause was the 100/day quota (HTTP 429) — so the one
+            # message the operator reads at 22:00 sent them to fix a
+            # credential that was already correct. A no-key day and a
+            # quota-exhausted day need different actions: set a variable, or
+            # wait for the rolling window.
+            if news.get("quota_exhausted"):
+                print("      The key is set and working; the provider's quota is spent.")
+                print("      NewsAPI's free tier is 100 requests / 24h, enforced as")
+                print("      50 / 12h on a ROLLING window, so this clears on its own.")
+                print("      Nothing to fix — but the uncovered tickers lose today.")
+            elif not os.getenv(NEWS_PROVIDER_API_KEY_ENV):
+                print("      News needs NEWS_PROVIDER_API_KEY. Until it is set, no OBSERVED")
+                print("      event memory can ever exist, and F5 has only inferred")
+                print("      analogs to work from.")
+            else:
+                print("      The key is set, so this is a provider or network")
+                print("      failure rather than a setup one. Check the lines above")
+                print("      for the reason the provider gave.")
         return 1
 
     return 0
