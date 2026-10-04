@@ -124,6 +124,56 @@ class TestWhatIsRemembered(MemoryTestCase):
         self.assertEqual(memory.event_type, "earnings")
         self.assertEqual(memory.actor, "Jensen Huang")
 
+    def test_the_outlet_is_remembered(self) -> None:
+        """Step 1's goal: an outcome must know who reported the event.
+
+        MEASURED 2026-09-21, 2,084 memories carried NO outlet, which is why
+        L4's source-reliability estimator had nothing to learn from — a
+        source cannot acquire a track record if the memory holding the
+        outcome does not say who reported it.
+        """
+        event = Event(
+            entity="NVDA",
+            published_time=self.frame.index[200].strftime("%Y-%m-%d %H:%M:%S"),
+            event_type="earnings", source="CNBC", provider="newsapi_news",
+            actor="Jensen Huang", evidence=[{"source_record_id": "r1"}],
+        )
+        memory = build_memory(
+            event, study_event(event, self.frame, self.benchmark),
+            attribute_study(study_event(event, self.frame, self.benchmark)),
+            _snapshot(),
+        )
+        self.assertEqual(memory.source, "CNBC")
+        self.assertEqual(memory.provider, "newsapi_news")
+
+    def test_an_inferred_event_carries_no_outlet_and_that_is_correct(self) -> None:
+        """Absence is not a gap here.
+
+        A memory dated from volume cadence has no reporter BY
+        CONSTRUCTION, and `_InferredEvent` deliberately has no `source`
+        attribute. Empty is the honest value; inventing one would be the
+        fabrication `provenance` exists to prevent.
+        """
+
+        class _Inferred:
+            entity = "NVDA"
+            event_id = "inferred-NVDA-2026-01-05"
+            published_time = self.frame.index[200].strftime("%Y-%m-%d %H:%M:%S")
+            effective_time = published_time
+            event_type = "earnings"
+            direction = "neutral"
+            actor = ""
+            actor_type = ""
+
+        inferred = _Inferred()
+        memory = build_memory(
+            inferred, study_event(inferred, self.frame, self.benchmark),
+            {}, _snapshot(), provenance="inferred",
+            inference_method="quarterly_volume_cadence",
+        )
+        self.assertEqual(memory.source, "")
+        self.assertEqual(memory.provider, "")
+
     def test_the_chart_state_is_remembered(self) -> None:
         chart = self._built().chart_state
         for field_name in EVENT_MEMORY_CHART_FIELDS:

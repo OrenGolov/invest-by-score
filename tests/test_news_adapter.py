@@ -326,9 +326,35 @@ class BuildSnapshotTests(unittest.TestCase):
         self.assertEqual(snapshot["pipeline"]["counts"]["categories"], {"earnings": 1, "product_launch": 1})
         self.assertEqual(snapshot["pipeline"]["pipeline_version"], core_config.NEWS_PIPELINE_VERSION)
         for article in snapshot["articles"]:
-            for key in ("source_id", "source_record_id", "published_time", "headline", "url",
-                        "category", "tone", "relevance", "source_weight", "tone_derivation"):
+            for key in ("source_id", "source_name", "source_record_id", "published_time",
+                        "headline", "url", "category", "tone", "relevance",
+                        "source_weight", "tone_derivation"):
                 self.assertIn(key, article)
+
+    def test_the_outlet_survives_enrichment(self):
+        """The step-1 bug, caught where it actually happened.
+
+        MEASURED 2026-10-04: `_normalize_provider_payload` captured
+        `source_name` and the enrichment dict then rebuilt the article
+        field by field WITHOUT it, so the outlet died inside
+        build_news_snapshot on all 1,637 articles of the first news day.
+
+        This needs its own test because the downstream fallback hides it:
+        with `source_name` absent, `event_from_article` substitutes the
+        provider and produces a valid event, so every event-contract and
+        event-memory test still passes. VERIFIED by sabotage — deleting the
+        enrichment field passed all 153 tests in the three related modules
+        before this assertion existed.
+        """
+        snapshot = _snapshot([_record(rid="u1", headline="TEST beats earnings expectations")])
+        self.assertEqual(snapshot["status"], "OK")
+        self.assertTrue(snapshot["articles"])
+        for article in snapshot["articles"]:
+            self.assertEqual(article["source_name"], "Example Wire")
+            self.assertNotEqual(
+                article["source_name"], article["source_id"],
+                "the outlet must not be the provider id — that was the bug",
+            )
 
     def test_positive_headline_from_zero_quality_source_cannot_raise_confidence(self):
         clean = _snapshot([_record(rid="ok1", headline="TEST record profits", tone=1.0)])

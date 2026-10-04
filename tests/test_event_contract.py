@@ -166,11 +166,31 @@ class TestDeterministicIdentity(unittest.TestCase):
     def test_the_same_event_hashes_identically(self) -> None:
         self.assertEqual(_event().event_id, _event().event_id)
 
-    def test_the_same_story_from_two_providers_is_one_event(self) -> None:
-        """Event memory must not double-count a syndicated story."""
+    def test_recomputable_judgements_do_not_change_the_id(self) -> None:
+        """Scores are judgements ABOUT an event, not the event."""
         first = _event()
         second = _event(source_quality=0.5, relevance=0.4, confidence=0.2)
         self.assertEqual(first.event_id, second.event_id)
+
+    def test_the_same_story_from_two_providers_is_one_event(self) -> None:
+        """The literal claim the module docstring makes.
+
+        Before 2026-10-04 this could not be tested, because `source` held
+        the provider id AND was hashed — so the same article reaching us
+        through two providers produced two events. `source` now holds the
+        OUTLET and neither it nor `provider` is part of the identity, so
+        one article is one event however it was delivered.
+        """
+        first = _event(source="CNBC", provider="newsapi_news")
+        second = _event(source="CNBC", provider="finnhub_news")
+        self.assertEqual(first.event_id, second.event_id)
+
+    def test_the_outlet_does_not_fragment_identity(self) -> None:
+        """369 outlets appeared in one day; hashing the reporter would
+        have split identity 369 ways."""
+        self.assertEqual(
+            _event(source="CNBC").event_id, _event(source="Reuters").event_id
+        )
 
     def test_defining_content_changes_the_id(self) -> None:
         for field_name, value in (
@@ -179,10 +199,22 @@ class TestDeterministicIdentity(unittest.TestCase):
             ("effective_time", "2026-01-01 00:00:00"),
             ("event_type", "litigation"),
             ("actor", "Jensen Huang"),
-            ("source", "other_provider"),
         ):
             with self.subTest(changed=field_name):
                 self.assertNotEqual(_event().event_id, _event(**{field_name: value}).event_id)
+
+    def test_who_reported_it_is_not_defining_content(self) -> None:
+        """The counterpart to the test above, stated as its own rule.
+
+        WHAT happened defines the event; WHO told us is a property of the
+        telling. Separating them is what lets an outlet acquire a track
+        record without changing what it reported on.
+        """
+        for field_name, value in (("source", "Reuters"), ("provider", "finnhub_news")):
+            with self.subTest(unchanged_by=field_name):
+                self.assertEqual(
+                    _event().event_id, _event(**{field_name: value}).event_id
+                )
 
     def test_different_evidence_changes_the_id(self) -> None:
         other = _event(evidence=[{"source_record_id": "rec-2"}])
@@ -214,6 +246,37 @@ class TestNewsAdapter(unittest.TestCase):
         event = event_from_article(_article(), "NVDA", "newsapi_news")
         self.assertEqual(event_problems(event), [])
         self.assertEqual(event.event_type, "earnings")
+
+    def test_the_outlet_comes_from_the_article(self) -> None:
+        """The step-1 defect, as a test.
+
+        MEASURED 2026-10-04: `source_name` was present on all 1,637
+        articles of the first news day and discarded here, so every event
+        recorded "newsapi_news" and L4 saw one source with no variation.
+        """
+        event = event_from_article(
+            _article(source_name="CNBC"), "NVDA", "newsapi_news"
+        )
+        self.assertEqual(event.source, "CNBC")
+        self.assertEqual(event.provider, "newsapi_news")
+
+    def test_an_article_with_no_outlet_falls_back_to_the_provider(self) -> None:
+        """Degrade to the old behaviour, never to an unsourced event.
+
+        `event_problems` refuses an event with an empty source, so a
+        provider that omits the outlet must not produce one.
+        """
+        event = event_from_article(_article(), "NVDA", "newsapi_news")
+        self.assertEqual(event.source, "newsapi_news")
+        self.assertEqual(event_problems(event), [])
+
+    def test_a_blank_outlet_is_treated_as_absent(self) -> None:
+        for blank in ("", "   ", None):
+            with self.subTest(source_name=blank):
+                event = event_from_article(
+                    _article(source_name=blank), "NVDA", "newsapi_news"
+                )
+                self.assertEqual(event.source, "newsapi_news")
 
     def test_tone_maps_onto_direction(self) -> None:
         for tone, expected in (

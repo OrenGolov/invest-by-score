@@ -100,6 +100,20 @@ class EventMemory:
     # confidence.
     attribution: dict[str, str] = field(default_factory=dict)
     entity_resolution_method: str = ""
+    # THE OUTLET that reported the event ("CNBC", "Biztoc.com"), carried
+    # here so an outcome can be attributed to it. MEASURED 2026-09-21, 2,084
+    # memories carried NO outlet, which is why L4's source-reliability
+    # estimator had nothing to learn from: a source cannot acquire a track
+    # record if the memory holding the outcome does not say who reported it.
+    #
+    # Empty for an INFERRED memory and that is correct, not missing — a
+    # memory dated from volume cadence has no reporter by construction.
+    # `SOURCE_RELIABILITY_ABSENT_IS_ZERO = False` is the matching rule
+    # downstream: unmeasured and useless are different facts.
+    source: str = ""
+    # The pipeline that delivered it ("newsapi_news"). Kept distinct from
+    # `source` so the provider is never mistaken for a track record.
+    provider: str = ""
     # Was this OBSERVED from a real source, or INFERRED from price behaviour?
     # Defaulted to "" rather than "observed" deliberately: a default of
     # "observed" would silently launder every unlabelled memory into evidence.
@@ -255,6 +269,8 @@ def build_memory(
         chart_state=chart_state,
         provenance=provenance,
         inference_method=inference_method,
+        source=str(getattr(event, "source", "") or ""),
+        provider=str(getattr(event, "provider", "") or ""),
         context={
             "benchmark": getattr(study, "benchmark", None),
             "sector": getattr(study, "sector", None),

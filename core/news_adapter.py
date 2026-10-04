@@ -530,6 +530,14 @@ def build_news_snapshot(ticker: str, as_of: str, timeout: float = NEWS_PROVIDER_
         tone, derivation = resolve_tone(record)
         enriched.append({
             "source_id": NEWS_SOURCE_ID,
+            # THE OUTLET, carried through enrichment. MEASURED 2026-10-04,
+            # this dict rebuilt the article field by field and omitted
+            # `source_name`, so the outlet captured by
+            # _normalize_provider_payload died here — on all 1,637 articles
+            # of the first news day, across 369 distinct outlets. Every
+            # downstream Event then recorded "newsapi_news" as its source
+            # and L4 had one source with no variation to learn from.
+            "source_name": str(record.get("source_name") or ""),
             "source_record_id": str(record.get("source_record_id", "")),
             "published_time": str(record.get("published_time") or ""),
             "published_dt": published_dt,
@@ -608,6 +616,13 @@ def build_news_snapshot(ticker: str, as_of: str, timeout: float = NEWS_PROVIDER_
     articles_public = [
         {
             "source_id": article["source_id"],
+            # THE OUTLET. This is the dict that reaches
+            # events_from_news_snapshot, so it is the boundary that
+            # actually decides whether an Event can name its reporter.
+            # MEASURED 2026-10-04: the article was rebuilt field by field
+            # TWICE on the way out (here and in `enriched`), and both
+            # copies omitted the outlet.
+            "source_name": article.get("source_name", ""),
             "source_record_id": article["source_record_id"],
             "published_time": article["published_time"],
             "headline": article["headline"],

@@ -82,6 +82,14 @@ class Event:
     entity: str
     published_time: str
     event_type: str
+    # THE OUTLET that reported it ("CNBC", "Biztoc.com"), not the provider
+    # that delivered it. MEASURED 2026-10-04, this field held the constant
+    # "newsapi_news" for every event ever built, because news_adapter.py
+    # passed its provider id at seven call sites. The per-article
+    # `source_name` was captured in the raw ledger and then dropped, so L4's
+    # source-reliability estimator was handed ONE source 1,637 times and
+    # correctly reported REGISTRY_PRIOR - it had no variation to learn from.
+    # 369 distinct outlets appeared in a single day's articles.
     source: str
     evidence: list[dict[str, str]] = field(default_factory=list)
 
@@ -91,6 +99,11 @@ class Event:
     entities_affected: list[str] = field(default_factory=list)
     actor: str = ""
     actor_type: str = ACTOR_TYPE_UNKNOWN
+    # WHICH PIPELINE DELIVERED IT ("newsapi_news", later "finnhub_news").
+    # Separate from `source` because they answer different questions: the
+    # provider is a property of our plumbing, the outlet is a property of
+    # the world. Only the second one can have a track record worth learning.
+    provider: str = ""
     source_quality: float = 0.0
     novelty: float = 0.0
     relevance: float = 0.0
@@ -120,6 +133,31 @@ class Event:
         Excludes the scores (novelty, relevance, confidence, magnitude):
         those are judgements ABOUT the event that may be recomputed as the
         pipeline improves. The event itself is the same event.
+
+        **EXCLUDES `source` AND `provider` — WHO DELIVERED A STORY IS NOT
+        WHAT HAPPENED.** This module's contract is that "event memory cannot
+        double-count a story that two providers carried", and that is now
+        literally true: the SAME article reaching us through NewsAPI and
+        through Finnhub has one identity, where hashing the provider would
+        have made two.
+
+        Excluding `source` is also what lets it become the outlet at all.
+        While it held the constant "newsapi_news" the choice was invisible;
+        the moment it holds 369 distinct outlet names, hashing it would
+        fragment identity by reporter.
+
+        **WHAT THIS DOES NOT DO, measured rather than assumed.** It does NOT
+        merge two outlets covering one story:
+
+            CNBC    /x -> cb5a2514...
+            Reuters /y -> 9c46abc4...
+
+        because `evidence` carries each article's `source_record_id` (its
+        URL) and those differ. Same-story-across-outlets is a SEMANTIC
+        clustering problem — same entity, same window, same event type — and
+        it belongs to E7's chains, which already exist to count a story
+        once. Identity here stays syntactic and deterministic; pretending
+        otherwise would be a dedup claim this function cannot honour.
         """
         payload = {
             "entity": str(self.entity).upper(),
@@ -127,7 +165,6 @@ class Event:
             "effective_time": str(self.effective_time),
             "event_type": str(self.event_type),
             "actor": str(self.actor),
-            "source": str(self.source),
             # Tolerate malformed entries here so identity can always be
             # computed; event_problems() is what reports them. Raising from
             # __post_init__ instead would crash before validation could
@@ -311,6 +348,23 @@ def event_from_article(
     Adapts only — it never re-classifies. The N1 pipeline already decided
     the category, tone, relevance and source weight, and re-deriving them
     here would create a second, divergent opinion about the same article.
+
+    **THE OUTLET COMES FROM THE ARTICLE; `source` IS THE PROVIDER.** The
+    caller passes its pipeline id ("newsapi_news") and that lands in
+    `Event.provider`. `Event.source` is taken from the article's own
+    `source_name` — the outlet that actually reported it.
+
+    MEASURED 2026-10-04, before this change: `source_name` was captured on
+    every one of 1,637 articles and then discarded here, so every event in
+    the system recorded the string "newsapi_news" as its source. L4's
+    source-reliability estimator was therefore handed one source with no
+    variation and correctly reported REGISTRY_PRIOR for everything. 369
+    distinct outlets were present in that same day's data.
+
+    `source` remains the fallback when an article attests no outlet, so a
+    provider that omits the field degrades to today's behaviour rather than
+    producing an event with no source at all (which `event_problems` would
+    refuse).
     """
     if not isinstance(article, dict):
         raise EventContractError(f"article must be a dict, got {type(article).__name__}")
@@ -330,12 +384,16 @@ def event_from_article(
     actor = str(article.get("actor") or "")
     tone = article.get("tone")
 
+    # The outlet, falling back to the provider when the article attests none.
+    outlet = str(article.get("source_name") or "").strip() or str(source)
+
     return Event(
         entity=str(entity).upper(),
         published_time=str(published),
         effective_time=effective_time,
         event_type=event_type,
-        source=str(source),
+        source=outlet,
+        provider=str(source),
         actor=actor,
         actor_type=_actor_type_for(event_type, actor),
         source_quality=float(article.get("source_weight") or 0.0),
