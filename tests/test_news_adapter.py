@@ -356,6 +356,87 @@ class BuildSnapshotTests(unittest.TestCase):
                 "the outlet must not be the provider id — that was the bug",
             )
 
+    def test_articles_carry_a_resolved_ticker(self):
+        """Step 2: close the source -> outcome join.
+
+        MEASURED 2026-09-21 and still true at 1,637 articles on
+        2026-10-04: 0 articles carried a ticker, so no article joined to a
+        price outcome and L4 could never measure an outlet's record.
+        """
+        snapshot = _snapshot(
+            [_record(rid="u1", headline="NVDA beats earnings expectations")],
+            ticker="NVDA",
+        )
+        self.assertEqual(snapshot["status"], "OK")
+        for article in snapshot["articles"]:
+            for key in ("ticker", "entity_resolution_method",
+                        "entity_resolution_confidence"):
+                self.assertIn(key, article)
+            self.assertEqual(article["ticker"], "NVDA")
+            self.assertEqual(article["entity_resolution_method"], "ticker")
+            self.assertEqual(article["entity_resolution_confidence"], 1.0)
+
+    def test_an_unregistered_ticker_cannot_be_resolved(self):
+        """E2 refuses what it cannot verify, and says why.
+
+        A ticker absent from the entity registry resolves to "none" — the
+        fix is a registry entry, not a guess. This is also why step 2's
+        coverage is bounded by the registry: 77 entities today.
+        """
+        snapshot = _snapshot([
+            _record(rid="u1", headline="TEST beats earnings expectations"),
+        ])
+        for article in snapshot["articles"]:
+            self.assertEqual(article["ticker"], "")
+            self.assertEqual(article["entity_resolution_method"], "none")
+
+    def test_an_unresolved_article_is_recorded_not_dropped(self):
+        """E2's rule: the rejection rate is itself data about coverage.
+
+        An article that cannot be attributed keeps its place in the
+        evidence with method="none". Deleting it would make a coverage gap
+        indistinguishable from an absence of news.
+        """
+        snapshot = _snapshot(
+            [
+                _record(rid="u1", headline="NVDA beats earnings expectations"),
+                _record(rid="u2", headline="Xiaomi Redmi Note deal at Mobileciti"),
+            ],
+            ticker="NVDA",
+        )
+        self.assertEqual(len(snapshot["articles"]), 2)
+        unresolved = next(
+            a for a in snapshot["articles"] if a["source_record_id"] == "u2"
+        )
+        self.assertEqual(unresolved["ticker"], "")
+        self.assertEqual(unresolved["entity_resolution_method"], "none")
+        self.assertFalse(unresolved["included_in_aggregation"])
+
+    def test_resolution_uses_e2_not_the_v1_uppercase_heuristic(self):
+        """The collision bug, as a regression test.
+
+        MEASURED 2026-10-04, `resolve_relevance` uppercases the text before
+        looking for the ticker, which destroys the only signal separating a
+        symbol from a word. It returns 1.0 — MAXIMUM confidence — for
+        "KO" in "Why KO is a dividend stalwart". E2 is case-sensitive on
+        tickers and requires short ones to match by name, so it refuses.
+        """
+        from core.entity_resolution import resolve_entity
+        from core.news_adapter import resolve_relevance
+
+        for ticker, headline in (
+            ("KO", "Why KO is a dividend stalwart"),
+            ("BE", "This BE the way pirates talk"),
+        ):
+            with self.subTest(ticker=ticker):
+                self.assertEqual(
+                    resolve_relevance({"headline": headline, "summary": ""}, ticker),
+                    1.0,
+                    "v1 is expected to be wrong here; if it is not, this "
+                    "test no longer proves E2 is doing the work",
+                )
+                self.assertFalse(resolve_entity(headline, ticker).matched)
+
     def test_positive_headline_from_zero_quality_source_cannot_raise_confidence(self):
         clean = _snapshot([_record(rid="ok1", headline="TEST record profits", tone=1.0)])
         polluted = _snapshot([

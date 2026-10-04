@@ -60,7 +60,7 @@ from price, volume or technical indicators — inferring it from today's
 constituents is survivorship bias by construction. Held open by 18 tests in
 `tests/test_deferred_features.py`, including the placeholder itself.
 
-## 4. The source → outcome join does not exist — PARKED
+## 4. The source → outcome join does not exist — CLOSED (2026-10-04)
 
 **Raised:** Sprint L4 (2026-09). **Blocks:** everything L4 can actually learn.
 
@@ -91,6 +91,37 @@ the estimator degrades correctly, it is simply not yet learning.
 **Scale note:** the full conditional scheme is 19,800 cells needing ~7.5M
 source-linked outcomes to populate. Even with the join built, the useful
 near-term output is per-source global rates, not the full cross-product.
+
+**CLOSED 2026-10-04 by steps 1 and 2** (`6dcfddf`, and the commit that
+follows it). Both halves the entry asked for now exist:
+
+```
+                              before      after
+Event.source                  provider    THE OUTLET
+EventMemory.source            (absent)    THE OUTLET
+articles carrying a ticker    0 of 1,637  353 of 1,637  (21.6%)
+```
+
+Resolution is done at ingestion with E2's resolver:
+
+```
+none         1,169  (71.4%)
+ticker         265  (16.2%)
+ambiguous      115  (7.0%)
+alias           72  (4.4%)
+legal_name      14  (0.9%)
+executive        2  (0.1%)
+```
+
+L4 can now MEASURE an outlet instead of asserting a prior — Biztoc.com
+(155 joinable articles), Rlsbb.cc (44) and Pypi.org (16) are the first
+outlets whose reliability is testable rather than assumed. The estimator
+needed no change: shrinkage at k=20 already degrades to the global rate
+until a cell earns its own.
+
+Note what is NOT closed: outcomes have to ACCRUE before a rate means
+anything. See item 16 — the memories are days old, so no 20d horizon
+exists yet.
 
 ## 5. Cluster exposure is not measured — PARKED
 
@@ -673,6 +704,75 @@ unmeasured outlet and a useless one are different facts.
 a provider-side `related` ticker field, and removes the 100-request quota. It
 does NOT fix (1) or (3) — those are this repo's code, and no provider choice
 substitutes for carrying the outlet through.
+
+
+---
+
+## 21. A length guard cannot separate a ticker from a word — DECISION
+
+**Raised:** 2026-10-04. **Owner:** operator.
+
+`ENTITY_AMBIGUOUS_TICKER_MAX_LENGTH = 2` makes short tickers match by name
+instead of by symbol, which correctly refuses `KO`, `BE` and `V`. ARM is three
+characters, so it passes — and MEASURED 2026-10-04 against the exact case the
+operator first described:
+
+```
+resolve_entity("1968 Corvette with a new ARM rest", "ARM")
+  -> matched=True  method=ticker  confidence=1.00
+```
+
+A classic-car listing resolves to the ARM Holdings ticker at MAXIMUM
+confidence.
+
+**Raising the guard to 3 is the wrong fix, measured.** The universe holds 17
+three-letter tickers, and all 17 resolve correctly today on an ordinary
+finance headline:
+
+```
+3-letter tickers in universe          17
+also common English words              3   (ARM, CAT, NOW)
+of those, already caught by name rule  1   (CAT)
+legitimate matches broken by a len-3 guard  17
+```
+
+So a length-3 guard would break 17 working matches to fix 2. The instrument is
+wrong, not the threshold: length does not distinguish a symbol from a word,
+and the registry already knows the difference.
+
+**What would settle it:** a per-entity `requires_name` flag on the handful of
+tickers that collide with common words, so the registry carries the exception
+with provenance (E2's "a registry, not a regex" rule) instead of a global
+threshold punishing every short ticker. Three entries would cover the measured
+cases.
+
+**Not fixed in step 2** because it changes resolution for tickers beyond the
+articles step 2 touches, and because `ARM` matching in caps is a different
+failure from the uppercase bug step 2 fixed — that one destroyed case
+information; this one has the case right and still cannot tell a symbol from a
+noun.
+
+## 22. Step 2's coverage is bounded by the entity registry — OPEN
+
+**Raised:** 2026-10-04. **Owner:** unassigned.
+
+E2 refuses a ticker it cannot verify, with a reason:
+
+```
+"TEST is not in the entity registry, so a mention of it cannot be
+ verified — add it rather than guessing"
+```
+
+That is the right behaviour, and it bounds step 2: the registry holds **77
+entities**, so resolution coverage can never exceed the universe the registry
+describes. The 71.4% `none` rate is partly this and partly genuine noise, and
+those two causes are NOT currently separable in the report.
+
+**What would settle it:** split `none` into `unregistered_ticker` and
+`no_match_in_text`. The first is a registry gap (fixable by adding an entry);
+the second is a real non-match. Collapsing them repeats exactly the mistake E2
+was built to fix — the entry's own docstring says a failed resolution must not
+look like a correct exclusion.
 
 
 ---

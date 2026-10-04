@@ -525,10 +525,53 @@ def build_news_snapshot(ticker: str, as_of: str, timeout: float = NEWS_PROVIDER_
         )
 
     eligible, rejected = pit_filter(raw_records, as_of_dt)
+    # STEP 2: resolve each article to a ticker AT INGESTION, using E2's
+    # resolver rather than this module's v1 relevance heuristic.
+    #
+    # WHY E2 AND NOT resolve_relevance(). MEASURED 2026-10-04, the v1
+    # heuristic uppercases the text before looking for the ticker, which
+    # destroys the only signal separating a symbol from a word. All five of
+    # these scored relevance 1.0 - MAXIMUM confidence - on a false match:
+    #
+    #     ARM  "1968 Corvette with a new ARM rest"
+    #     CAT  "Red Cat Holdings announces drone contract"
+    #     KO   "Why KO is a dividend stalwart"
+    #     BE   "This BE the way pirates talk"
+    #     ALL  "ALL of the above applies to markets"
+    #
+    # E2 rejects CAT, KO and BE (short tickers must match by name) and is
+    # case-sensitive on tickers, which is the rule v1 throws away. It is
+    # also the resolver whose verdict already reaches Event.entity_
+    # resolution, so using it here means ingestion and the event contract
+    # agree about what an article is about instead of holding two opinions.
+    #
+    # The RESOLUTION IS RECORDED, not applied as a filter: an article that
+    # fails to resolve keeps its place in the evidence with method="none",
+    # because the rejection rate is itself data about coverage (E2's rule).
+    from core.entity_resolution import resolve_article
+
+    resolutions = {}
+    for record, _published_dt in eligible:
+        record_id = str(record.get("source_record_id", ""))
+        try:
+            resolutions[record_id] = resolve_article(record, ticker)
+        except Exception:  # noqa: BLE001 - resolution must never break ingestion
+            resolutions[record_id] = None
+
     enriched: list[dict] = []
     for record, published_dt in eligible:
         tone, derivation = resolve_tone(record)
+        resolution = resolutions.get(str(record.get("source_record_id", "")))
         enriched.append({
+            "resolved_ticker": (
+                ticker if resolution is not None and resolution.matched else ""
+            ),
+            "entity_resolution_method": (
+                str(resolution.method) if resolution is not None else ""
+            ),
+            "entity_resolution_confidence": (
+                float(resolution.confidence) if resolution is not None else 0.0
+            ),
             "source_id": NEWS_SOURCE_ID,
             # THE OUTLET, carried through enrichment. MEASURED 2026-10-04,
             # this dict rebuilt the article field by field and omitted
@@ -623,6 +666,17 @@ def build_news_snapshot(ticker: str, as_of: str, timeout: float = NEWS_PROVIDER_
             # TWICE on the way out (here and in `enriched`), and both
             # copies omitted the outlet.
             "source_name": article.get("source_name", ""),
+            # STEP 2: the resolved ticker, and HOW it resolved. Carried so
+            # an outcome can be joined back to the outlet that reported it
+            # (open item 4). MEASURED 2026-09-21 and still true at 1,637
+            # articles on 2026-10-04: 0 articles carried a ticker, so no
+            # article joined to a price outcome and L4 could never measure
+            # an outlet's record.
+            "ticker": article.get("resolved_ticker", ""),
+            "entity_resolution_method": article.get("entity_resolution_method", ""),
+            "entity_resolution_confidence": article.get(
+                "entity_resolution_confidence", 0.0
+            ),
             "source_record_id": article["source_record_id"],
             "published_time": article["published_time"],
             "headline": article["headline"],
