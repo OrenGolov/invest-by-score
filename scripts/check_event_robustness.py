@@ -115,15 +115,31 @@ def viral_book(share, seed=0):
     return predictions, actuals, ids
 
 
-# --- 1. THE BLOCKING MEASUREMENT: there is no event data at all -------------------
+# --- 1. THE BLOCKING MEASUREMENT: the join key does not exist --------------------
+#
+# This gate used to assert `len(memories) == 0` - X4's FIRST blocker, "the
+# event data does not exist at all". That premise expired on 2026-10-04 when
+# NEWS_PROVIDER_API_KEY was set and the first news collection wrote 361
+# OBSERVED memories, and the gate correctly went red. A staleness detector
+# firing is the detector working.
+#
+# But X4 named TWO blockers and said explicitly that fixing only the first
+# "still leaves nothing joinable". The second is untouched: MEASURED
+# 2026-10-04 across all 8 shipped runs, a fold carries only
+#
+#     actuals, fold_id, metrics, predictions, train_end_time, train_rows,
+#     validation_rows, validation_start_time
+#
+# with no event id, source, ticker or timestamp. So an event memory still
+# cannot be attached to a validation observation, and X4 still reports
+# NOT_EVALUATED - for the surviving half of its original reason.
+#
+# Asserting THE JOIN KEY IS ABSENT is the honest form of the claim: it is
+# the condition that actually gates the gate, and it fires the day folds
+# start carrying attribution, which is when X4 becomes computable.
 
 memories = load_memories()
-check(
-    len(memories) == 0,
-    f"{len(memories)} event memories now exist. That is part of the fix X4 "
-    f"asks for, and this gate's 'no event data' claim is stale - the real "
-    f"robustness test must now be wired to them",
-)
+JOIN_KEYS = ("event_ids", "event_id", "sources", "source", "tickers")
 
 runs = load_training_runs()
 check(bool(runs), "no training runs are available; X4 cannot state its blocker")
@@ -139,6 +155,52 @@ check(
     f"{attributed} now carry per-observation event or source attribution. "
     f"This gate's NOT_EVALUATED claim is stale and the real test must run",
 )
+
+# The same claim at the raw-key level: `attribution_of` reads a derived
+# structure, so a fold could gain the keys before the accessor understood
+# them. Both are checked, because the point is to notice the join arriving.
+for run in runs:
+    present = [key for key in JOIN_KEYS if key in run["folds"][0]]
+    check(
+        not present,
+        f"{run['estimator']} folds now carry {present} - the join key X4 "
+        f"waits on has arrived; re-read the X4 commit and decide whether "
+        f"the event axis can move off NOT_EVALUATED",
+    )
+
+# AND THE PROGRESS THAT HAS BEEN MADE, asserted so it cannot silently
+# regress. Step 1 (2026-10-04) made EventMemory carry the OUTLET that
+# reported an event; step 2 resolved articles to tickers at ingestion.
+#
+# A MEMORY WRITTEN BEFORE STEP 1 HAS NO `source` KEY AT ALL, and that is a
+# schema vintage rather than a regression - the 361 memories on disk were
+# written at 11:43 and step 1 landed at 13:48 the same day. The two states
+# must not be conflated:
+#
+#     "source" key absent   -> written under the old schema; rebuilt from
+#                              raw on the next collection
+#     "source" key present
+#       but empty           -> the wiring REGRESSED, and L4 is back to one
+#                              source with no variation
+#
+# Checking only the second is what makes this assertion meaningful rather
+# than a complaint about old data. It starts enforcing the moment any
+# memory is written by the current code.
+observed = [m for m in memories if str(m.get("provenance", "")) == "observed"]
+current_schema = [m for m in observed if "source" in m]
+if current_schema:
+    unsourced = [
+        m.get("event_id")
+        for m in current_schema
+        if not str(m.get("source", "")).strip()
+    ]
+    check(
+        not unsourced,
+        f"{len(unsourced)} of {len(current_schema)} OBSERVED memories carry "
+        f"the source field but leave it EMPTY. Step 1 made Event.source the "
+        f"outlet and EventMemory carry it; an empty reporter under the "
+        f"current schema means that wiring regressed",
+    )
 
 if runs:
     fold = runs[0]["folds"][0]
