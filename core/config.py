@@ -9220,3 +9220,123 @@ def _validate_sealed_holdout_config() -> None:
 
 
 _validate_sealed_holdout_config()
+
+
+# ---------------------------------------------------------------------------
+# ALERT DELIVERY — the transport the seven alert modules never had
+# ---------------------------------------------------------------------------
+# MEASURED 2026-10-04, before this block existed: the repo contained seven
+# alert evaluators (forecast, thesis, regime, event-impact, confidence,
+# forecast-threshold, suppression) and NO transport. `grep -rn "smtplib"`
+# over core/, scripts/, dashboard/, api/ and agents/ returned nothing, and
+# the only outbound calls in the tree were three inbound provider FETCHES
+# (macro x2, news x1). Every alert module was imported by exactly two
+# things: its own check_*.py gate and this file.
+#
+# So "delivered" in alert_suppression.py was a DECISION, never a
+# transmission. A7 decides whether a reader should see an alert; nothing
+# then showed it to them. That is the gap this block closes.
+#
+# WHY SMTP AND NOT A PUSH SERVICE. Gmail SMTP needs no business
+# verification, no paid provider and no inbound webhook — the operator's
+# existing account plus a 16-character app password is the whole setup.
+# Telegram would give a true phone push and remains the better second
+# channel; it is deliberately NOT started here, because one working channel
+# beats two half-wired ones.
+ALERT_DELIVERY_VERSION = "alert-delivery-v1"
+
+ALERT_EMAIL_USER_ENV = "ALERT_EMAIL_USER"
+ALERT_EMAIL_PASSWORD_ENV = "ALERT_EMAIL_PASSWORD"
+ALERT_EMAIL_TO_ENV = "ALERT_EMAIL_TO"
+
+# Gmail's submission endpoint. Port 587 with STARTTLS rather than 465 with
+# implicit TLS: both work, but 587 fails LOUDLY on a TLS downgrade, where a
+# bare 465 connection can hang until timeout.
+ALERT_SMTP_HOST = "smtp.gmail.com"
+ALERT_SMTP_PORT = 587
+ALERT_SMTP_TIMEOUT_SECONDS = 20.0
+ALERT_SMTP_USE_STARTTLS = True
+
+# A credential that is SET but WRONG looks identical to one that works until
+# the first real alert fires at 22:00 unattended. Delivery therefore always
+# returns an explicit status, and the absence of a credential is its own
+# status rather than a failure — the no-key news contract, same reasoning.
+ALERT_DELIVERY_OK = "delivered"
+ALERT_DELIVERY_UNCONFIGURED = "unconfigured"
+ALERT_DELIVERY_AUTH_FAILED = "auth_failed"
+ALERT_DELIVERY_FAILED = "failed"
+ALERT_DELIVERY_STATUSES = (
+    ALERT_DELIVERY_OK,
+    ALERT_DELIVERY_UNCONFIGURED,
+    ALERT_DELIVERY_AUTH_FAILED,
+    ALERT_DELIVERY_FAILED,
+)
+
+# An unconfigured channel must NEVER report success, and must never raise
+# either: a daily collector that dies because email is not set up has
+# converted a notification gap into a data-collection outage.
+ALERT_DELIVERY_UNCONFIGURED_IS_SUCCESS = False
+ALERT_DELIVERY_RAISES_ON_FAILURE = False
+
+# Gmail app passwords are 16 characters. They are DISPLAYED in four groups of
+# four ("cygk igir bvip nqtg") and authenticate without the spaces, so the
+# spaces are stripped before use — a pasted password that includes them is
+# the single most likely setup error and it is silently correctable.
+ALERT_EMAIL_PASSWORD_LENGTH = 16
+ALERT_EMAIL_STRIPS_PASSWORD_SPACES = True
+
+
+def _validate_alert_delivery_config() -> None:
+    if ALERT_DELIVERY_UNCONFIGURED_IS_SUCCESS:
+        raise ValueError(
+            "an unconfigured channel reporting success is how a silent "
+            "notification gap survives: MEASURED, all three of "
+            "ALERT_EMAIL_USER, ALERT_EMAIL_PASSWORD and NEWS_PROVIDER_API_KEY "
+            "were unset on the operator's machine while the suite passed 3304 "
+            "tests, because nothing on the live path reads them"
+        )
+    if ALERT_DELIVERY_OK == ALERT_DELIVERY_UNCONFIGURED:
+        raise ValueError(
+            "'sent' and 'no channel is configured' are opposite facts and "
+            "must never share a value"
+        )
+    if ALERT_DELIVERY_AUTH_FAILED == ALERT_DELIVERY_FAILED:
+        raise ValueError(
+            "a REJECTED credential and an unreachable server need different "
+            "values: one is fixed by re-issuing an app password, the other by "
+            "waiting, and conflating them sends the operator to the wrong fix"
+        )
+    if len(set(ALERT_DELIVERY_STATUSES)) != len(ALERT_DELIVERY_STATUSES):
+        raise ValueError("ALERT_DELIVERY_STATUSES must be distinct")
+    if ALERT_DELIVERY_RAISES_ON_FAILURE:
+        raise ValueError(
+            "a failed alert must not raise into the caller: the daily "
+            "collector captures PERISHABLE data (news is gone after 7 days), "
+            "so an email outage must never abort a collection run"
+        )
+    if ALERT_SMTP_PORT == 465 and ALERT_SMTP_USE_STARTTLS:
+        raise ValueError(
+            "port 465 is implicit TLS and does not take STARTTLS; 587 is the "
+            "submission port this block declares"
+        )
+    if not ALERT_SMTP_USE_STARTTLS:
+        raise ValueError(
+            "an app password must never cross the wire in clear text"
+        )
+    if ALERT_SMTP_TIMEOUT_SECONDS <= 0:
+        raise ValueError("ALERT_SMTP_TIMEOUT_SECONDS must be positive")
+    if ALERT_EMAIL_PASSWORD_LENGTH != 16:
+        raise ValueError(
+            "a Gmail app password is 16 characters; a different length means "
+            "an account password was pasted instead, which Gmail refuses"
+        )
+    if not ALERT_EMAIL_STRIPS_PASSWORD_SPACES:
+        raise ValueError(
+            "Gmail DISPLAYS app passwords in four groups of four, so a pasted "
+            "password carries spaces that authenticate only once stripped"
+        )
+    if ALERT_EMAIL_USER_ENV == ALERT_EMAIL_PASSWORD_ENV:
+        raise ValueError("the account and its password need separate variables")
+
+
+_validate_alert_delivery_config()

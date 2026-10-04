@@ -274,6 +274,104 @@ one sprint suggests a third is coming.
 
 ---
 
+## 11. Outbound SMTP is intercepted on the operator network — DECISION
+
+**Raised:** 2026-10-04. **Owner:** operator.
+
+The alert channel was built and verified this session: `core/alert_delivery.py`
+(+40 tests) and `scripts/verify_alert_email.py`. The credential is set and
+correctly shaped. **The channel still cannot deliver**, and the cause is the
+network, not the setup.
+
+MEASURED 2026-10-04:
+
+```
+tcp connect smtp.gmail.com:587   OPEN  (142.251.127.109)
+tcp connect smtp.gmail.com:465   OPEN
+tcp connect smtp.gmail.com:25    OPEN
+SMTP greeting banner on 587      NONE within 15s
+SMTP greeting banner on 465      b''   (closed immediately)
+HTTPS to gmail.googleapis.com    200   (port 443 unimpeded)
+Windows proxy configured         no (ProxyEnable=0)
+```
+
+The TCP handshake completes and the session is then swallowed. A refused
+connection would be a firewall; a completed connect with no banner is outbound
+SMTP **interception** — routine on an enterprise-managed machine, which this is.
+
+**What this rules out.** The credential is never reached, so the timeout says
+nothing about whether it is valid. This is the first thing the `failed` vs
+`auth_failed` status split bought: the failure is attributable without guessing.
+
+**What would settle it:** a channel on port 443, since no SMTP channel will
+work on this network whatever the provider. Telegram's bot API is the
+recommendation — no OAuth flow, no business verification, and a real phone
+push, which was the original ask. The Gmail REST API also rides 443 but needs
+an OAuth flow for a benefit nobody asked for.
+
+**Not a defect in the transport.** `send_alert_email` reported the failure
+exactly as designed, returned a distinct status, and never raised — the daily
+collector would have kept collecting. The module stays, behind `smtp_factory`,
+so a 443 channel substitutes for it rather than replacing it.
+
+## 12. Nothing on the live path sends an alert — OPEN
+
+**Raised:** 2026-10-04. **Owner:** unassigned.
+
+MEASURED 2026-10-04, for each of the seven alert evaluators, the complete list
+of non-test importers:
+
+```
+forecast_alert            core/config.py  scripts/check_forecast_alert.py
+thesis_alert              core/config.py  scripts/check_thesis_alert.py
+regime_alert              core/config.py  scripts/check_regime_alert.py
+event_impact_alert        core/config.py  scripts/check_event_impact_alert.py
+confidence_alert          core/config.py  scripts/check_confidence_alert.py
+forecast_threshold_alert                  scripts/check_forecast_threshold_alert.py
+alert_suppression         core/config.py  scripts/check_alert_suppression.py
+```
+
+Every one is imported only by its own CI gate. `scripts/daily_collect.py` and
+`scripts/run_forecasts.py` do not contain the string "alert" at all.
+
+**Why it matters.** Sprint A built six alert evaluators and a suppression gate
+that governs *delivery* — and A7's own prose says a vetoed alert "is still
+delivered, marked non-actionable". Nothing was ever delivered, because nothing
+called them. The gates verify the evaluators are correct, which is a different
+claim from the system alerting anybody.
+
+**What would settle it:** one wiring task — `run_forecasts.py` calls the
+evaluators, passes survivors through `alert_suppression`, and hands the result
+to a delivery channel. Blocked on item 11 for the channel, not for the wiring.
+
+## 13. `install_daily_task.ps1` points at a venv that does not exist — OPEN
+
+**Raised:** 2026-10-04. **Owner:** unassigned.
+
+The installer resolves `$repo\.venv\Scripts\python.exe` and falls back to bare
+`python` when absent. The venv in this repo is `venv`, with no leading dot, so
+**the fallback always wins**.
+
+MEASURED 2026-10-04:
+
+```
+.venv                 does not exist
+venv                  exists
+bare python           3.12.10, pandas 3.0.5, numpy 2.5.2, sklearn MISSING
+venv  python          3.12.10, pandas 3.0.5, numpy 2.5.2, sklearn 1.9.1
+```
+
+The fallback is the dangerous kind: bare python has pandas, so collection would
+appear to work, while anything touching the model path fails on a missing
+sklearn — under a scheduler, at 22:00, into a log nobody reads.
+
+**What would settle it:** resolve `venv` as well as `.venv`, and **refuse to
+register the task** when neither has the required imports. A scheduled task
+pointing at the wrong interpreter is worse than one that refuses to install.
+
+
+---
+
 ## Closed
 
 - ~~**Live runs must use today's chart state.**~~ Fixed in `ad75f48`. The
