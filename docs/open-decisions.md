@@ -344,7 +344,7 @@ claim from the system alerting anybody.
 evaluators, passes survivors through `alert_suppression`, and hands the result
 to a delivery channel. Blocked on item 11 for the channel, not for the wiring.
 
-## 13. `install_daily_task.ps1` points at a venv that does not exist — OPEN
+## 13. `install_daily_task.ps1` points at a venv that does not exist — CLOSED
 
 **Raised:** 2026-10-04. **Owner:** unassigned.
 
@@ -365,9 +365,68 @@ The fallback is the dangerous kind: bare python has pandas, so collection would
 appear to work, while anything touching the model path fails on a missing
 sklearn — under a scheduler, at 22:00, into a log nobody reads.
 
-**What would settle it:** resolve `venv` as well as `.venv`, and **refuse to
-register the task** when neither has the required imports. A scheduled task
-pointing at the wrong interpreter is worse than one that refuses to install.
+~~**What would settle it:** resolve `venv` as well as `.venv`, and **refuse to
+register the task** when neither has the required imports.~~ **FIXED
+2026-10-04.** The installer now tries both spellings and runs an import probe
+(pandas, numpy, sklearn, pyarrow) against the resolved interpreter, exiting 1
+with the missing module named rather than registering a task that would fail
+nightly. VERIFIED both ways: the probe returns OK on `venv` and
+`MISSING:sklearn` on the bare interpreter.
+
+The probe itself had to be fixed before it worked — written as
+`import importlib` it raised `AttributeError: module 'importlib' has no
+attribute 'util'` on EVERY interpreter, which would have blocked the install
+entirely instead of guarding it. A guard that has never been watched failing
+is not a guard; this one was tested in both directions before being trusted
+(the open-item-9 pattern, in a shell script this time).
+
+
+---
+
+## 14. The collector reports news OK on a dry run with no key — OPEN
+
+**Raised:** 2026-10-04. **Owner:** unassigned.
+
+MEASURED 2026-10-04, the same collector invoked two ways, on a machine with
+`NEWS_PROVIDER_API_KEY` unset:
+
+```
+--dry-run   news  OK      PERISHABLE  {'attempted': 40, 'ok': 40, ...}
+real run    news  FAILED  PERISHABLE  {'attempted': 40, 'unavailable': [40 tickers]}
+```
+
+The dry run reports `ok: 40` for a source that **cannot** succeed, because it
+counts tickers it WOULD attempt rather than probing whether the provider is
+reachable. The real run correctly reports `FAILED` and exits 1.
+
+**Why it matters.** A dry run exists to be trusted before committing to a
+scheduled job. This one says the perishable source is fine in precisely the
+configuration where it is guaranteed to lose the day — the same
+"looks-fine-until-22:00" shape as item 13.
+
+**What would settle it:** the dry run resolves the credential (without
+fetching) and reports `news UNAVAILABLE (no key)` rather than `OK`. Checking a
+key is set costs nothing and is exactly what the dry run is for.
+
+## 15. Six references to a variable that does not exist — CLOSED
+
+**Raised:** 2026-10-04. **Fixed:** same day.
+
+MEASURED: five scripts referenced `NEWSAPI_KEY`; the variable the code
+actually reads is `NEWS_PROVIDER_API_KEY` (`core/config.py:265`). The worst was
+`scripts/daily_collect.py:467`, the operator-facing instruction printed on
+every failed collection:
+
+```
+News needs NEWSAPI_KEY. Until it is set, no OBSERVED
+```
+
+So the one message telling the operator how to fix the perishable-data loss
+named a variable nothing reads. This cost real time: the operator set
+`NEWSAPI_KEY` in a previous session and news collection stayed dead.
+
+Corrected in `build_event_memory.py`, `check_data_coverage.py` and
+`daily_collect.py`.
 
 
 ---

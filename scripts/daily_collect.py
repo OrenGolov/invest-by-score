@@ -46,10 +46,15 @@ Usage:
     python scripts/daily_collect.py --dry-run
     python scripts/daily_collect.py --tickers AAPL,MSFT
 
-Scheduling (Windows Task Scheduler, daily on business days):
-    schtasks /create /tn "invest-by-score daily" /sc weekly ^
-      /d MON,TUE,WED,THU,FRI /st 22:00 ^
-      /tr "cmd /c cd /d C:\\Users\\oreng\\invest-by-score && .venv\\Scripts\\python.exe scripts\\daily_collect.py >> data\\collect.log 2>&1"
+Scheduling (Windows Task Scheduler, business days):
+    powershell -ExecutionPolicy Bypass -File scripts\\install_daily_task.ps1
+
+    Use the installer rather than a hand-written schtasks line. It resolves
+    the virtualenv (both `venv` and `.venv` spellings) and REFUSES to
+    register when that interpreter cannot import what the collector needs.
+    MEASURED 2026-10-04: the bare interpreter on this machine has pandas but
+    NOT sklearn, so a task pointed at it collects happily while every model
+    path fails at 22:00 into a log nobody reads.
 """
 
 from __future__ import annotations
@@ -464,7 +469,7 @@ def main() -> int:
         for source in report["perishable_lost"]:
             print(f"      {source} — this day cannot be recovered later")
         if "news" in report["perishable_lost"]:
-            print("      News needs NEWSAPI_KEY. Until it is set, no OBSERVED")
+            print("      News needs NEWS_PROVIDER_API_KEY. Until it is set, no OBSERVED")
             print("      event memory can ever exist, and F5 has only inferred")
             print("      analogs to work from.")
         return 1

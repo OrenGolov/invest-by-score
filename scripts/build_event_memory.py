@@ -13,7 +13,7 @@ on a fresh clone the store does not exist. This is the producer.
 
 `--mode forward` records what the news provider actually reported. Every
 memory is `provenance="observed"`: a real, sourced event. MEASURED: with no
-`NEWSAPI_KEY` configured the news contract returns UNAVAILABLE, and the news
+`NEWS_PROVIDER_API_KEY` configured the news contract returns UNAVAILABLE, and the news
 adapter looks back only `NEWS_LOOKBACK_DAYS` (7) even with one. So this mode
 writes ZERO memories today and says so — it is built to accrue going forward,
 not to fill a store retroactively.
@@ -274,7 +274,7 @@ def backfill(tickers, years: int, dry_run: bool, store: Path | None) -> dict:
 def forward(tickers, as_of: str, dry_run: bool, store: Path | None) -> dict:
     """Record OBSERVED events from the news provider.
 
-    MEASURED: with no NEWSAPI_KEY the news contract is UNAVAILABLE, so this
+    MEASURED: with no NEWS_PROVIDER_API_KEY the news contract is UNAVAILABLE, so this
     writes nothing and reports why. That is the correct outcome, not a
     failure — the alternative is inventing events.
     """
@@ -424,9 +424,9 @@ def main() -> int:
         names = report["news_unavailable"]
         print(f"  news UNAVAILABLE for {len(names)} ticker(s): {', '.join(names[:8])}"
               + (" ..." if len(names) > 8 else ""))
-        print("      No NEWSAPI_KEY is configured, so no OBSERVED event can be")
+        print("      No NEWS_PROVIDER_API_KEY is configured, so no OBSERVED event can be")
         print("      recorded. This writes nothing rather than inventing events.")
-        print("      Set NEWSAPI_KEY and re-run daily to accrue real memories.")
+        print("      Set NEWS_PROVIDER_API_KEY and re-run daily to accrue real memories.")
 
     if report["written"] == 0 and not args.dry_run:
         print("  NOTE: nothing was written. F5 will keep refusing at its")

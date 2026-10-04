@@ -25,7 +25,7 @@ kept happening.
     window, or a scheduler that never runs would still pass.
 
 The gate is deliberately TOLERANT of the gaps already in the ledger and of a
-missing NEWSAPI_KEY: it fails on a collector that stopped running, not on a
+missing NEWS_PROVIDER_API_KEY: it fails on a collector that stopped running, not on a
 provider that was never configured. Those are different problems with
 different fixes, and conflating them would make the gate noise.
 """
