@@ -57,6 +57,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 import time
 from datetime import date, datetime, timezone
@@ -75,6 +76,8 @@ from core.config import (  # noqa: E402
     COLLECT_REPORT_PATH,
     COLLECT_SOURCES,
     COLLECT_THROTTLE_SECONDS,
+    FINNHUB_API_KEY_ENV,
+    NEWS_PROVIDER_API_KEY_ENV,
 )
 
 LOGGER = logging.getLogger("daily_collect")
@@ -464,9 +467,35 @@ def main() -> int:
         for source in report["perishable_lost"]:
             print(f"      {source} — this day cannot be recovered later")
         if "news" in report["perishable_lost"]:
-            print("      News needs NEWSAPI_KEY. Until it is set, no OBSERVED")
-            print("      event memory can ever exist, and F5 has only inferred")
-            print("      analogs to work from.")
+            # WHY THE CAUSE IS NAMED RATHER THAN ASSUMED. PORTED from the
+            # `alert-delivery` branch, which measured it on its first scheduled
+            # run; I then read the same misleading line out of data/collect.log
+            # while diagnosing the quota problem from the other direction.
+            #
+            # This printed "News needs NEWS_PROVIDER_API_KEY" unconditionally,
+            # so the one message an operator reads at 22:00 sent them to fix a
+            # credential that was already correct. A no-key day and a
+            # quota-exhausted day need OPPOSITE actions -- set a variable, or
+            # wait for the rolling window -- and naming the wrong one is worse
+            # than naming none.
+            if news.get("quota_exhausted"):
+                print("      The key is set and working; the provider quota is spent.")
+                print("      NewsAPI's free tier is 100 requests / 24h on a ROLLING")
+                print("      window, so this clears on its own. Nothing to fix --")
+                print("      but the uncovered tickers lose today.")
+                print("      A Finnhub key (60 calls/MINUTE, free) removes the limit:")
+                print("      set FINNHUB_API_KEY and it leads the provider order.")
+            elif not os.getenv(NEWS_PROVIDER_API_KEY_ENV) and not os.getenv(
+                FINNHUB_API_KEY_ENV
+            ):
+                print(f"      News needs {NEWS_PROVIDER_API_KEY_ENV} or")
+                print(f"      {FINNHUB_API_KEY_ENV}. Until one is set, no OBSERVED")
+                print("      event memory can ever exist, and F5 has only inferred")
+                print("      analogs to work from.")
+            else:
+                print("      A key is set, so this is a provider or network failure")
+                print("      rather than a setup one. Check the lines above for the")
+                print("      reason the provider gave.")
         return 1
 
     return 0
