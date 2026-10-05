@@ -93,6 +93,34 @@ STORES: tuple[dict, ...] = (
         ),
     },
     {
+        # THE ONLY STORE HERE THAT HAS NO REBUILD PATH AT ALL.
+        #
+        # Added when Finnhub replaced NewsAPI and produced a SECOND gitignored
+        # news directory. `.gitignore` names news stores per provider for a
+        # measured reason -- 14 MB for 2026-10-05 alone, ~5 GB/year, and git
+        # never forgets -- so these raw articles exist ONLY on this machine.
+        # Gitignored AND unwatched is exactly the condition that let two
+        # earlier deletions stay invisible for a day.
+        #
+        # Finnhub's company-news window is ~1 year and NewsAPI's free tier is
+        # 7 days, but neither replays what was published on a given past day in
+        # the form it was captured. Lose this and every `observed` event memory
+        # derived from it becomes unverifiable: the W6 acceptance proof already
+        # states a fresh clone cannot replay news-derived scores. BACK IT UP
+        # SOMEWHERE THAT IS NOT GIT.
+        "path": "data/raw/finnhub_news",
+        "holds": "raw news articles as captured, the source of `observed` memories",
+        # Witnessed on the collection report rather than on a sibling news
+        # directory: `newsapi_news/` predates the switch, so its presence would
+        # keep witnessing long after Finnhub became the only writer.
+        "witness": "data/collection_report.jsonl",
+        "rebuild": None,
+        "note": (
+            "NOT rebuildable: a provider serves a rolling window, never the "
+            "articles as they stood on a past day; back this up outside git"
+        ),
+    },
+    {
         "path": "data/alerts.jsonl",
         "holds": "every alert ever raised, for the Monitoring tab",
         "witness": "data/alert_deliveries.jsonl",
@@ -132,12 +160,24 @@ def main() -> int:
                 f"    evidence: {store['witness']} exists, so this machine HAS "
                 f"run the task that writes it"
             )
-            print(f"    rebuild : {store['rebuild']}")
+            # A store with no rebuild path must NOT print "rebuild : None"
+            # and then be followed by "rebuild it with the command above".
+            # For the one store that genuinely cannot be rebuilt, that is the
+            # most misleading message the gate could produce.
+            if store["rebuild"]:
+                print(f"    rebuild : {store['rebuild']}")
+            else:
+                print("    rebuild : *** IMPOSSIBLE -- THIS DATA IS GONE ***")
             print(f"    note    : {store['note']}")
         print()
         print("  A gitignored store cannot be restored by git. If this was a")
-        print("  deliberate reset, rebuild it with the command above; if it was")
-        print("  an accident, that is what this gate exists to surface.")
+        if any(not store["rebuild"] for store in missing_with_witness):
+            print("  deliberate reset, rebuild the ones with a command above --")
+            print("  but a store marked IMPOSSIBLE has no command, and no copy")
+            print("  in git. If it was not backed up outside git, it is lost.")
+        else:
+            print("  deliberate reset, rebuild it with the command above; if it")
+            print("  was an accident, that is what this gate exists to surface.")
         print()
         print("  Exiting 0 DELIBERATELY: a build status cannot tell 'deleted")
         print("  here' from 'never existed here' without reading the checkout,")

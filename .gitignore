@@ -52,6 +52,23 @@ data/collect_cursor.json
 # OBSERVED event memory, because those raw articles live only on the machine
 # that collected them. That machine needs a backup that is not git.
 data/raw/newsapi_news/
+data/raw/finnhub_news/
+#
+# NAMED PER PROVIDER, and that is a known hazard. This rule said only
+# `newsapi_news/` because NewsAPI was the only news provider when it was
+# written. Switching to Finnhub produced `data/raw/finnhub_news/` as UNTRACKED
+# and therefore committable: MEASURED at 14 MB for 2026-10-05 alone, which
+# matches the ~15.7 MB/day above and would have put the repo on ~5 GB/year,
+# irreversibly, since git never forgets.
+#
+# Caught before the first commit of it. ADDING A NEWS PROVIDER MEANS ADDING ITS
+# DIRECTORY HERE. A glob such as `data/raw/*news*/` would cover the next one
+# automatically, but it would also silently swallow a future non-bulky store
+# whose name happens to contain "news" -- and the W6 default is that raw
+# records TRAVEL with the repo. An omission here costs disk; an over-broad
+# glob costs reproducibility, silently. So the explicit list stays, and
+# `scripts/check_irreplaceable_stores.py` now WATCHES data/raw/finnhub_news --
+# it is the only store there with no rebuild path, so losing it is permanent.
 
 # NOT ignored (tracked on purpose): the rest of data/raw/ is the W6
 # append-only provenance ledger and data/feature_registry.jsonl is the M1
