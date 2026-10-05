@@ -19,6 +19,11 @@ from datetime import datetime
 from unittest.mock import patch
 
 from core import config as core_config
+from core.config import (
+    FINNHUB_API_KEY_ENV,
+    FINNHUB_SOURCE_ID,
+    NEWS_PROVIDER_API_KEY_ENV,
+)
 from core.news_adapter import (
     NEWS_SOURCE_ID,
     _normalize_provider_payload,
@@ -39,7 +44,19 @@ from core.orchestrator import orchestrate_score
 from core.score_engine import _ensemble_blend, build_score
 
 AS_OF = "2024-01-05 12:00:00"
-KEY_ENV = {"NEWS_PROVIDER_API_KEY": "test-key"}
+# THE NEWSAPI PATH, WITH FINNHUB EXPLICITLY ABSENT.
+#
+# These tests patch `fetch_provider_articles` -- the NewsAPI fetcher -- so they
+# must guarantee NewsAPI is the provider that answers. Finnhub now LEADS
+# NEWS_PROVIDER_ORDER, and `patch.dict` only ADDS keys: a real FINNHUB_API_KEY
+# in the developer's environment therefore leaked in, Finnhub answered first,
+# and the mock was bypassed. CAUGHT the day a Finnhub key was configured --
+# these passed in CI (no keys) and failed on a working machine, which is the
+# checkout-dependence class this project has hit six times.
+#
+# Setting it EMPTY rather than omitting it is the whole fix: absent means
+# "inherit whatever the machine has".
+KEY_ENV = {"NEWS_PROVIDER_API_KEY": "test-key", "FINNHUB_API_KEY": ""}
 
 
 def _record(rid="u1", published="2024-01-05 10:00:00", headline="TEST beats earnings expectations",
@@ -511,20 +528,66 @@ class ScoreEngineIntegrationTests(unittest.TestCase):
 
 
 class RawLedgerTests(unittest.TestCase):
-    def test_provider_fetch_appends_raw_records_before_use(self):
+    """The ledger records WHICH provider answered, and writes nothing on no key.
+
+    Both tests used to read the REAL environment rather than controlling it, so
+    they passed in CI (no keys) and failed the moment a FINNHUB_API_KEY existed
+    on the machine -- the checkout-dependence class this project has hit six
+    times. They now set every provider key explicitly.
+    """
+
+    NO_KEYS = {FINNHUB_API_KEY_ENV: "", NEWS_PROVIDER_API_KEY_ENV: ""}
+
+    def test_the_ledger_records_whichever_provider_answered(self):
+        """The PROPERTY, not one provider's name.
+
+        The first version patched `fetch_provider_articles` and asserted
+        `newsapi_news`. Once Finnhub led NEWS_PROVIDER_ORDER it answered first,
+        the mock was bypassed, and the assertion caught a real and CORRECT
+        behaviour change: a record is filed under the provider that supplied it,
+        which is what makes the store evidence of provenance rather than a pile.
+        """
         records = [_record(rid="r1")]
-        with patch.dict(os.environ, KEY_ENV), \
+
+        # Finnhub answers.
+        with patch.dict(os.environ, {FINNHUB_API_KEY_ENV: "k",
+                                     NEWS_PROVIDER_API_KEY_ENV: "n"}), \
                 patch("core.news_adapter.append_raw_records") as append_mock, \
-                patch("core.news_adapter.fetch_provider_articles",
-                      return_value={"status": "ok", "records": records, "reason": ""}):
+                patch("core.finnhub_news.fetch_company_news",
+                      return_value={"status": "ok", "records": records,
+                                    "reason": ""}):
             build_news_snapshot("TEST", AS_OF)
         append_mock.assert_called_once()
-        self.assertEqual(append_mock.call_args.kwargs["source_id"], NEWS_SOURCE_ID)
-        self.assertEqual(append_mock.call_args.kwargs["request_key"], "TEST_2024-01-05")
+        self.assertEqual(
+            append_mock.call_args.kwargs["source_id"], FINNHUB_SOURCE_ID
+        )
+        self.assertEqual(
+            append_mock.call_args.kwargs["request_key"], "TEST_2024-01-05"
+        )
         self.assertEqual(append_mock.call_args.kwargs["records"], records)
 
+        # Finnhub refuses, NewsAPI covers: the id must follow.
+        with patch.dict(os.environ, {FINNHUB_API_KEY_ENV: "k",
+                                     NEWS_PROVIDER_API_KEY_ENV: "n"}), \
+                patch("core.news_adapter.append_raw_records") as append_mock, \
+                patch("core.finnhub_news.fetch_company_news",
+                      return_value={"status": "provider_request_failed",
+                                    "records": [], "reason": "not covered"}), \
+                patch("core.news_adapter.fetch_provider_articles",
+                      return_value={"status": "ok", "records": records,
+                                    "reason": ""}):
+            build_news_snapshot("TEST", AS_OF)
+        append_mock.assert_called_once()
+        self.assertEqual(
+            append_mock.call_args.kwargs["source_id"], NEWS_SOURCE_ID
+        )
+
     def test_no_key_path_never_touches_the_raw_ledger(self):
-        with patch("core.news_adapter.append_raw_records") as append_mock:
+        # EVERY provider key is cleared. Without this the test performed a REAL
+        # fetch on a configured machine, so the "no key path" it names was never
+        # exercised -- it passed for the wrong reason in CI and failed here.
+        with patch.dict(os.environ, self.NO_KEYS), \
+                patch("core.news_adapter.append_raw_records") as append_mock:
             build_news_snapshot("MSFT", "2024-01-02")
         append_mock.assert_not_called()
 

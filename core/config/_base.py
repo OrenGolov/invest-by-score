@@ -404,6 +404,10 @@ FINNHUB_PROVIDER_NAME = "Finnhub"
 FINNHUB_NEWS_URL = "https://finnhub.io/api/v1/company-news"
 FINNHUB_API_KEY_ENV = "FINNHUB_API_KEY"
 
+# The documented free-tier rate limit, declared so the collector's throttle can
+# be validated against it rather than against a number in a comment.
+FINNHUB_RATE_LIMIT_PER_MINUTE = 60
+
 # The cap per ticker per fetch. Matched to NEWS_MAX_ARTICLES so swapping the
 # provider cannot quietly change how much evidence a decision rests on -- the
 # aggregation and contradiction thresholds downstream were measured against that

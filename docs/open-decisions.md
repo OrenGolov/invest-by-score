@@ -323,6 +323,32 @@ being CLEANER than recorded. Progress must never fail a build.
    interpreter, the OS or the tool version, none of which the repository pins for
    a developer's machine.
 
+7. **A test must set every credential it depends on, including the ones it
+   expects to be ABSENT.** The seventh instance, 2026-10-05, and it INVERTS the
+   six before it: those failed in CI because local data was present, this failed
+   LOCALLY because a credential was present and CI had none.
+
+   MEASURED: configuring a real `FINNHUB_API_KEY` turned 12 passing tests red on
+   the operator's machine while CI stayed green. Three distinct faults, one
+   cause:
+
+   - `test_no_key_path_never_touches_the_raw_ledger` patched nothing, so with a
+     key present it performed a REAL provider fetch and the "no key path" it
+     names was never exercised at all.
+   - `KEY_ENV` set only `NEWS_PROVIDER_API_KEY`. `patch.dict` ADDS keys rather
+     than replacing the mapping, so the machine's Finnhub key leaked in, Finnhub
+     answered first, and eight tests patching the NewsAPI fetcher had their mock
+     silently bypassed.
+   - One assertion hard-coded `newsapi_news` as the ledger's source id. That one
+     was CORRECT to fail: records are now filed under whichever provider
+     answered, which is the point of recording provenance. It was restated to
+     pin the property and assert both branches.
+
+   The rule that covers all three: **setting a variable EMPTY is different from
+   omitting it.** Omitting means "inherit whatever this machine has", which is
+   exactly what a test must never do. Any test that cares which provider answers
+   must pin every provider in the order, present and absent alike.
+
 ## 7. Collection cadence — MEASURED in E1/E2, still an operator decision
 
 **Raised:** Sprint L (2026-09). **Owner:** operator.

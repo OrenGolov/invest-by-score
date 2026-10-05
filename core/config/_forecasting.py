@@ -792,7 +792,18 @@ COLLECT_PERISHABLE_SOURCES: tuple[str, ...] = ("news", "events")
 
 # Seconds between provider calls. Providers rate-limit, and a run that gets
 # throttled halfway captures half a day.
-COLLECT_THROTTLE_SECONDS = 0.2
+#
+# RAISED from 0.2 to 1.1 when COLLECT_NEWS_BATCH_SIZE went to 75. The two are
+# one decision: Finnhub allows 60 calls per MINUTE, and at 0.2s a 75-ticker
+# sweep issues 300/min -- five times the limit, so it would truncate on 429
+# partway through and trade a KNOWN rotation for an unpredictable one.
+#
+#     75 tickers x 1.1s = 82.5s  ->  ~55 calls/min, under 60 with room
+#
+# 1.1 rather than 1.0 because the limit is enforced on a rolling window and the
+# request itself takes non-zero time; a rate computed to land exactly on the
+# boundary lands over it whenever the network is fast.
+COLLECT_THROTTLE_SECONDS = 1.1
 
 # A ceiling per run so one invocation cannot hang for hours on a large
 # universe. 200 comfortably covers the current 77-ticker portfolio.
@@ -853,10 +864,21 @@ COLLECT_NEWS_SKIP_SECTORLESS = True
 # so tracking them adds evidence without weakening any claim built on it.
 COLLECT_NEWS_TRACK_ANYWAY: tuple[str, ...] = ("SOXX", "CIBR")
 
-# Tickers per news run. MEASURED against the 100/day ceiling: 40 covers all 73
-# sector-mapped holdings in two runs and leaves 60 calls spare for retries and
-# ad-hoc work -- the margin whose absence produced today's 429.
-COLLECT_NEWS_BATCH_SIZE = 40
+# Tickers per news run. RAISED from 40 to 75 once Finnhub became the leading
+# provider, because the cap was a NewsAPI artifact.
+#
+# MEASURED: NewsAPI's free tier allows 100 requests/DAY, so 40 covered the 73
+# sector-mapped holdings in two runs and left a margin for ad-hoc work. Finnhub
+# allows 60 calls per MINUTE -- the daily ceiling is gone, and rotating cost
+# coverage for nothing: half the portfolio was dark on any given day, and the
+# alert run can only grade what was captured.
+#
+# THIS CONSTANT CANNOT MOVE ALONE. See COLLECT_THROTTLE_SECONDS below: at the
+# previous 0.2s throttle a 75-ticker run would issue 300 calls/min, five times
+# Finnhub's limit, and truncate on 429 partway through -- trading a known
+# rotation for an unpredictable one, which is strictly worse. The two are
+# validated against each other.
+COLLECT_NEWS_BATCH_SIZE = 75
 
 # Where the rotation cursor lives, so consecutive runs advance rather than
 # re-fetching the same head of the list. MEASURED: a sequential cursor covers
@@ -894,6 +916,24 @@ def _validate_collect_config() -> None:
         )
     if COLLECT_THROTTLE_SECONDS < 0:
         raise ValueError("the throttle must not be negative")
+    # THE BATCH AND THE THROTTLE ARE ONE DECISION, so they are validated against
+    # each other rather than separately.
+    #
+    # Finnhub's free tier allows 60 calls per MINUTE. A batch raised without
+    # slowing the throttle issues them faster than that and truncates on 429
+    # partway through the sweep -- which trades a KNOWN rotation for an
+    # unpredictable one, strictly worse than the rotation it replaced. MEASURED:
+    # 75 tickers at the former 0.2s throttle is 300 calls/min, five times over.
+    if COLLECT_THROTTLE_SECONDS > 0:
+        calls_per_minute = 60.0 / COLLECT_THROTTLE_SECONDS
+        if calls_per_minute > FINNHUB_RATE_LIMIT_PER_MINUTE:
+            raise ValueError(
+                f"a {COLLECT_THROTTLE_SECONDS}s throttle issues "
+                f"{calls_per_minute:.0f} calls/min against Finnhub's "
+                f"{FINNHUB_RATE_LIMIT_PER_MINUTE}/min limit; a sweep at this "
+                f"rate truncates on 429 partway through, which is worse than "
+                f"the rotation it replaced"
+            )
     if COLLECT_MAX_TICKERS_PER_RUN < 1:
         raise ValueError("a run must cover at least one ticker")
     if COLLECT_COVERAGE_WINDOW_BUSINESS_DAYS < 1:
