@@ -387,19 +387,78 @@ class QuotaAwareNewsTests(unittest.TestCase):
             }
         self.assertEqual(covered, set(eligible))
 
-    def test_the_cursor_advances_between_runs(self):
+    def test_consecutive_runs_between_them_cover_every_eligible_ticker(self):
+        """The property rotation EXISTS for, which survives a batch-size change.
+
+        The first version asserted the cursor ADVANCES, true only while the
+        batch (40) was smaller than the eligible universe (75). At full coverage
+        `news_batch` returns everything with cursor 0 and rotation is bypassed --
+        correctly, because there is nothing left to rotate to. That assertion
+        encoded the mechanism rather than its purpose.
+        """
+        from fetch_data import PORTFOLIO_TICKERS
+
+        tickers = list(PORTFOLIO_TICKERS)
         with tempfile.TemporaryDirectory() as folder:
             cursor = Path(folder) / "cursor.json"
-            with patch.object(daily_collect, "COLLECT_NEWS_CURSOR_PATH", str(cursor)),                     patch.object(daily_collect, "REPO_ROOT", Path(folder)):
-                from fetch_data import PORTFOLIO_TICKERS
+            with patch.object(
+                daily_collect, "COLLECT_NEWS_CURSOR_PATH", str(cursor)
+            ), patch.object(daily_collect, "REPO_ROOT", Path(folder)):
+                seen: set[str] = set()
+                eligible_count = None
+                for _ in range(4):
+                    batch, skipped, start = news_batch(tickers)
+                    seen.update(batch)
+                    eligible_count = len(tickers) - len(skipped)
+                    daily_collect._advance_cursor(eligible_count, start)
 
-                first, skipped, start = news_batch(list(PORTFOLIO_TICKERS))
-                daily_collect._advance_cursor(
-                    len(PORTFOLIO_TICKERS) - len(skipped), start
-                )
-                second, _s, second_start = news_batch(list(PORTFOLIO_TICKERS))
-            self.assertNotEqual(start, second_start)
-            self.assertNotEqual(first, second)
+        self.assertEqual(
+            len(seen),
+            eligible_count,
+            "four runs must between them reach every eligible ticker, however "
+            "the batch size is set",
+        )
+
+    def test_full_coverage_does_not_advance_the_cursor(self):
+        # A cursor that advanced when one run already covers everything would
+        # SKIP tickers on the next run -- the opposite of the bug rotation was
+        # built to prevent.
+        from fetch_data import PORTFOLIO_TICKERS
+
+        tickers = list(PORTFOLIO_TICKERS)
+        with tempfile.TemporaryDirectory() as folder:
+            cursor = Path(folder) / "cursor.json"
+            with patch.object(
+                daily_collect, "COLLECT_NEWS_CURSOR_PATH", str(cursor)
+            ), patch.object(daily_collect, "REPO_ROOT", Path(folder)), \
+                    patch.object(daily_collect, "COLLECT_NEWS_BATCH_SIZE", 1000):
+                first, skipped, start = news_batch(tickers)
+                daily_collect._advance_cursor(len(tickers) - len(skipped), start)
+                second, _s, second_start = news_batch(tickers)
+
+        self.assertEqual(start, 0)
+        self.assertEqual(second_start, 0)
+        self.assertEqual(first, second)
+
+    def test_a_partial_batch_still_advances_the_cursor(self):
+        # The original property, pinned to an explicit small batch rather than
+        # to whatever the live config happens to be. Without this, every run
+        # re-fetches the same head of the list and the tail is never seen.
+        from fetch_data import PORTFOLIO_TICKERS
+
+        tickers = list(PORTFOLIO_TICKERS)
+        with tempfile.TemporaryDirectory() as folder:
+            cursor = Path(folder) / "cursor.json"
+            with patch.object(
+                daily_collect, "COLLECT_NEWS_CURSOR_PATH", str(cursor)
+            ), patch.object(daily_collect, "REPO_ROOT", Path(folder)), \
+                    patch.object(daily_collect, "COLLECT_NEWS_BATCH_SIZE", 10):
+                first, skipped, start = news_batch(tickers)
+                daily_collect._advance_cursor(len(tickers) - len(skipped), start)
+                second, _s, second_start = news_batch(tickers)
+
+        self.assertNotEqual(start, second_start)
+        self.assertNotEqual(first, second)
 
     def test_an_unreadable_cursor_starts_at_the_head(self):
         with tempfile.TemporaryDirectory() as folder:
