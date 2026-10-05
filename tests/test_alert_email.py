@@ -24,6 +24,8 @@ from unittest import mock
 
 from core.alert_email import (
     MARK_IMMEDIATE,
+    normalise_app_password,
+    password_problems,
     MARK_MONITORING,
     AlertEmailError,
     build_digest,
@@ -261,6 +263,98 @@ class HtmlBodyTests(unittest.TestCase):
         self.assertEqual(colour_of(None), "grey")
 
 
+class TheAppPasswordIsValidatedTests(unittest.TestCase):
+    """PORTED from the `alert-delivery` branch, which measured both of these.
+
+    Gmail DISPLAYS the credential as "abcd efgh ijkl mnop" and the value is
+    those 16 characters without the spaces, so copying what the page shows is
+    the single most likely setup error -- and it is silently correctable.
+
+    A length-only check is too weak: that branch's own smoke test found
+    "my-real-password" is exactly 16 characters and sailed through, then failed
+    at the server as an auth error whose text explains nothing.
+    """
+
+    def test_the_display_spaces_gmail_shows_are_stripped(self):
+        self.assertEqual(
+            normalise_app_password("abcd efgh ijkl mnop"), "abcdefghijklmnop"
+        )
+
+    def test_a_trailing_newline_from_a_paste_is_stripped(self):
+        self.assertEqual(
+            normalise_app_password("abcdefghijklmnop" + chr(10)),
+            "abcdefghijklmnop",
+        )
+
+    def test_an_empty_password_normalises_to_empty(self):
+        for value in (None, "", "   "):
+            with self.subTest(value=value):
+                self.assertEqual(normalise_app_password(value), "")
+
+    def test_a_real_app_password_has_no_problems(self):
+        self.assertEqual(password_problems("abcd efgh ijkl mnop"), [])
+        self.assertEqual(password_problems("abcdefghijklmnop"), [])
+
+    def test_a_sixteen_character_account_password_is_refused(self):
+        # The exact string that defeated a length-only guard.
+        problems = password_problems("my-real-password")
+        self.assertTrue(problems)
+        self.assertIn("lowercase letters", problems[0])
+
+    def test_sixteen_digits_are_refused(self):
+        self.assertTrue(password_problems("1234567890123456"))
+
+    def test_an_uppercase_variant_is_refused(self):
+        self.assertTrue(password_problems("ABCDEFGHIJKLMNOP"))
+
+    def test_a_wrong_length_names_the_length(self):
+        problems = password_problems("tooshort")
+        self.assertIn("8 characters", problems[0])
+        self.assertIn("apppasswords", problems[0])
+
+    def test_an_unset_password_says_so(self):
+        self.assertIn("is not set", password_problems(None)[0])
+
+    def test_credentials_returns_the_stripped_password(self):
+        # Handing back the raw string would fail at the server for a reason the
+        # operator cannot see.
+        with mock.patch.dict(
+            os.environ,
+            {
+                ALERT_EMAIL_USER_ENV: "me@gmail.com",
+                ALERT_EMAIL_PASSWORD_ENV: "abcd efgh ijkl mnop",
+            },
+        ):
+            _, password, _, reason = credentials()
+        self.assertEqual(password, "abcdefghijklmnop")
+        self.assertEqual(reason, "credentials present")
+
+    def test_credentials_refuses_an_account_password_with_a_reason(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                ALERT_EMAIL_USER_ENV: "me@gmail.com",
+                ALERT_EMAIL_PASSWORD_ENV: "my-real-password",
+            },
+        ):
+            user, password, _, reason = credentials()
+        self.assertIsNone(user)
+        self.assertIsNone(password)
+        self.assertIn("lowercase letters", reason)
+
+    def test_a_refusal_never_echoes_the_password(self):
+        # The reason reaches logs and the run summary.
+        with mock.patch.dict(
+            os.environ,
+            {
+                ALERT_EMAIL_USER_ENV: "me@gmail.com",
+                ALERT_EMAIL_PASSWORD_ENV: "my-real-password",
+            },
+        ):
+            _, _, _, reason = credentials()
+        self.assertNotIn("my-real-password", reason)
+
+
 class RoutingTests(unittest.TestCase):
     def test_the_three_most_urgent_bands_are_immediate(self):
         for band in ("Urgent", "Very High", "High"):
@@ -365,7 +459,7 @@ class CredentialHandlingTests(unittest.TestCase):
             os.environ,
             {
                 ALERT_EMAIL_USER_ENV: "someone@example.com",
-                ALERT_EMAIL_PASSWORD_ENV: "sixteencharsecret",
+                ALERT_EMAIL_PASSWORD_ENV: "abcdefghijklmnop",
                 ALERT_EMAIL_TO_ENV: "someone@example.com",
             },
         ):
@@ -376,7 +470,7 @@ class CredentialHandlingTests(unittest.TestCase):
             )
             blob += digest.get_body(preferencelist=("plain",)).get_content()
             blob += digest.get_body(preferencelist=("html",)).get_content()
-        self.assertNotIn("sixteencharsecret", blob)
+        self.assertNotIn("abcdefghijklmnop", blob)
         self.assertNotIn("password", blob.lower())
 
     def test_a_missing_credential_degrades_rather_than_raising(self):
@@ -404,7 +498,7 @@ class CredentialHandlingTests(unittest.TestCase):
             os.environ,
             {
                 ALERT_EMAIL_USER_ENV: "me@example.com",
-                ALERT_EMAIL_PASSWORD_ENV: "secret",
+                ALERT_EMAIL_PASSWORD_ENV: "abcdefghijklmnop",
                 ALERT_EMAIL_TO_ENV: "",
             },
         ):
@@ -417,7 +511,7 @@ class CredentialHandlingTests(unittest.TestCase):
             os.environ,
             {
                 ALERT_EMAIL_USER_ENV: "me@example.com",
-                ALERT_EMAIL_PASSWORD_ENV: "secret",
+                ALERT_EMAIL_PASSWORD_ENV: "abcdefghijklmnop",
             },
         ):
             with mock.patch("smtplib.SMTP") as smtp:
@@ -436,7 +530,7 @@ class CredentialHandlingTests(unittest.TestCase):
             os.environ,
             {
                 ALERT_EMAIL_USER_ENV: "me@example.com",
-                ALERT_EMAIL_PASSWORD_ENV: "wrong",
+                ALERT_EMAIL_PASSWORD_ENV: "zyxwvutsrqponmlk",
             },
         ):
             with mock.patch("smtplib.SMTP") as smtp:
@@ -455,7 +549,7 @@ class CredentialHandlingTests(unittest.TestCase):
             os.environ,
             {
                 ALERT_EMAIL_USER_ENV: "me@example.com",
-                ALERT_EMAIL_PASSWORD_ENV: "secret",
+                ALERT_EMAIL_PASSWORD_ENV: "abcdefghijklmnop",
             },
         ):
             with mock.patch("smtplib.SMTP", side_effect=OSError("timed out")):
@@ -471,7 +565,7 @@ class CredentialHandlingTests(unittest.TestCase):
             os.environ,
             {
                 ALERT_EMAIL_USER_ENV: "me@example.com",
-                ALERT_EMAIL_PASSWORD_ENV: "secret",
+                ALERT_EMAIL_PASSWORD_ENV: "abcdefghijklmnop",
             },
         ):
             with mock.patch("smtplib.SMTP") as smtp:

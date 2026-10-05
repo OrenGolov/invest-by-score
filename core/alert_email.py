@@ -34,6 +34,7 @@ from __future__ import annotations
 import html
 import logging
 import os
+import re
 import smtplib
 from collections.abc import Mapping, Sequence
 from email.message import EmailMessage
@@ -46,6 +47,7 @@ from core.config import (
     ALERT_EMAIL_IMMEDIATE_PRIORITIES,
     ALERT_EMAIL_MAX_WIDTH_PX,
     ALERT_EMAIL_PASSWORD_ENV,
+    ALERT_EMAIL_PASSWORD_LENGTH,
     ALERT_EMAIL_PORT,
     ALERT_EMAIL_SUBJECT_TEMPLATE,
     ALERT_EMAIL_TO_ENV,
@@ -81,6 +83,52 @@ class AlertEmailError(ValueError):
     """Raised when a message cannot be built or addressed honestly."""
 
 
+def normalise_app_password(raw: str | None) -> str:
+    """Strip the display spaces from a Gmail app password.
+
+    PORTED from the `alert-delivery` branch. Gmail shows the credential as
+    "abcd efgh ijkl mnop"; the value is those 16 characters without the spaces.
+    ALL whitespace is removed, not just the three gaps, so a trailing newline
+    from a copy-paste is handled too.
+    """
+    if not raw:
+        return ""
+    return re.sub(r"\s+", "", raw)
+
+
+def password_problems(password: str | None) -> list[str]:
+    """What is wrong with this app password, in terms the operator can act on.
+
+    An empty list means PLAUSIBLE, never ACCEPTED -- only the server can say
+    that, which is why `send` still reports an authentication failure
+    separately.
+    """
+    problems: list[str] = []
+    cleaned = normalise_app_password(password)
+    if not cleaned:
+        problems.append(f"{ALERT_EMAIL_PASSWORD_ENV} is not set")
+        return problems
+    if len(cleaned) != ALERT_EMAIL_PASSWORD_LENGTH:
+        problems.append(
+            f"{ALERT_EMAIL_PASSWORD_ENV} is {len(cleaned)} characters, not "
+            f"{ALERT_EMAIL_PASSWORD_LENGTH} - Gmail refuses an ordinary account "
+            f"password for SMTP; generate an APP password at "
+            f"myaccount.google.com/apppasswords"
+        )
+    elif not cleaned.isascii() or not cleaned.isalpha() or not cleaned.islower():
+        # MEASURED on the source branch: "my-real-password" is exactly 16
+        # characters and passed a length-only guard. An app password is 16
+        # lowercase letters, so anything else means an account password.
+        problems.append(
+            f"{ALERT_EMAIL_PASSWORD_ENV} is "
+            f"{ALERT_EMAIL_PASSWORD_LENGTH} characters but not "
+            f"{ALERT_EMAIL_PASSWORD_LENGTH} lowercase letters - an app password "
+            f"looks like 'abcd efgh ijkl mnop'; this looks like an account "
+            f"password, which Gmail refuses for SMTP"
+        )
+    return problems
+
+
 def credentials() -> tuple[str | None, str | None, str | None, str]:
     """``(user, password, recipient, reason)`` read from the environment.
 
@@ -107,6 +155,14 @@ def credentials() -> tuple[str | None, str | None, str | None, str]:
             f"{', '.join(missing)} is not set, so email is disabled; every "
             f"alert is still recorded and visible in the Monitoring tab"
         )
+    # NORMALISE, then validate. The pasted value may carry Gmail's display
+    # spaces; the credential is the stripped one, and handing back the raw
+    # string would fail at the server for a reason the operator cannot see.
+    password = normalise_app_password(password)
+    faults = password_problems(password)
+    if faults:
+        return None, None, None, "; ".join(faults)
+
     return user, password, recipient, "credentials present"
 
 

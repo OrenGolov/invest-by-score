@@ -1134,6 +1134,23 @@ ALERT_EMAIL_CREDENTIAL_IN_CONFIG = False
 # credential degrades email and nothing else.
 ALERT_EMAIL_REQUIRED = False
 
+# WHAT A GMAIL APP PASSWORD LOOKS LIKE, so a setup error is caught before the
+# server rejects it with an unexplainable auth failure.
+#
+# PORTED from the `alert-delivery` branch with its measurement. Gmail DISPLAYS
+# the credential as "abcd efgh ijkl mnop" and the actual value is those 16
+# characters without the spaces -- copying what the page shows is the single most
+# likely setup error, and it is silently correctable.
+ALERT_EMAIL_PASSWORD_LENGTH = 16
+ALERT_EMAIL_STRIPS_PASSWORD_SPACES = True
+
+# A LENGTH CHECK ALONE IS TOO WEAK. MEASURED on that branch by its own smoke
+# test: "my-real-password" is exactly 16 characters and passed a length-only
+# guard. An app password is 16 LOWERCASE LETTERS, so a digit, capital or
+# punctuation mark means an ACCOUNT password was pasted -- which Gmail refuses
+# for SMTP.
+ALERT_EMAIL_PASSWORD_IS_LOWERCASE_LETTERS = True
+
 # The digest runs once, after the close, on the same schedule as collection.
 ALERT_DIGEST_HOUR_LOCAL = 22
 
@@ -1311,6 +1328,24 @@ def _validate_alert_delivery_config() -> None:
             "a missing email credential must not fail the run: the dashboard "
             "still receives every alert, so email degrades alone"
         )
+    if ALERT_EMAIL_PASSWORD_LENGTH != 16:
+        raise ValueError(
+            f"a Gmail app password is 16 characters, not "
+            f"{ALERT_EMAIL_PASSWORD_LENGTH}: a wrong length here rejects a "
+            f"valid credential before it is ever tried"
+        )
+    if not ALERT_EMAIL_STRIPS_PASSWORD_SPACES:
+        raise ValueError(
+            "the display spaces must be stripped: Gmail shows the credential as "
+            "'abcd efgh ijkl mnop' and copying what the page shows is the most "
+            "likely setup error there is"
+        )
+    if not ALERT_EMAIL_PASSWORD_IS_LOWERCASE_LETTERS:
+        raise ValueError(
+            "a length-only check is too weak: MEASURED, 'my-real-password' is "
+            "exactly 16 characters and passes one, then fails at the server as "
+            "an unexplainable auth error"
+        )
     if ALERT_EMAIL_MAX_WIDTH_PX > 640:
         raise ValueError(
             f"{ALERT_EMAIL_MAX_WIDTH_PX}px exceeds the width a phone mail "
@@ -1409,3 +1444,76 @@ def _validate_news_event_alert_config() -> None:
 
 
 _validate_news_event_alert_config()
+
+# PORTED from the `alert-delivery` branch, verbatim including its comments.
+# That branch MEASURED the failure this catches: 10 of 25 business days with
+# no collection record at all, and a 2026-09-27 -> 10-04 gap that lost seven
+# calendar days of news permanently, unnoticed. Rewriting the block would
+# discard the measurements behind each threshold, which are the parts that
+# cannot be re-derived from the code.
+#
+# It is complementary to A8/A9 rather than duplicative: those monitor the
+# MARKET, this monitors the COLLECTOR.
+
+# ---------------------------------------------------------------------------
+# COLLECTION MONITORING — notice when the collector stops
+# ---------------------------------------------------------------------------
+# MEASURED 2026-10-04, before the collector was scheduled: 10 of 25 business
+# days had no record at all, and the 2026-09-27 -> 2026-10-04 gap lost 7
+# calendar days of news permanently. check_data_coverage.py detects this, but
+# a CI gate runs only when somebody pushes — the wrong trigger for a job
+# whose failure mode is silence.
+COLLECTION_MONITOR_VERSION = "collection-monitor-v1"
+
+# Perishable loss is the alert that matters: news is gone after
+# NEWS_LOOKBACK_DAYS and the day never returns.
+COLLECTION_ALERT_ON_PERISHABLE_LOSS = True
+
+# QUOTA EXHAUSTION IS NOT AN ALERT, and this is the judgement most likely to
+# be questioned. MEASURED: the free tier is 100 requests/24h on a rolling
+# window and one full sweep of 75 eligible tickers costs 75, so a quota day
+# is the EXPECTED steady state rather than an incident. The rotation cursor
+# is deliberately not advanced on a 429, so the unvisited tickers are retried
+# next run. Alerting here would produce a daily notification the operator
+# cannot act on, and would bury the perishable-loss alert underneath it —
+# A7 measured that an unsuppressed channel emits 15.01 alerts per episode
+# and nobody reads the fifteenth.
+COLLECTION_ALERT_ON_QUOTA = False
+
+# How many BUSINESS days of no successful news capture before the collector
+# is presumed stopped. Two allows one missed run plus its retry; at three the
+# 7-day provider window is already eroding.
+#
+# Business days, not calendar: a Saturday with no collection is not a
+# failure, and a monitor that cannot tell a weekend from an outage reports an
+# outage every Monday.
+COLLECTION_MAX_SILENT_BUSINESS_DAYS = 2
+
+
+def _validate_collection_monitor_config() -> None:
+    if not COLLECTION_ALERT_ON_PERISHABLE_LOSS:
+        raise ValueError(
+            "perishable loss is the one collection failure that cannot be "
+            "repaired later: MEASURED, a 7-day gap in 2026-09 lost that "
+            "week's news permanently. Not alerting on it defeats the monitor"
+        )
+    if COLLECTION_ALERT_ON_QUOTA:
+        raise ValueError(
+            "a quota day is the expected steady state on a 100/day tier "
+            "(one sweep costs 75), so alerting on it emits a daily "
+            "notification nobody can act on and buries the losses that matter"
+        )
+    if COLLECTION_MAX_SILENT_BUSINESS_DAYS < 1:
+        raise ValueError(
+            "a threshold below 1 alerts on the first missed run, including "
+            "the quota retries that are expected to miss"
+        )
+    if COLLECTION_MAX_SILENT_BUSINESS_DAYS > 5:
+        raise ValueError(
+            f"{COLLECTION_MAX_SILENT_BUSINESS_DAYS} business days exceeds "
+            f"the {NEWS_LOOKBACK_DAYS}-day provider window, so the monitor "
+            f"would fire only after the recoverable news had already expired"
+        )
+
+
+_validate_collection_monitor_config()
