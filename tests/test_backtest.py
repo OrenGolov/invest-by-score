@@ -23,6 +23,7 @@ scoring path replays offline and deterministically. Coverage:
 from __future__ import annotations
 
 import math
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -32,6 +33,7 @@ from unittest.mock import patch
 import pandas as pd
 
 from core import config as core_config
+from core.config import FINNHUB_API_KEY_ENV, NEWS_PROVIDER_API_KEY_ENV
 from core.backtest import costs as bt_costs
 from core.backtest import metrics as bt_metrics
 from core.backtest.engine import (
@@ -375,6 +377,31 @@ class WalkForwardEngineTests(unittest.TestCase):
         cls.geometry_kwargs = dict(fold_sessions=50, embargo_sessions=_EMBARGO, holdout_sessions=40)
         cls._tmp = tempfile.TemporaryDirectory()
         cls.manifest_store = Path(cls._tmp.name) / "backtest_runs.jsonl"
+
+        # EVERY NEWS PROVIDER IS SILENCED FOR THIS FIXTURE.
+        #
+        # `run_walk_forward_backtest` replays the LIVE scoring path, and
+        # `build_score` fetches news. This class runs the backtest TWICE and
+        # asserts the two agree -- so with a working API key the first run can
+        # get real articles and the second a rate-limit refusal, feeding the
+        # engine DIFFERENT INPUTS and producing a 204,505-character diff that
+        # reads as a reproducibility defect but is not one.
+        #
+        # CAUGHT in a 23-minute full-suite run once a FINNHUB_API_KEY was
+        # configured. It passed in CI and on every prior local run because
+        # without a key BOTH runs received an identical UNAVAILABLE snapshot --
+        # green for the wrong reason.
+        #
+        # A determinism test must supply its own inputs. Letting an external
+        # service decide what the two runs see measures the service, not the
+        # engine. The live path is covered by the news tests, which control it
+        # deliberately.
+        cls._quiet_providers = patch.dict(
+            os.environ,
+            {FINNHUB_API_KEY_ENV: "", NEWS_PROVIDER_API_KEY_ENV: ""},
+        )
+        cls._quiet_providers.start()
+
         cls.default_run = run_walk_forward_backtest(
             "TEST", cls.frame, manifest_store_path=cls.manifest_store, **cls.geometry_kwargs
         )
@@ -394,6 +421,10 @@ class WalkForwardEngineTests(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
+        # The patch MUST be stopped. Leaving it running would silence the news
+        # providers for every test that follows in the same session -- the same
+        # class of cross-test interference this fixture exists to fix.
+        cls._quiet_providers.stop()
         cls._tmp.cleanup()
 
     def test_manifest_is_valid_and_complete(self):
