@@ -53,6 +53,35 @@ class TheRunnerNeverSpendsTheNewsQuotaTests(unittest.TestCase):
         # violation: two implementations of one measurement, free to drift.
         self.assertIn("enrich_captured_news", self.source)
 
+    def test_the_reader_walks_every_provider_in_the_order(self):
+        """CAUGHT ON THE FIRST RUN WITH A FINNHUB KEY.
+
+        The collector had just written 50 articles per ticker into
+        data/raw/finnhub_news/, and the runner reported "News Unavailable" for
+        those same tickers because this read only the NewsAPI store.
+
+        The failure mode is the dangerous kind: it does not look like a bug. The
+        alert carries a plausible NOT_EVALUATED reason, which reads as "the
+        provider could not be reached" rather than "I looked in the wrong
+        drawer" -- so every alert would have been blind for as long as Finnhub
+        was the active provider.
+        """
+        self.assertIn("NEWS_PROVIDER_ORDER", self.source)
+        self.assertIn("for source_id in NEWS_PROVIDER_ORDER", self.source)
+
+    def test_the_reader_does_not_hardcode_one_provider(self):
+        # A hardcoded store is how the reader fell behind the fetcher.
+        import re
+
+        body = self.source[
+            self.source.index("def _captured_news("):
+            self.source.index("def detect_news(")
+        ]
+        self.assertFalse(
+            re.search(r"load_raw_records\(\s*NEWS_SOURCE_ID", body),
+            "the ledger reader must not name a single provider",
+        )
+
     def test_an_uncaptured_ticker_is_not_reported_as_quiet(self):
         # The collector rotates 40 of 75 eligible tickers per run, so "not
         # captured today" means "not looked at". Reporting NO_EVENT would claim

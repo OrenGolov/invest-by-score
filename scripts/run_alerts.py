@@ -221,10 +221,25 @@ def _captured_news(ticker: str, as_of: str) -> dict | None:
     the same as "no news": the collector rotates 40 of 75 eligible tickers per
     run.
     """
-    from core.news_adapter import NEWS_SOURCE_ID
+    from core.config import NEWS_PROVIDER_ORDER
     from core.raw_store import load_raw_records
 
-    entries = load_raw_records(NEWS_SOURCE_ID, f"{ticker}_{as_of}")
+    # EVERY PROVIDER IN THE ORDER, not just NewsAPI.
+    #
+    # CAUGHT ON THE FIRST RUN WITH A FINNHUB KEY: the collector had just written
+    # 50 articles per ticker into data/raw/finnhub_news/, and the runner reported
+    # "News Unavailable" for those same tickers because this read only the
+    # NewsAPI store. It does not look like a bug -- the alert carries a plausible
+    # NOT_EVALUATED reason -- so every alert would have been blind for as long as
+    # Finnhub was the active provider.
+    #
+    # Walking the same list the fetch dispatcher walks means adding a provider
+    # cannot leave the reader behind again. Records from several providers on one
+    # day are MERGED rather than first-wins: both captured genuine evidence, and
+    # the per-article dedup below collapses anything they share.
+    entries: list[dict] = []
+    for source_id in NEWS_PROVIDER_ORDER:
+        entries.extend(load_raw_records(source_id, f"{ticker}_{as_of}"))
     if not entries:
         return None
 
