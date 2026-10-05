@@ -379,6 +379,45 @@ being CLEANER than recorded. Progress must never fail a build.
    no-key `UNAVAILABLE` contract, which production actually takes, instead of an
    exception path from inside `urllib` that it never does.
 
+9. **A boolean derived from a collection must say WHICH collection state it
+   means, and be tested at the combination production actually produces.**
+   Found by reading a PASSING run's own report.
+
+   The 2026-10-05 record carried `"news_blocked": true` beside `events: OK` and
+   603 memories written -- a claim its own neighbouring numbers contradict.
+   `news_unavailable` is a LIST OF TICKERS, and the flag was:
+
+   ```python
+   "news_blocked": unavailable > 0      # true if ANY ticker lacks news
+   ```
+
+   Nine of 1,116 tickers lacked news that day, and at least one of 75 always
+   does. Its only consumer reads it as "blocked upstream, not this stage's
+   fault" and returns SKIPPED instead of FAILED -- so a TOTAL events-stage
+   outage reported as a skip, every day, and that branch could never return
+   FAILED again. The exit code it feeds drives the scheduler.
+
+   **Why two tests existed and neither caught it.** Both avoided the only input
+   where the flag changes the answer:
+
+   * the SKIPPED case passed `attempted: 0`, which the function's own early
+     return already answers -- it would pass with the flag deleted;
+   * the FAILED case passed `news_blocked: False`, never exercising the true
+     branch.
+
+   Uncovered was `attempted > 0` WITH the flag true: the combination every real
+   run produced. **Coverage of a flag's two values is not coverage of the
+   decision it participates in**; what must be enumerated is the cross-product
+   with the other inputs the consumer reads.
+
+   `collect_events`, which computed the flag, had no test at all -- so the
+   consumer test alone would still have passed with the computation wrong. Both
+   layers are now pinned, and each was sabotage-verified to fail independently.
+
+   ANY/ALL is the general trap: `len(xs) > 0` answers "any", while a name like
+   `blocked`, `failed` or `exhausted` promises "all". When they differ, the
+   partial case is the one that happens daily.
+
 ## 7. Collection cadence — MEASURED in E1/E2, still an operator decision
 
 **Raised:** Sprint L (2026-09). **Owner:** operator.

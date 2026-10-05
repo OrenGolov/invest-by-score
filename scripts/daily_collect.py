@@ -298,18 +298,26 @@ def collect_events(tickers, as_of: str, dry_run: bool) -> dict:
     # collect_news owns it.
     batch, _skipped, _start = news_batch(tickers)
     report = forward(batch, as_of, False, None)
+
+    # `news_unavailable` is a LIST OF TICKERS, not a boolean. Treating any
+    # non-empty list as "blocked" made the flag true whenever ONE ticker of
+    # 1,116 lacked news -- nine did on 2026-10-05, beside `events: OK` and 603
+    # memories written. Blocked means NO ticker yielded readable news.
     unavailable = len(report.get("news_unavailable") or [])
+    considered = int(report.get("considered", 0) or 0)
+    blocked = considered == 0 and unavailable > 0
     return {
-        # `attempted` counts what this source COULD act on. When news is
-        # unavailable there are no events to study, so nothing was attempted —
-        # but the day is still lost, which `news_blocked` records. Reporting
-        # it as a failure of THIS source would blame the wrong stage; the
-        # aggregate already fails on news, and one lost day should not be
-        # counted twice.
+        # `attempted` counts what this source COULD act on: the tickers whose
+        # news was readable. When news is unavailable EVERYWHERE this is 0 and
+        # `news_blocked` is true, so the day reads as upstream-blocked rather
+        # than as this stage failing — the aggregate already fails on news, and
+        # one lost day must not be counted twice. When SOME tickers had news,
+        # `attempted` is non-zero and the day was not lost; writing nothing
+        # against readable news is this stage's own failure.
         "attempted": report.get("considered", 0),
         "written": report.get("written", 0),
         "news_unavailable": unavailable,
-        "news_blocked": unavailable > 0,
+        "news_blocked": blocked,
     }
 
 
@@ -335,9 +343,15 @@ def _source_status(source: str, result: dict) -> str:
     if source == "events":
         if result.get("written"):
             return STATUS_OK
-        # Blocked upstream is not a failure HERE. News already reports the
-        # lost day; double-counting it would make the aggregate look worse
-        # than the evidence supports and hide which stage actually broke.
+        # Blocked upstream is not a failure HERE: news already reports the lost
+        # day, and double-counting it would hide which stage actually broke.
+        #
+        # But `news_blocked` must mean NO news anywhere. It previously meant
+        # "at least one ticker lacked news", which is true every day, so this
+        # branch returned SKIPPED for a TOTAL events outage and could never
+        # return FAILED again. A partial shortfall says nothing about the
+        # tickers that DID have news -- if those produced no memories, that is
+        # this stage failing.
         return STATUS_SKIPPED if result.get("news_blocked") else STATUS_FAILED
     if source == "macro":
         return STATUS_OK if result.get("ok") else STATUS_FAILED

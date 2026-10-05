@@ -123,6 +123,36 @@ class SourceStatusTests(unittest.TestCase):
             STATUS_SKIPPED,
         )
 
+    def test_a_partial_news_shortfall_does_not_excuse_an_events_outage(self):
+        """The case that occurred on EVERY real run and no test covered.
+
+        `news_blocked` was once `len(news_unavailable) > 0` -- true whenever a
+        single ticker of 1,116 lacked news, which nine did on 2026-10-05. This
+        branch then returned SKIPPED for a TOTAL events outage, so it could
+        never return FAILED again, and the exit code it feeds drives the
+        scheduler.
+
+        The two cases above both miss it: one passes `attempted: 0` (already
+        answered by the early return, so it would pass with the flag deleted),
+        the other passes `news_blocked: False`. Neither exercises
+        `attempted > 0` with the flag true.
+
+        A shortfall on SOME tickers says nothing about the ones that DID have
+        news. If those produced no memories, this stage failed.
+        """
+        self.assertEqual(
+            _source_status(
+                "events",
+                {
+                    "attempted": 1116,
+                    "written": 0,
+                    "news_unavailable": 9,
+                    "news_blocked": False,
+                },
+            ),
+            STATUS_FAILED,
+        )
+
     def test_events_failing_on_its_own_is_failed(self):
         self.assertEqual(
             _source_status(
@@ -130,6 +160,55 @@ class SourceStatusTests(unittest.TestCase):
             ),
             STATUS_FAILED,
         )
+
+
+class EventsFlagTests(unittest.TestCase):
+    """`news_blocked` must describe the run it is attached to.
+
+    The consumer test above asserts `_source_status` behaves GIVEN a correct
+    flag. It would still pass if this computation were wrong -- which is the
+    defect that shipped, because `collect_events` had no test of its own.
+
+    `forward` is stubbed: the real one fetches news for over a thousand
+    tickers. What is under test is the arithmetic turning its report into the
+    flag, which is pure.
+    """
+
+    def _collect(self, report: dict) -> dict:
+        # `collect_events` does `sys.path.insert` and then
+        # `from build_event_memory import forward` INSIDE the function. The
+        # path must be inserted here for the module to be importable at all,
+        # and the attribute patched BEFORE the call, so the function's own
+        # `from ... import` binds the stub rather than the real fetcher.
+        sys.path.insert(0, str(daily_collect.REPO_ROOT / "scripts"))
+        import build_event_memory
+
+        with patch.object(daily_collect, "news_batch", lambda t: (list(t), [], 0)),                 patch.object(build_event_memory, "forward", lambda *a, **k: report):
+            return daily_collect.collect_events(["AAPL"], "2026-10-05", False)
+
+    def test_a_partial_shortfall_is_not_blocked(self):
+        # THE REAL 2026-10-05 RUN: 9 tickers of 1,116 had no readable news,
+        # 603 memories written, `events: OK`. The old flag called this
+        # "blocked", which the same record's own numbers contradict.
+        result = self._collect(
+            {"considered": 1116, "written": 603, "news_unavailable": ["A"] * 9}
+        )
+        self.assertFalse(result["news_blocked"])
+        self.assertEqual(result["news_unavailable"], 9)
+
+    def test_no_news_anywhere_is_blocked(self):
+        result = self._collect(
+            {"considered": 0, "written": 0, "news_unavailable": ["A", "B"]}
+        )
+        self.assertTrue(result["news_blocked"])
+
+    def test_a_quiet_day_with_news_is_not_blocked(self):
+        # News was readable everywhere and simply carried no events. Nothing
+        # was blocked, so the flag must not claim it was.
+        result = self._collect(
+            {"considered": 75, "written": 0, "news_unavailable": []}
+        )
+        self.assertFalse(result["news_blocked"])
 
 
 class RunVerdictTests(unittest.TestCase):
