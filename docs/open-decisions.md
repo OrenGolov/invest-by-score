@@ -349,6 +349,36 @@ being CLEANER than recorded. Progress must never fail a build.
    exactly what a test must never do. Any test that cares which provider answers
    must pin every provider in the order, present and absent alike.
 
+8. **A test suite must not reach a live provider, and the guard must be
+   SESSION-scoped.** The eighth instance, same day as the seventh, and the one
+   with the largest measured cost.
+
+   MEASURED: a configured `FINNHUB_API_KEY` turned the suite from ~6 minutes into
+   **23 minutes** and produced one failure that looked like a reproducibility
+   defect. `test_identical_inputs_rerun_to_identical_results` runs the backtest
+   twice and asserts they agree; the backtest replays the live scoring path, so
+   run one got real articles and run two hit a rate limit. The engine faithfully
+   produced different outputs from different inputs — a 204,505-character diff
+   with nothing wrong in the engine.
+
+   ```
+   tests/test_backtest.py    >580s unfinished  ->   44s
+   tests/test_training.py          580s        ->   30s
+   whole suite              23m + 1 failure    ->  2m36s, 3947 pass
+   ```
+
+   **The scope is the lesson.** A function-scoped autouse fixture runs AFTER
+   `setUpClass`, and `tests/_dataset_fixture.shared_dataset` builds a dataset in
+   exactly that hook — reaching the network before any per-test fixture exists.
+   The first guard was running and had no effect; only adding a session-scoped
+   one moved the number. **A guard that installs after the work it guards is
+   indistinguishable from no guard**, and the only way to tell is to measure
+   before and after rather than to read the code.
+
+   Keys are CLEARED rather than sockets blocked: that exercises the system's own
+   no-key `UNAVAILABLE` contract, which production actually takes, instead of an
+   exception path from inside `urllib` that it never does.
+
 ## 7. Collection cadence — MEASURED in E1/E2, still an operator decision
 
 **Raised:** Sprint L (2026-09). **Owner:** operator.
