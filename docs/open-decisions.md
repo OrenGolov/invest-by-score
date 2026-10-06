@@ -1133,6 +1133,47 @@ a refusal rather than a weak claim dressed as a strong one.
 Section 28's warning applies directly — a number inside the noise band, reported
 without the band, is worse than no number.
 
+## 30. Fundamentals vary ACROSS tickers, not across TIME — OPEN
+
+**Raised:** 2026-10-06. **Owner:** unassigned.
+
+`TRAINING_INCLUDE_FUNDAMENTAL_FEATURES` was turned on once three of the five
+features carried real cross-sectional variance (NVDA margin 6.37, KO 2.86,
+AAPL 2.76). The features route: an NVDA dataset went from 17 to 22 columns.
+
+**But the dataset reports all five as ZERO-VARIANCE**, and that is not the
+mapping bug returning — it is a different axis:
+
+```
+CROSS-SECTIONAL (NVDA vs KO vs AAPL)      real, 3 distinct vectors
+TIME-SERIES     (NVDA over 600 days)      zero — one snapshot, reused per row
+```
+
+`scripts/train.py` builds a SINGLE-TICKER dataset, so its only axis is time,
+and one company's fundamentals are constant down it. Five constant columns
+dilute the fit and inflate the feature count — exactly what the flag was off to
+prevent, now happening for a different reason.
+
+**So fundamentals can only contribute where the variance is**: a multi-ticker
+dataset. `scripts/establish_baseline.py` builds one (12 tickers);
+`scripts/train.py` does not.
+
+**NOT YET VERIFIED, and the reason is worth recording.** The multi-ticker check
+could not be completed on 2026-10-06: Alpha Vantage's free tier is **25
+requests per day** (the provider says so explicitly once exhausted), and the
+day's allowance was spent proving the field-mapping fix. A 5-ticker dataset
+needs 5 more. The measurement is a tomorrow job, not a conclusion.
+
+**What would settle it:** build a multi-ticker dataset on a fresh quota and
+read `feature_routing["zero_variance"]`. If the five drop off that list, the
+flag is doing what it was turned on to do. If they do not, fundamentals should
+go back off for single-ticker runs specifically, rather than globally.
+
+**Related constraint:** at 25 requests/day against 77 tickers, a full
+fundamentals sweep takes 4 days. Vintage capture is therefore partial by
+construction on the free tier — not a fault, but it bounds how quickly a
+fundamentals hypothesis can be tested at all.
+
 ## Closed
 
 - ~~**Live runs must use today's chart state.**~~ Fixed in `ad75f48`. The
