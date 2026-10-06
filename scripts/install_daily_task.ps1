@@ -99,6 +99,23 @@ powercfg /setactive SCHEME_CURRENT | Out-Null
 Write-Host "Wake timers enabled on AC and battery (powercfg RTCWAKE = 1)"
 Write-Host ""
 
+# WHAT IS PROVEN AND WHAT IS NOT, because the difference matters here.
+#
+# A one-off probe task (WakeToRun=True, 3 minutes out) fired at 19:31:11 for a
+# 19:31:10 schedule, result=0. That proves the SCHEDULER fires on time; it does
+# NOT prove a timer can wake a sleeping machine, because Kernel-Power logged no
+# sleep/resume transition in that window -- the machine stayed awake throughout.
+#
+# STILL UNVERIFIED: a genuine wake-from-sleep. Every wake in this machine's
+# 7-day history has a blank WakeSourceText, i.e. the operator opening the lid.
+# `powercfg /waketimers` needs elevation, so the armed state cannot be read
+# from an unelevated session either. Dell firmware can override Windows on lid
+# close, and no amount of reading settings settles it.
+#
+# The decisive evidence will be a scheduled run completing while the machine is
+# genuinely asleep. Until one does, treat wake-from-sleep as configured-but-
+# unproven and prefer leaving the machine awake for a run that matters.
+#
 # NOTE ON THIS MACHINE'S SLEEP MODEL, since it changes what to expect:
 # `powercfg /availablesleepstates` reports S0 Low Power Idle (Modern Standby)
 # with S1/S2/S3 unavailable. S0 keeps the network connected and honours wake
