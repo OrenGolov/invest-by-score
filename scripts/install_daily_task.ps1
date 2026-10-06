@@ -46,10 +46,35 @@ if (-not (Test-Path $python)) { $python = "python" }
 # Wake the machine if asleep, and catch up on a run missed while powered off: a
 # laptop shut at the scheduled time is the most likely way for a task to silently
 # stop, and StartWhenAvailable turns that into a late run instead of a lost day.
+#
+# MEASURED 2026-10-06, AND THE COMMENT ABOVE WAS NOT TRUE. The news task missed
+# its 14:30 slot (`NumberOfMissedRuns: 1`), was never caught up, and
+# `NextRunTime` had already moved to the NEXT weekday -- so Tuesday captured no
+# news at all. That night every news alert reported NOT_EVALUATED with the
+# honest reason "no news was captured", and the day's perishable articles were
+# lost for good: Finnhub serves a rolling window, so a missed day cannot be
+# re-fetched later.
+#
+# TWO DISTINCT GAPS, both fixed here:
+#
+#   1. -WakeToRun was DOCUMENTED ABOVE BUT NEVER PASSED. The comment claimed
+#      the machine would be woken; the settings object had no such flag, so a
+#      sleeping machine simply missed the slot. A comment is not a setting.
+#
+#   2. StartWhenAvailable alone is not enough. Windows only catches up a missed
+#      run within a limited window and then gives up until the next scheduled
+#      day, which is exactly what happened. A repetition gives the task further
+#      chances WITHIN the same day, so a machine powered on at any point before
+#      the evening still captures that day's news.
+#
+# The repetition is harmless when the task already ran: daily_collect is
+# idempotent per (ticker, date) -- a second run on the same day re-fetches into
+# the same append-only store and the alert path reads by date, not by row count.
 $settings = New-ScheduledTaskSettingsSet `
     -StartWhenAvailable `
     -DontStopIfGoingOnBatteries `
     -AllowStartIfOnBatteries `
+    -WakeToRun `
     -ExecutionTimeLimit (New-TimeSpan -Hours 2)
 
 function Register-InvestTask {
@@ -71,6 +96,17 @@ function Register-InvestTask {
     $action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument $command
     $trigger = New-ScheduledTaskTrigger -Weekly `
         -DaysOfWeek Monday, Tuesday, Wednesday, Thursday, Friday -At $Time
+
+    # RETRY WITHIN THE SAME DAY. Without this a single missed slot loses the
+    # whole day (MEASURED 2026-10-06, see the settings block above). Repeating
+    # every 2 hours for 8 hours means a machine powered on any time between the
+    # scheduled hour and 8 hours later still collects that day.
+    #
+    # Set on the CIM object because New-ScheduledTaskTrigger exposes repetition
+    # only for -Once triggers, not for -Weekly.
+    $trigger.Repetition = (New-ScheduledTaskTrigger -Once -At $Time `
+        -RepetitionInterval (New-TimeSpan -Hours 2) `
+        -RepetitionDuration (New-TimeSpan -Hours 8)).Repetition
 
     Register-ScheduledTask -TaskName $Name -Action $action -Trigger $trigger `
         -Settings $settings -Description $Description -Force | Out-Null
