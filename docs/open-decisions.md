@@ -1081,6 +1081,58 @@ system.
 
 ---
 
+## 29. The backfill tripled the memory store and changed no forecast — OPEN
+
+**Raised:** 2026-10-06. **Owner:** unassigned.
+
+`build_event_memory.py --mode backfill` was run to attack the "only 18 of 75
+tickers reach 5 analogs" problem. It worked, on its own terms:
+
+```
+                           before   after
+event_memory records          361    1,140   (+779 inferred)
+tickers with ANY memory        26       73   of 75 eligible
+tickers with >= 5 memories     18       67   of 75
+usable (ticker, event_type)    16       79   cells
+```
+
+**And forecasting did not move at all: still 292 of 292 refused.**
+
+The reason is that `EVENT_MEMORY_MIN_ANALOGS` is not the binding gate —
+`EVENT_MEMORY_MIN_SIMILARITY` is. MEASURED across all 73 tickers holding a
+memory, retrieving `earnings` analogs against today's live chart state:
+
+```
+similarity bar   tickers reaching 5 analogs   median analogs   tickers at zero
+    0.70                 0 / 73                    0                 55
+    0.60                24 / 73                    2                 19
+    0.50                68 / 73                   21                  1
+    0.40                72 / 73                   88                  0
+    0.30                73 / 73                  236                  0
+```
+
+At the shipped bar of 0.70, **no ticker in the portfolio can produce a
+conditioned forecast**, however many memories exist. The store is not the
+constraint; chart-state similarity is.
+
+**Why this is a DECISION and not a bug.** Lowering the bar buys analogs by
+loosening what counts as comparable. At 0.50 the median ticker retrieves 21
+analogs — but an analog that is only half-similar is a weaker claim about this
+situation, and the whole point of the E6 design is that a "typical response"
+drawn from loose matches describes the market rather than the event. The yield
+table is the honest input to that trade-off; picking a number from it is a
+judgement about how much similarity a published forecast should require.
+
+**What would settle it:** measure forecast ACCURACY at each bar once outcomes
+mature, and pick the bar that maximises it rather than the one that maximises
+yield. That needs accrued matured outcomes, which is the same bottleneck as
+everything else in section 28. Until then, 0.70 refusing everything is at least
+a refusal rather than a weak claim dressed as a strong one.
+
+**Not recommended:** lowering the bar to make the dashboard look populated.
+Section 28's warning applies directly — a number inside the noise band, reported
+without the band, is worse than no number.
+
 ## Closed
 
 - ~~**Live runs must use today's chart state.**~~ Fixed in `ad75f48`. The
