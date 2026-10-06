@@ -72,9 +72,14 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from core.config import (  # noqa: E402
+    COLLECT_FUNDAMENTALS_THROTTLE_SECONDS,
     COLLECT_MAX_TICKERS_PER_RUN,
+    COLLECT_NEWS_ADVANCE_CURSOR_ON_QUOTA,
     COLLECT_NEWS_BATCH_SIZE,
     COLLECT_NEWS_CURSOR_PATH,
+    COLLECT_NEWS_PRIORITIZE_STALE,
+    COLLECT_NEWS_REQUEST_BUDGET,
+    COLLECT_NEWS_REUSE_SNAPSHOTS,
     COLLECT_NEWS_SKIP_SECTORLESS,
     COLLECT_NEWS_TRACK_ANYWAY,
     COLLECT_PERISHABLE_SOURCES,
@@ -82,6 +87,13 @@ from core.config import (  # noqa: E402
     COLLECT_SOURCES,
     COLLECT_THROTTLE_SECONDS,
     NEWS_PROVIDER_API_KEY_ENV,
+)
+from core.news_adapter import (  # noqa: E402
+    FAILURE_AUTH,
+    FAILURE_GUIDANCE,
+    FAILURE_NO_KEY,
+    FAILURE_QUOTA,
+    FAILURE_UNKNOWN,
 )
 
 LOGGER = logging.getLogger("daily_collect")
@@ -174,20 +186,115 @@ def news_batch(tickers) -> tuple[list[str], list[str], int]:
         eligible[(start + offset) % len(eligible)]
         for offset in range(COLLECT_NEWS_BATCH_SIZE)
     ]
+
+    # STALENESS FIRST, within the batch the cursor already chose.
+    #
+    # The cursor decides WHICH tickers this run covers (that is what keeps the
+    # rotation fair); this only decides the ORDER they are fetched in. The
+    # distinction matters when the quota dies mid-run: whatever the run managed
+    # to fetch should be the tickers closest to losing their news permanently,
+    # not whichever happened to sort first alphabetically.
+    #
+    # Deliberately does NOT change the batch membership, because reordering the
+    # selection would let a permanently-stale ticker (one the provider has no
+    # articles for) monopolise every run and starve the rotation.
+    if COLLECT_NEWS_PRIORITIZE_STALE:
+        try:
+            batch = _order_by_staleness(batch)
+        except Exception as exc:  # ordering is an optimisation, never a gate
+            LOGGER.warning("could not order the batch by staleness: %s", exc)
+
     return batch, skipped, start
 
 
-def _advance_cursor(eligible_count: int, start: int) -> None:
-    """Move the cursor on, so the next run fetches the next batch."""
+def _last_news_capture() -> dict[str, str]:
+    """The most recent date each ticker was SUCCESSFULLY fetched.
+
+    Read from the collection report ledger, which costs no quota. Only
+    `ok_tickers` counts: a ticker that was attempted and failed has no news,
+    so treating the attempt as coverage would push it to the back of the queue
+    precisely when it most needs fetching.
+    """
+    path = REPO_ROOT / COLLECT_REPORT_PATH
+    seen: dict[str, str] = {}
+    if not path.exists():
+        return seen
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return seen
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            report = json.loads(line)
+        except ValueError:
+            continue
+        as_of = str(report.get("as_of") or "")[:10]
+        if not as_of:
+            continue
+        news = (report.get("sources") or {}).get("news") or {}
+        for ticker in news.get("ok_tickers") or []:
+            key = str(ticker).upper()
+            if as_of > seen.get(key, ""):
+                seen[key] = as_of
+    return seen
+
+
+def _order_by_staleness(batch: list[str]) -> list[str]:
+    """Stalest first. Never-fetched tickers lead, then oldest capture date.
+
+    Ties break alphabetically so the order is deterministic — a reproducible
+    run order is worth more than an arbitrary tiebreak, and the W-series
+    reproducibility gates depend on it.
+    """
+    last = _last_news_capture()
+    # "" sorts before any ISO date, so a never-covered ticker is stalest.
+    return sorted(batch, key=lambda t: (last.get(str(t).upper(), ""), str(t).upper()))
+
+
+def _advance_cursor(eligible_count: int, start: int, served: int | None = None,
+                    reason: str = "batch_complete") -> None:
+    """Move the cursor on, so the next run fetches tickers it has not seen.
+
+    `served` is how many tickers this run actually REACHED (fetched, whether
+    the fetch succeeded or returned no articles). It defaults to the full
+    batch.
+
+    **Why progress is measured in work completed.** The old version always
+    advanced by the full batch, and its caller skipped the call entirely on a
+    429 to avoid "skipping" tickers. Both halves were wrong:
+
+      * Never advancing means the next run restarts at the same head and fails
+        on the same ticker. MEASURED: the cursor sat at 5 for two days while
+        news capture was dead, and only 26 of 75 tickers had any memory.
+      * Advancing by the full batch after a partial run WOULD skip the
+        tickers the run never reached.
+
+    Advancing by `served` does neither. A run stopped after 3 of 25 tickers
+    moves the cursor 3, so the next run begins exactly where this one stopped.
+    Forward progress is guaranteed and nothing is skipped.
+    """
     if eligible_count <= 0:
         return
+    step = COLLECT_NEWS_BATCH_SIZE if served is None else max(0, int(served))
+    if step <= 0:
+        # Nothing was served -- not even one ticker. Advancing by zero would
+        # retry the same head forever, which is the deadlock this function
+        # exists to prevent, so move on by ONE to guarantee the rotation
+        # cannot be pinned by a single permanently-failing ticker.
+        step = 1
+        reason = f"{reason}_no_progress_nudge"
     cursor_file = REPO_ROOT / COLLECT_NEWS_CURSOR_PATH
     try:
         cursor_file.parent.mkdir(parents=True, exist_ok=True)
         cursor_file.write_text(
             json.dumps({
-                "cursor": (start + COLLECT_NEWS_BATCH_SIZE) % eligible_count,
+                "cursor": (start + step) % eligible_count,
                 "updated": datetime.now(timezone.utc).isoformat(),
+                "advanced_by": step,
+                "reason": reason,
             }),
             encoding="utf-8",
         )
@@ -195,66 +302,181 @@ def _advance_cursor(eligible_count: int, start: int) -> None:
         LOGGER.warning("could not advance the news cursor: %s", exc)
 
 
-def collect_news(tickers, as_of: str, dry_run: bool) -> dict:
-    """THE PERISHABLE ONE. A day missed here is a day lost permanently."""
+# The news snapshots this run fetched, keyed by (ticker, as_of).
+#
+# WHY A MODULE-LEVEL CACHE. `collect_news` and `collect_events` both need the
+# same ticker's news on the same date, and `core.news_adapter` caches nothing,
+# so the events stage used to spend the quota a SECOND time on tickers the news
+# stage had already fetched -- doubling a 25-ticker run to 50 requests against
+# a 50/12h rolling allowance. MEASURED 2026-10-06: the news stage stopped at 1
+# ticker on a 429 while the events stage went on to call all 40 again.
+#
+# Scoped to one process, cleared per run, and keyed by as_of so a backfill
+# across dates cannot serve one date's articles for another.
+_NEWS_CACHE: dict[tuple[str, str], dict] = {}
+
+
+def _reset_news_cache() -> None:
+    _NEWS_CACHE.clear()
+
+
+def news_snapshot_cached(ticker: str, as_of: str) -> dict:
+    """One news snapshot per (ticker, as_of) per run, however many stages ask."""
     from core.news_adapter import build_news_snapshot
 
+    key = (str(ticker).upper(), str(as_of))
+    if COLLECT_NEWS_REUSE_SNAPSHOTS and key in _NEWS_CACHE:
+        return _NEWS_CACHE[key]
+    snapshot = build_news_snapshot(ticker, as_of)
+    if COLLECT_NEWS_REUSE_SNAPSHOTS:
+        _NEWS_CACHE[key] = snapshot
+    return snapshot
+
+
+def _failure_kind(snapshot: dict) -> str:
+    """The typed reason a snapshot is UNAVAILABLE.
+
+    Reads the `failure_kind` the adapter now attaches. The substring fallback
+    exists only for a snapshot produced by an older adapter; it is NOT the
+    primary path, because searching prose for "429" is exactly the bug that
+    let a quota day be reported as an outage.
+    """
+    kind = str(snapshot.get("failure_kind") or "").strip()
+    if kind:
+        return kind
+    reason = str(snapshot.get("reason", ""))
+    if "429" in reason or "too many requests" in reason.lower():
+        return FAILURE_QUOTA
+    return FAILURE_UNKNOWN
+
+
+def collect_news(tickers, as_of: str, dry_run: bool) -> dict:
+    """THE PERISHABLE ONE. A day missed here is a day lost permanently.
+
+    Quota-aware in three ways the previous version was not:
+
+      1. A hard REQUEST BUDGET is counted down, so the run cannot overrun the
+         rolling window even if the batch arithmetic is wrong.
+      2. Failures are classified by KIND, so a quota stop (self-clearing, keep
+         the rotation moving) is handled differently from an auth failure
+         (nothing will work until a human acts) and from an outage.
+      3. The cursor advances by WORK SERVED, so a run that stops early resumes
+         where it stopped instead of restarting at the same failing head.
+    """
     batch, skipped, start = news_batch(tickers)
     eligible_count = len(tickers) - len(skipped)
 
     ok, unavailable, failed = 0, [], []
-    quota_exhausted = False
+    ok_tickers: list[str] = []  # so an alert can say "fetched, no articles"
+                                # rather than lumping it in with "not tried"
+    served = 0            # tickers this run actually reached
+    requests_spent = 0    # provider calls made, for the budget and the report
+    kinds: dict[str, int] = {}
+    stop_kind = ""        # the kind that ended the run early, if any
+
     for ticker in batch:
         if dry_run:
             ok += 1
+            ok_tickers.append(ticker)
+            served += 1
             continue
+        if requests_spent >= COLLECT_NEWS_REQUEST_BUDGET:
+            # The budget, not the provider, stopped us. Everything already
+            # fetched is kept and the cursor still advances by what was served.
+            stop_kind = "budget_exhausted"
+            break
         try:
-            snapshot = build_news_snapshot(ticker, as_of)
+            snapshot = news_snapshot_cached(ticker, as_of)
+            requests_spent += 1
+            served += 1
             status = str(snapshot.get("status", "")).upper()
             if status == "UNAVAILABLE":
                 unavailable.append(ticker)
-                # A 429 means the quota is gone; every further call this run
-                # is wasted and would only deepen the overage.
-                if "429" in str(snapshot.get("reason", "")):
-                    quota_exhausted = True
+                kind = _failure_kind(snapshot)
+                kinds[kind] = kinds.get(kind, 0) + 1
+                # THREE kinds end the run; the rest are per-ticker noise.
+                # Quota and auth mean every further call is certain to fail,
+                # so continuing would waste the window and deepen an overage.
+                if kind in (FAILURE_QUOTA, FAILURE_AUTH, FAILURE_NO_KEY):
+                    stop_kind = kind
                     break
             else:
                 ok += 1
+                ok_tickers.append(ticker)
         except Exception as exc:
             LOGGER.warning("news fetch failed for %s: %s", ticker, exc)
             failed.append(ticker)
+            served += 1
+            kinds[FAILURE_UNKNOWN] = kinds.get(FAILURE_UNKNOWN, 0) + 1
         time.sleep(COLLECT_THROTTLE_SECONDS)
 
-    if not dry_run and not quota_exhausted:
-        _advance_cursor(eligible_count, start)
+    quota_exhausted = stop_kind == FAILURE_QUOTA
+
+    if not dry_run:
+        # ALWAYS advance, by what was served. An auth failure or a missing key
+        # serves nothing, so the nudge in `_advance_cursor` moves on by one
+        # rather than pinning the rotation on a ticker that cannot be fetched.
+        if stop_kind and not COLLECT_NEWS_ADVANCE_CURSOR_ON_QUOTA:
+            pass  # legacy behaviour, retained only behind the flag
+        else:
+            _advance_cursor(
+                eligible_count, start, served=served,
+                reason=stop_kind or "batch_complete",
+            )
 
     return {
         "attempted": len(batch), "ok": ok,
         "unavailable": unavailable, "failed": failed,
+        "ok_tickers": ok_tickers,
         "batch": len(batch), "eligible": eligible_count,
         "skipped_sectorless": sorted(skipped),
         "cursor_start": start,
+        "served": served,
+        "requests_spent": requests_spent,
+        "request_budget": COLLECT_NEWS_REQUEST_BUDGET,
+        "failure_kinds": kinds,
+        "stopped_early_because": stop_kind,
         "quota_exhausted": quota_exhausted,
     }
 
 
 def collect_fundamentals(tickers, as_of: str, dry_run: bool) -> dict:
-    """Vintage capture: the values are re-fetchable, today's reading is not."""
+    """Vintage capture: the values are re-fetchable, today's reading is not.
+
+    Paced by COLLECT_FUNDAMENTALS_THROTTLE_SECONDS rather than the shared
+    throttle. MEASURED 2026-10-06, Alpha Vantage's free tier wants ~1 request
+    per second and answers a faster one with HTTP 200 plus an advisory body —
+    so a throttled call does NOT raise. It returns a snapshot with no metrics,
+    the score substitutes neutral defaults, and every ticker ends up sharing
+    one identical vector. Being rate-limited is indistinguishable from having
+    no key at all unless it is counted, which is what `throttled` is for.
+    """
     from fetch_data import fetch_fundamental_snapshot
 
-    ok, failed = 0, []
+    ok, failed, throttled = 0, [], []
     for ticker in tickers:
         if dry_run:
             ok += 1
             continue
         try:
-            fetch_fundamental_snapshot(ticker, as_of)
-            ok += 1
+            snapshot = fetch_fundamental_snapshot(ticker, as_of) or {}
+            # A snapshot whose valuation metrics are entirely null came back
+            # empty-handed, whatever its status field says.
+            metrics = snapshot.get("valuation_metrics") or {}
+            if metrics and all(value is None for value in metrics.values()):
+                throttled.append(ticker)
+            else:
+                ok += 1
         except Exception as exc:
             LOGGER.warning("fundamentals fetch failed for %s: %s", ticker, exc)
             failed.append(ticker)
-        time.sleep(COLLECT_THROTTLE_SECONDS)
-    return {"attempted": len(tickers), "ok": ok, "failed": failed}
+        time.sleep(COLLECT_FUNDAMENTALS_THROTTLE_SECONDS)
+    result = {"attempted": len(tickers), "ok": ok, "failed": failed}
+    if throttled:
+        # Named separately from `failed`: nothing broke, the allowance ran out.
+        # The values are re-fetchable tomorrow, so this is not a lost day.
+        result["no_metrics_returned"] = throttled
+    return result
 
 
 def collect_macro(tickers, as_of: str, dry_run: bool) -> dict:
@@ -295,13 +517,14 @@ def collect_events(tickers, as_of: str, dry_run: bool) -> dict:
     sys.path.insert(0, str(REPO_ROOT / "scripts"))
     from build_event_memory import forward
 
-    # The SAME batch the news stage fetched. `forward` fetches news itself, so
-    # passing the full list here would spend the quota a second time on
-    # tickers this run already covered — and on the sector-less ones the news
-    # stage deliberately skipped. The cursor is NOT advanced by this call;
+    # The SAME batch the news stage fetched, and now the same SNAPSHOTS too.
+    # Passing `news_fetcher` lets `forward` read this run's cache instead of
+    # calling the provider again: MEASURED, the refetch doubled a run's cost
+    # and was the difference between a batch that fits the rolling window and
+    # one that cannot complete. The cursor is NOT advanced by this call;
     # collect_news owns it.
     batch, _skipped, _start = news_batch(tickers)
-    report = forward(batch, as_of, False, None)
+    report = forward(batch, as_of, False, None, news_fetcher=news_snapshot_cached)
     unavailable = len(report.get("news_unavailable") or [])
     return {
         # `attempted` counts what this source COULD act on. When news is
@@ -355,6 +578,11 @@ def _source_status(source: str, result: dict) -> str:
 def run(sources, tickers, as_of: str, dry_run: bool) -> dict:
     results: dict[str, dict] = {}
     statuses: dict[str, str] = {}
+
+    # One run, one set of news snapshots. Cleared at the start rather than the
+    # end so a caller that invokes run() twice in a process (the tests do)
+    # cannot be served the previous run's articles.
+    _reset_news_cache()
 
     for source in sources:
         collector = COLLECTORS.get(source)
@@ -445,6 +673,25 @@ def main() -> int:
         }
         print(f"  {source:<13} {status:<8}{perishable:<12} {detail}")
 
+    # The TREND, not just this run. A single run's numbers cannot show that
+    # capture has been dead for two days, which is the fact that mattered most
+    # on 2026-10-06 and the one nothing printed.
+    if not args.dry_run:
+        try:
+            from core.collection_monitor import load_reports
+            from core.news_coverage import coverage_report, render_coverage
+
+            history = load_reports(REPO_ROOT / COLLECT_REPORT_PATH)
+            metrics = coverage_report(
+                history,
+                REPO_ROOT / "data" / "event_memory.jsonl",
+                set(tickers),
+            )
+            print()
+            print(render_coverage(metrics))
+        except Exception as exc:  # metrics must never fail a collection run
+            LOGGER.warning("could not render coverage metrics: %s", exc)
+
     news = report["sources"].get("news") or {}
     if news.get("skipped_sectorless"):
         print()
@@ -459,11 +706,26 @@ def main() -> int:
             "rather than a company event — E5 would call it confounded. They "
             "keep their inferred memories from price history."
         )
-    if news.get("quota_exhausted"):
+    stopped = str(news.get("stopped_early_because") or "")
+    if stopped:
         print()
-        print("  PROVIDER QUOTA EXHAUSTED (HTTP 429): the run stopped early.")
-        print("      The rotation cursor was NOT advanced, so the next run")
-        print("      retries these same tickers rather than skipping them.")
+        guidance = FAILURE_GUIDANCE.get(stopped)
+        if stopped == "budget_exhausted":
+            print(f"  PER-RUN BUDGET REACHED ({news.get('requests_spent')} requests):")
+            print("      the run stopped itself before the provider did. This is the")
+            print("      guard that keeps one run from eating the next run's window.")
+        elif stopped == FAILURE_QUOTA:
+            print("  PROVIDER QUOTA EXHAUSTED: the run stopped early.")
+            print(f"      {guidance}")
+        elif stopped in (FAILURE_AUTH, FAILURE_NO_KEY):
+            print("  AUTHENTICATION PROBLEM — THIS DOES NOT CLEAR ON ITS OWN:")
+            print(f"      {guidance}")
+        else:
+            print(f"  RUN STOPPED EARLY ({stopped}):")
+            print(f"      {guidance or 'see the provider message above'}")
+        print(f"      Served {news.get('served')} ticker(s); the cursor advanced by")
+        print("      that many, so the next run RESUMES where this one stopped")
+        print("      instead of retrying the same head of the list.")
 
     if report["perishable_lost"]:
         print()

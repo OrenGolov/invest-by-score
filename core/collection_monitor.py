@@ -52,6 +52,14 @@ from core.config import (
     COLLECTION_MAX_SILENT_BUSINESS_DAYS,
     COLLECTION_MONITOR_VERSION,
 )
+from core.news_adapter import (
+    FAILURE_AUTH,
+    FAILURE_GUIDANCE,
+    FAILURE_NO_KEY,
+    FAILURE_QUOTA,
+    FAILURE_UNAVAILABLE,
+    FAILURE_UNKNOWN,
+)
 
 SEVERITY_NONE = "none"
 SEVERITY_WARN = "warn"
@@ -158,9 +166,22 @@ def evaluate_collection(
     lines: list[str] = []
 
     quota = False
+    auth_broken = False
+    news: dict[str, Any] = {}
     if report:
         news = (report.get("sources") or {}).get("news") or {}
-        quota = bool(news.get("quota_exhausted"))
+        kinds = news.get("failure_kinds") or {}
+        stopped = str(news.get("stopped_early_because") or "")
+        quota = bool(news.get("quota_exhausted")) or stopped == FAILURE_QUOTA
+        # AUTH IS NOT SELF-CLEARING, so it is separated from the quota case.
+        # A bad key produces the same "no news captured" surface as a spent
+        # quota, and conflating them sends the operator to wait out a window
+        # that will never reopen.
+        auth_broken = (
+            stopped in (FAILURE_AUTH, FAILURE_NO_KEY)
+            or bool(kinds.get(FAILURE_AUTH))
+            or bool(kinds.get(FAILURE_NO_KEY))
+        )
 
     # --- 1. perishable loss: the day cannot be recovered --------------
     lost = list((report or {}).get("perishable_lost") or [])
@@ -169,11 +190,31 @@ def evaluate_collection(
         # rotation retries tomorrow, and the cursor is deliberately not
         # advanced. That is the expected steady state on a 100/day tier,
         # so it is reported in the body but does not raise severity.
-        if quota and not COLLECTION_ALERT_ON_QUOTA:
+        if auth_broken:
+            # Checked BEFORE the quota branch: an auth failure must never be
+            # downgraded to "expected on the free tier". Nothing clears it but
+            # a human, and every day it persists is a permanently lost day.
+            severity = SEVERITY_CRITICAL
+            reasons.append("the news provider rejected the API key")
             lines.append(
-                "news partially lost to the provider quota (expected on the "
-                "free tier; the rotation cursor was not advanced, so these "
-                "tickers are retried next run)"
+                "AUTHENTICATION FAILURE: the news provider rejected the "
+                "credential. This does NOT clear on its own - no news is "
+                "captured until NEWS_PROVIDER_API_KEY is fixed, and every day "
+                "it stays broken is a day of news lost permanently."
+            )
+        elif quota and not COLLECTION_ALERT_ON_QUOTA:
+            served = news.get("served")
+            cursor_note = (
+                f"the rotation cursor advanced by {served} (the tickers this "
+                f"run actually reached), so the next run resumes where this "
+                f"one stopped rather than retrying the same head"
+                if served else
+                "the rotation cursor advanced so the next run does not retry "
+                "the same tickers"
+            )
+            lines.append(
+                f"news partially lost to the provider quota (expected on the "
+                f"free tier; {cursor_note})"
             )
         else:
             severity = SEVERITY_CRITICAL
@@ -227,6 +268,127 @@ def evaluate_collection(
         body="\n".join(lines),
         reasons=tuple(reasons),
     )
+
+
+def explain_ticker_news_gap(
+    ticker: str,
+    as_of: str,
+    report: dict[str, Any] | None,
+) -> dict[str, str]:
+    """Why THIS ticker has no news today, and what the reader should do.
+
+    **The alert this replaces.** MEASURED 2026-10-06, the daily digest sent 77
+    alerts that all said the same thing:
+
+        "the news provider was unavailable (no news was captured for AAPL;
+         the collector rotates 75 of the eligible tickers per run, so this
+         ticker was not looked at today); nothing can be concluded"
+
+    Every clause that explains anything in that sentence is wrong:
+
+      * "rotates 75 per run" -- the batch is COLLECT_NEWS_BATCH_SIZE, and 75 is
+        the ELIGIBLE count. The two were conflated.
+      * "was not looked at" -- said about AMZN, which WAS looked at and came
+        back HTTP 429. The one ticker carrying real evidence was described as
+        the one ticker that had not been tried.
+      * "the news provider was unavailable" -- the provider was up and the key
+        was valid; the quota was spent. Those need different responses.
+
+    Worse, all 77 read identically, so the digest could not distinguish a
+    ticker that was never scheduled (nothing is wrong) from one whose fetch
+    failed (something is). This function answers per ticker, from the run's own
+    record, and returns {"reason", "action", "kind"} so a caller renders rather
+    than reasons.
+    """
+    unknown = {
+        "kind": "no_run_record",
+        "reason": (
+            f"no collection run was recorded for {as_of}, so whether {ticker} "
+            f"was fetched is unknown"
+        ),
+        "action": "Check that the collector ran; nothing can be concluded.",
+    }
+    if not report:
+        return unknown
+
+    news = (report.get("sources") or {}).get("news") or {}
+    upper = str(ticker).upper()
+    batch_size = news.get("batch")
+    eligible = news.get("eligible")
+
+    def _has(key: str) -> bool:
+        return upper in {str(t).upper() for t in (news.get(key) or [])}
+
+    # 1. Deliberately not tracked -- a decision, not a failure.
+    if _has("skipped_sectorless"):
+        return {
+            "kind": "not_tracked",
+            "reason": (
+                f"{ticker} is not tracked for news by design: it has no sector, "
+                f"so its headlines are market commentary rather than company "
+                f"events (E5 attribution would call them confounded)"
+            ),
+            "action": "None. This is the intended configuration, not a gap.",
+        }
+
+    # 2. Fetched and failed -- the kind says what to do.
+    if _has("unavailable") or _has("failed"):
+        kinds = news.get("failure_kinds") or {}
+        kind = str(news.get("stopped_early_because") or "")
+        if not kind and kinds:
+            kind = max(kinds.items(), key=lambda kv: kv[1])[0]
+        if not kind and news.get("quota_exhausted"):
+            # A report written BEFORE the typed taxonomy existed carries only
+            # the old boolean. Reading it is what lets this function explain
+            # history truthfully instead of calling every past quota day an
+            # unknown error -- MEASURED on the 2026-10-06 report, which has
+            # `quota_exhausted: true` and no `failure_kinds`.
+            kind = FAILURE_QUOTA
+        kind = kind or FAILURE_UNKNOWN
+        guidance = FAILURE_GUIDANCE.get(kind, FAILURE_GUIDANCE[FAILURE_UNKNOWN])
+        actions = {
+            FAILURE_QUOTA: "None - the quota window reopens on its own.",
+            FAILURE_AUTH: "Fix NEWS_PROVIDER_API_KEY. This will not self-heal.",
+            FAILURE_NO_KEY: "Set NEWS_PROVIDER_API_KEY to enable news capture.",
+            FAILURE_UNAVAILABLE: "None unless it persists beyond a day.",
+        }
+        return {
+            "kind": kind,
+            "reason": f"{ticker} WAS fetched on {as_of} and the call failed: {guidance}",
+            "action": actions.get(kind, "Review the provider message in the run report."),
+        }
+
+    # 3. Reached and returned nothing -- a real, informative answer.
+    if _has("ok_tickers"):
+        return {
+            "kind": "no_articles",
+            "reason": (
+                f"{ticker} was fetched successfully on {as_of} and the provider "
+                f"returned no articles inside the point-in-time window"
+            ),
+            "action": "None. Absence of news is itself an observation.",
+        }
+
+    # 4. Not in this run's batch -- the ONLY case the old text described, and
+    #    it is now stated with the real numbers instead of invented ones.
+    if batch_size:
+        detail = (
+            f"the collector fetched {batch_size} of {eligible} eligible tickers "
+            f"this run (rotating so every ticker is covered within "
+            f"{-(-int(eligible) // int(batch_size))} runs)"
+            if eligible else
+            f"the collector fetched {batch_size} tickers this run"
+        )
+        return {
+            "kind": "not_scheduled",
+            "reason": (
+                f"{ticker} was not scheduled for the {as_of} run: {detail}. "
+                f"Nothing was attempted for it, so nothing failed"
+            ),
+            "action": "None. It is queued for an upcoming run.",
+        }
+
+    return unknown
 
 
 def render_verdict(verdict: CollectionVerdict) -> str:

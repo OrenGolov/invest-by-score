@@ -271,20 +271,40 @@ def backfill(tickers, years: int, dry_run: bool, store: Path | None) -> dict:
     }
 
 
-def forward(tickers, as_of: str, dry_run: bool, store: Path | None) -> dict:
+def forward(tickers, as_of: str, dry_run: bool, store: Path | None,
+            news_fetcher=None) -> dict:
     """Record OBSERVED events from the news provider.
 
     MEASURED: with no NEWS_PROVIDER_API_KEY the news contract is UNAVAILABLE, so this
     writes nothing and reports why. That is the correct outcome, not a
     failure — the alternative is inventing events.
+
+    `news_fetcher` lets a caller supply snapshots this process already has.
+    MEASURED 2026-10-06, the default (fetch per ticker) made the daily collector
+    pay for every ticker TWICE -- once in its news stage, once here -- which on
+    a 50/12h rolling allowance is the difference between a run that completes
+    and one that cannot. `scripts/daily_collect.py` passes its per-run cache.
+
+    **Quota stops the loop here too.** This function had no 429 handling at all:
+    the news stage would stop on the first quota error while this one carried on
+    calling the provider for all 40 tickers. MEASURED in the same run, news
+    reported 1 unavailable ticker and events reported 40.
     """
     from core.event_contract import events_from_news_snapshot
-    from core.news_adapter import build_news_snapshot
+    from core.news_adapter import (
+        FAILURE_AUTH,
+        FAILURE_NO_KEY,
+        FAILURE_QUOTA,
+        build_news_snapshot,
+    )
+
+    fetch = news_fetcher or build_news_snapshot
 
     written = 0
     considered = 0
     skipped: dict[str, int] = {}
     unavailable: list[str] = []
+    stop_kind = ""
 
     benchmark = None
     try:
@@ -293,9 +313,15 @@ def forward(tickers, as_of: str, dry_run: bool, store: Path | None) -> dict:
         pass
 
     for ticker in tickers:
-        snapshot = build_news_snapshot(ticker, as_of)
+        snapshot = fetch(ticker, as_of)
         if str(snapshot.get("status", "")).upper() == "UNAVAILABLE":
             unavailable.append(ticker)
+            kind = str(snapshot.get("failure_kind") or "")
+            # Every remaining call is certain to fail the same way, so stop
+            # rather than spending a window that has nothing left to give.
+            if kind in (FAILURE_QUOTA, FAILURE_AUTH, FAILURE_NO_KEY):
+                stop_kind = kind
+                break
             continue
 
         events = events_from_news_snapshot(snapshot)
@@ -362,6 +388,7 @@ def forward(tickers, as_of: str, dry_run: bool, store: Path | None) -> dict:
         "written": written,
         "skipped": skipped,
         "news_unavailable": unavailable,
+        "stopped_early_because": stop_kind,
         "dry_run": dry_run,
     }
 

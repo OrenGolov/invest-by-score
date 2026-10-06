@@ -73,6 +73,109 @@ UNAVAILABLE_REASON = (
     "price or technical indicators."
 )
 
+# --- Why the news was unavailable (the FAILURE TAXONOMY) ------------------------
+#
+# Callers used to tell a quota day from an outage by searching the reason
+# TEXT for "429". MEASURED, that is wrong in both directions:
+#
+#   * urllib raises HTTPError for a 429, whose str() is "HTTP Error 429:
+#     Too Many Requests" -- so the substring happened to work.
+#   * NewsAPI ALSO signals its rolling-window limit as HTTP 200 with a JSON
+#     body {"status":"error","code":"rateLimited"}, whose message contains no
+#     "429" at all. That day was classified as a generic provider failure,
+#     alerted as an outage, and sent the operator to check a network that
+#     was fine.
+#   * A ticker named "429 Inc" in a reason string would read as a quota day.
+#
+# So the KIND travels as its own field, decided once here where the HTTP
+# status and the body are both in scope, and every downstream consumer
+# switches on it instead of re-deriving it from prose.
+FAILURE_NONE = ""
+FAILURE_QUOTA = "quota_exceeded"
+FAILURE_AUTH = "authentication_failed"
+FAILURE_UNAVAILABLE = "provider_unavailable"
+FAILURE_NO_KEY = "provider_key_required"
+FAILURE_UNKNOWN = "unknown_error"
+
+# The operator-facing sentence for each kind: what happened, and what to do.
+# A notification the reader cannot act on is how a channel gets muted, so
+# every kind names an action -- including "none, this clears itself".
+FAILURE_GUIDANCE: dict[str, str] = {
+    FAILURE_QUOTA: (
+        "the news provider's request quota is spent. NewsAPI's free tier "
+        "allows 100 requests/24h, enforced as 50/12h on a rolling window, so "
+        "this clears on its own without intervention. The ticker keeps its "
+        "place in the rotation and is retried on the next run."
+    ),
+    FAILURE_AUTH: (
+        "the news provider rejected the API key. Check that "
+        "NEWS_PROVIDER_API_KEY is set to a currently valid key -- this does "
+        "NOT clear on its own, and no news is captured until it is fixed."
+    ),
+    FAILURE_UNAVAILABLE: (
+        "the news provider could not be reached (network or provider-side "
+        "outage). The key is not implicated. This usually clears on its own; "
+        "if it persists for more than a day, check connectivity."
+    ),
+    FAILURE_NO_KEY: (
+        "no news provider is configured. Until NEWS_PROVIDER_API_KEY is set, "
+        "no OBSERVED event memory can exist and the model runs on price-"
+        "derived features alone."
+    ),
+    FAILURE_UNKNOWN: (
+        "the news provider failed for a reason this code does not recognise. "
+        "The provider's own message is quoted above; it is reported verbatim "
+        "rather than guessed at."
+    ),
+}
+
+# NewsAPI's documented error codes, mapped to our kinds. Matched on the
+# machine-readable `code` field, never on the human-readable `message`,
+# because the message is prose the provider may reword at any time.
+_PROVIDER_ERROR_CODES: dict[str, str] = {
+    "ratelimited": FAILURE_QUOTA,
+    "maximumresultsreached": FAILURE_QUOTA,
+    "apikeydisabled": FAILURE_AUTH,
+    "apikeyexhausted": FAILURE_QUOTA,
+    "apikeyinvalid": FAILURE_AUTH,
+    "apikeymissing": FAILURE_NO_KEY,
+    "unauthorized": FAILURE_AUTH,
+}
+
+
+def classify_http_status(status: int) -> str:
+    """Map an HTTP status onto a failure kind.
+
+    429 is the quota signal. 401/403 are credential problems, which must be
+    distinguished because one clears itself and the other never does.
+    """
+    if status == 429:
+        return FAILURE_QUOTA
+    if status in (401, 403):
+        return FAILURE_AUTH
+    if status >= 500 or status == 408:
+        return FAILURE_UNAVAILABLE
+    return FAILURE_UNKNOWN
+
+
+def classify_provider_error(code: str, message: str = "") -> str:
+    """Map a provider error BODY onto a failure kind.
+
+    `code` is matched first because it is machine-readable. The message is
+    consulted only as a last resort, for providers that omit a code -- and
+    the substrings chosen are ones that cannot plausibly appear in an
+    unrelated error.
+    """
+    kind = _PROVIDER_ERROR_CODES.get(str(code or "").strip().lower())
+    if kind:
+        return kind
+    text = str(message or "").lower()
+    if "too many requests" in text or "rate limit" in text or "quota" in text:
+        return FAILURE_QUOTA
+    if "api key" in text or "apikey" in text or "unauthorized" in text:
+        return FAILURE_AUTH
+    return FAILURE_UNKNOWN
+
 # --- Event classification v1 (curated pattern sets as data constants) -----------
 # Order is semantic: first matching category wins, and a headline matching none
 # falls through to `other`. The taxonomy lives here — not sprinkled through
@@ -375,6 +478,7 @@ def fetch_provider_articles(ticker: str, as_of_dt: datetime, timeout: float = NE
             "status": "provider_key_required",
             "records": [],
             "reason": f"No {NEWS_PROVIDER_API_KEY_ENV} configured.",
+            "failure_kind": FAILURE_NO_KEY,
         }
     window_start = (as_of_dt - timedelta(days=NEWS_LOOKBACK_DAYS)).strftime("%Y-%m-%d")
     url = (
@@ -389,14 +493,62 @@ def fetch_provider_articles(ticker: str, as_of_dt: datetime, timeout: float = NE
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             payload = json.load(response)
+    except urllib.error.HTTPError as exc:
+        # HTTPError carries the STATUS CODE, which is the only trustworthy
+        # quota signal. It is caught before URLError (its own base class) so
+        # the code is read rather than thrown away into a string.
+        kind = classify_http_status(int(getattr(exc, "code", 0) or 0))
+        body_code = ""
+        try:  # the body often names the reason more precisely than the status
+            body = json.loads(exc.read().decode("utf-8", "replace"))
+            body_code = str(body.get("code") or "")
+            if kind in (FAILURE_UNKNOWN, FAILURE_UNAVAILABLE) and body_code:
+                kind = classify_provider_error(body_code, body.get("message", ""))
+        except Exception:  # noqa: BLE001 - an unreadable body is not fatal
+            pass
+        LOGGER.warning(
+            "news_provider_http_error: status=%s kind=%s code=%s",
+            getattr(exc, "code", "?"), kind, body_code or "-",
+        )
+        return {
+            "status": "provider_request_failed",
+            "records": [],
+            "reason": f"news provider returned HTTP {getattr(exc, 'code', '?')}: {exc.reason}",
+            "failure_kind": kind,
+            "http_status": int(getattr(exc, "code", 0) or 0),
+        }
     except (urllib.error.URLError, json.JSONDecodeError, TimeoutError, OSError, ValueError) as exc:
+        # No HTTP status reached us at all: DNS, TLS, timeout, socket. That is
+        # an outage, never a quota -- the request never arrived to be counted.
         LOGGER.warning("news_provider_request_failed: %s", exc)
-        return {"status": "provider_request_failed", "records": [], "reason": f"news provider request failed: {exc}"}
+        return {
+            "status": "provider_request_failed",
+            "records": [],
+            "reason": f"news provider request failed: {exc}",
+            "failure_kind": FAILURE_UNAVAILABLE,
+        }
     if str(payload.get("status", "ok")).lower() != "ok":
-        reason = f"provider rejected the request: {payload.get('message', 'unknown error')}"
-        LOGGER.warning("news_provider_rejected_request: %s", reason)
-        return {"status": "provider_request_failed", "records": [], "reason": reason}
-    return {"status": "ok", "records": _normalize_provider_payload(payload), "reason": ""}
+        # THE PATH THAT USED TO BE INVISIBLE. NewsAPI signals its rolling
+        # limit as HTTP 200 with status=error in the body, so this branch
+        # handled a quota day while reporting a generic failure.
+        code = str(payload.get("code") or "")
+        message = str(payload.get("message", "unknown error"))
+        kind = classify_provider_error(code, message)
+        reason = f"provider rejected the request: {message}"
+        LOGGER.warning("news_provider_rejected_request: kind=%s code=%s %s", kind, code or "-", reason)
+        return {
+            "status": "provider_request_failed",
+            "records": [],
+            "reason": reason,
+            "failure_kind": kind,
+            "provider_code": code,
+        }
+    return {
+        "status": "ok",
+        "records": _normalize_provider_payload(payload),
+        "reason": "",
+        "failure_kind": FAILURE_NONE,
+    }
 
 
 def detect_contradictions(credible: list[dict]) -> list[dict]:
@@ -502,12 +654,18 @@ def build_news_snapshot(ticker: str, as_of: str, timeout: float = NEWS_PROVIDER_
 
     fetched = fetch_provider_articles(ticker, as_of_dt, timeout=timeout)
     if fetched["status"] != "ok":
-        return _unavailable_snapshot(
+        # `failure_kind` rides along on the LIVE-provider failure path only.
+        # The no-key stub above is pinned byte-for-byte by contract test, so
+        # it must never grow a field; a caller that sees no key already knows
+        # the kind without being told.
+        snapshot = _unavailable_snapshot(
             ticker,
             as_of_text,
             reason=f"News provider unavailable: {fetched['reason']}",
             source_id=NEWS_SOURCE_ID,
         )
+        snapshot["failure_kind"] = fetched.get("failure_kind") or FAILURE_UNKNOWN
+        return snapshot
 
     raw_records = fetched["records"]
     append_raw_records(

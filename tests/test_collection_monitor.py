@@ -13,6 +13,7 @@ from datetime import date
 from pathlib import Path
 
 from core.collection_monitor import (
+    explain_ticker_news_gap,
     SEVERITY_CRITICAL,
     SEVERITY_NONE,
     CollectionVerdict,
@@ -253,6 +254,108 @@ class VerdictContractTests(unittest.TestCase):
     def test_render_says_so_when_quiet(self):
         verdict = evaluate_collection(_report(), [], today=date(2026, 10, 4))
         self.assertIn("nothing worth alerting", render_verdict(verdict))
+
+
+class TickerExplanationTests(unittest.TestCase):
+    """The 77-identical-alerts bug, pinned.
+
+    MEASURED 2026-10-06, the digest told the operator that every one of 77
+    tickers "was not looked at today" because the collector "rotates 75 of the
+    eligible tickers per run". The batch was 40, 75 was the ELIGIBLE count, and
+    AMZN -- named among the un-looked-at -- was the single ticker that had been
+    fetched. These tests exist so one explanation can never again be reused for
+    causes that need different responses.
+    """
+
+    REPORT = {
+        "as_of": "2026-10-06",
+        "sources": {
+            "news": {
+                "batch": 25,
+                "eligible": 75,
+                "unavailable": ["AMZN"],
+                "ok_tickers": ["MSFT"],
+                "skipped_sectorless": ["VOO", "NASA"],
+                "failure_kinds": {"quota_exceeded": 1},
+                "stopped_early_because": "quota_exceeded",
+                "served": 1,
+            }
+        },
+    }
+
+    def test_a_fetched_and_failed_ticker_is_not_called_unvisited(self):
+        # THE EXACT INVERSION THAT SHIPPED. AMZN was fetched and 429'd.
+        detail = explain_ticker_news_gap("AMZN", "2026-10-06", self.REPORT)
+        self.assertEqual(detail["kind"], "quota_exceeded")
+        self.assertIn("WAS fetched", detail["reason"])
+        self.assertNotIn("not looked at", detail["reason"])
+        self.assertNotIn("not scheduled", detail["reason"])
+
+    def test_an_unscheduled_ticker_reports_the_real_batch_size(self):
+        # The old text invented "75 per run" by conflating the batch with the
+        # eligible count. Both numbers must appear, correctly.
+        detail = explain_ticker_news_gap("AAPL", "2026-10-06", self.REPORT)
+        self.assertEqual(detail["kind"], "not_scheduled")
+        self.assertIn("25 of 75", detail["reason"])
+
+    def test_a_deliberately_untracked_fund_is_not_reported_as_a_gap(self):
+        detail = explain_ticker_news_gap("VOO", "2026-10-06", self.REPORT)
+        self.assertEqual(detail["kind"], "not_tracked")
+        self.assertIn("by design", detail["reason"])
+
+    def test_a_successful_fetch_with_no_articles_is_its_own_answer(self):
+        # Absence of news is an observation, not a failure, and must not be
+        # grouped with the tickers that could not be reached.
+        detail = explain_ticker_news_gap("MSFT", "2026-10-06", self.REPORT)
+        self.assertEqual(detail["kind"], "no_articles")
+
+    def test_every_kind_carries_a_distinct_actionable_instruction(self):
+        # A notification the reader cannot act on is how a channel gets muted,
+        # and four identical actions would be the original bug wearing new text.
+        kinds = {
+            detail["kind"]: detail["action"]
+            for detail in (
+                explain_ticker_news_gap(t, "2026-10-06", self.REPORT)
+                for t in ("AMZN", "AAPL", "VOO", "MSFT")
+            )
+        }
+        self.assertEqual(len(kinds), 4)
+        self.assertEqual(len(set(kinds.values())), 4)
+
+    def test_an_auth_failure_is_never_described_as_self_clearing(self):
+        # Quota and auth present the same "no news" surface. Telling the
+        # operator to wait out a window that will never reopen is the one
+        # mistake this taxonomy exists to prevent.
+        report = {
+            "as_of": "2026-10-06",
+            "sources": {"news": {
+                "batch": 25, "eligible": 75, "unavailable": ["AMZN"],
+                "failure_kinds": {"authentication_failed": 1},
+                "stopped_early_because": "authentication_failed",
+            }},
+        }
+        detail = explain_ticker_news_gap("AMZN", "2026-10-06", report)
+        self.assertEqual(detail["kind"], "authentication_failed")
+        self.assertIn("NEWS_PROVIDER_API_KEY", detail["action"])
+        self.assertNotIn("clears on its own", detail["reason"])
+
+    def test_a_legacy_report_without_typed_kinds_still_reads_as_quota(self):
+        # Reports written before the taxonomy carry only `quota_exhausted`.
+        # Calling those days "unknown_error" would misdescribe history.
+        report = {
+            "as_of": "2026-10-06",
+            "sources": {"news": {
+                "batch": 40, "eligible": 75,
+                "unavailable": ["AMZN"], "quota_exhausted": True,
+            }},
+        }
+        detail = explain_ticker_news_gap("AMZN", "2026-10-06", report)
+        self.assertEqual(detail["kind"], "quota_exceeded")
+
+    def test_no_run_at_all_concludes_nothing(self):
+        detail = explain_ticker_news_gap("AAPL", "2026-10-06", None)
+        self.assertEqual(detail["kind"], "no_run_record")
+        self.assertIn("nothing can be concluded", detail["action"].lower())
 
 
 if __name__ == "__main__":

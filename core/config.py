@@ -2998,6 +2998,27 @@ COLLECT_PERISHABLE_SOURCES: tuple[str, ...] = ("news", "events")
 # throttled halfway captures half a day.
 COLLECT_THROTTLE_SECONDS = 0.2
 
+# Alpha Vantage needs its OWN, much slower pacing.
+#
+# MEASURED 2026-10-06, minutes after the key was configured: two OVERVIEW calls
+# 0.2s apart returned real data for the first ticker and, for the second,
+#   "Please consider spreading out your free API requests more sparingly
+#    (1 request per second)"
+# The same two tickers 16s apart both returned real data (NVDA PE 30.2,
+# KO PE 25.98), so the limit is PACING, not the daily allowance.
+#
+# This matters more than it looks. A throttled fundamentals call does not raise
+# — the provider answers HTTP 200 with an advisory body, `fetch_fundamental_
+# snapshot` finds no metrics, and the score falls back to neutral defaults. So
+# the failure mode is every ticker silently sharing one identical vector, which
+# is exactly the "fake placeholder numbers" state the key was added to escape.
+# Being throttled looks like having no key at all.
+#
+# 1.5s keeps a margin over the documented 1/sec. The cost is real but bounded:
+# 77 tickers take ~2 minutes instead of ~15 seconds, inside a job that already
+# sleeps between price fetches.
+COLLECT_FUNDAMENTALS_THROTTLE_SECONDS = 1.5
+
 # A ceiling per run so one invocation cannot hang for hours on a large
 # universe. 200 comfortably covers the current 77-ticker portfolio.
 COLLECT_MAX_TICKERS_PER_RUN = 200
@@ -3057,10 +3078,90 @@ COLLECT_NEWS_SKIP_SECTORLESS = True
 # so tracking them adds evidence without weakening any claim built on it.
 COLLECT_NEWS_TRACK_ANYWAY: tuple[str, ...] = ("SOXX", "CIBR")
 
-# Tickers per news run. MEASURED against the 100/day ceiling: 40 covers all 73
-# sector-mapped holdings in two runs and leaves 60 calls spare for retries and
-# ad-hoc work -- the margin whose absence produced today's 429.
-COLLECT_NEWS_BATCH_SIZE = 40
+# Tickers per news run.
+#
+# The previous value (40) was derived from a cost model that was WRONG. It
+# assumed one provider call per ticker and concluded "40 covers all 73 in two
+# runs and leaves 60 calls spare". MEASURED 2026-10-06, a run costs TWICE the
+# batch: `collect_news` fetches each ticker, then `collect_events` calls
+# `build_news_snapshot` on the SAME batch again (there is no cache anywhere in
+# core.news_adapter), so a batch of 40 spends 80 requests.
+#
+# Against the real ceiling -- 100/24h, enforced as 50 per 12h ROLLING -- 80
+# requests cannot complete. The run dies partway, the cursor is not advanced,
+# the next run retries the same head of the list and dies again. MEASURED: the
+# cursor sat at 5 from 2026-10-04 to 2026-10-06 and news capture stopped dead.
+#
+# Two changes make the batch affordable. The events stage now reuses the news
+# stage's snapshots instead of refetching (COLLECT_NEWS_REUSE_SNAPSHOTS), which
+# halves the cost to 1x; and the budget below caps a run regardless. At 1x,
+# a batch of 25 costs 25 of the 50/12h window and sweeps all 75 eligible
+# tickers in 3 runs, leaving half the window for retries and ad-hoc work.
+COLLECT_NEWS_BATCH_SIZE = 25
+
+# The hard per-run request budget. The batch size is an INTENT; this is the
+# ceiling actually enforced at call time, so a bug in batch arithmetic (or a
+# second stage fetching the same tickers) cannot overrun the quota silently.
+# Set to the 12h rolling allowance so one run can never consume the window
+# that the next run needs.
+COLLECT_NEWS_REQUEST_BUDGET = 45
+
+# Reuse the news stage's snapshots in the events stage rather than refetching.
+#
+# THE SINGLE LARGEST QUOTA WIN, and it costs nothing in data quality: both
+# stages ask for the same ticker on the same as_of date, so the second call
+# returns the same articles the first already stored. Turning this off restores
+# the old double-fetch behaviour, which is why it is a flag rather than a
+# deletion -- but there is no measured reason to turn it off.
+COLLECT_NEWS_REUSE_SNAPSHOTS = True
+
+# After a quota stop, advance the cursor past the tickers that were SERVED so
+# the next run resumes at the first ticker that was not.
+#
+# The old behaviour -- never advance on 429 -- was chosen to avoid "skipping"
+# tickers, and it produced the opposite of its intent: the run always restarted
+# at the same head, so tickers deeper in the list were never reached at all.
+# MEASURED, 26 of 75 tickers had any event memory while the cursor had not
+# moved in two days. Advancing by WORK COMPLETED (not by the full batch) skips
+# nothing and guarantees forward progress.
+COLLECT_NEWS_ADVANCE_CURSOR_ON_QUOTA = True
+
+# How many collectors share this provider quota.
+#
+# THE TRAP THIS EXISTS TO CLOSE. The batch size is sized against the provider's
+# rolling window on the assumption that ONE collector is spending it. Add a
+# second (the GitHub Actions workflow alongside the local Windows task) and the
+# combined spend doubles while every per-run number still looks correct in
+# isolation -- which is precisely how the 2026-10-06 outage began: a cost model
+# that was right about one caller and silent about the second.
+#
+# MEASURED: two collectors at batch 25 spend exactly 50/day against a 50/12h
+# window -- zero headroom. At batch 12 they spend 24/day and still sweep all 75
+# eligible tickers in 3.1 days, inside the 7-day lookback.
+#
+# Raise this to 2 when the workflow is enabled; the validator then holds the
+# combined arithmetic rather than trusting a comment to be read.
+COLLECT_NEWS_ACTIVE_COLLECTORS = 1
+
+# The provider's enforced rolling allowance, which is the REAL ceiling. NewsAPI
+# documents 100 requests/24h but enforces 50 per 12h, so the daily figure is
+# not the constraint a run actually hits.
+COLLECT_NEWS_ROLLING_ALLOWANCE = 50
+
+# Order the batch by how STALE each ticker's news is, rather than by position
+# in a sorted list.
+#
+# Why staleness and not importance: `fetch_data.PORTFOLIO_TICKERS` is a
+# 77-name WATCHLIST with no share counts, no cost basis and no weights (see
+# core/position_exposure.py) -- so there is no portfolio-value signal to rank
+# by, and inventing one would be a guess wearing a number's clothes.
+#
+# Staleness IS measurable and it is the right objective anyway: news older
+# than NEWS_LOOKBACK_DAYS cannot be refetched, so the ticker nearest that
+# cliff is the one whose coverage is about to become permanently unrecoverable.
+# A pure rotation cursor is blind to this -- it will refetch a ticker covered
+# yesterday while another sits 6 days stale.
+COLLECT_NEWS_PRIORITIZE_STALE = True
 
 # Where the rotation cursor lives, so consecutive runs advance rather than
 # re-fetching the same head of the list. MEASURED: a sequential cursor covers
@@ -3111,6 +3212,46 @@ def _validate_collect_config() -> None:
             f"a batch of {COLLECT_NEWS_BATCH_SIZE} exceeds the provider's "
             f"100-request daily ceiling on its own, before any retry or "
             f"ad-hoc call"
+        )
+    if COLLECT_NEWS_REQUEST_BUDGET < 1:
+        raise ValueError("a run must be allowed at least one request")
+    # THE INVARIANT THAT WAS MISSING. The old validator checked the batch
+    # against the provider ceiling assuming 1 call per ticker, so a batch of 40
+    # looked safe while the run actually spent 80. Cost is asserted here, in
+    # terms of the multiplier the code really uses, so the arithmetic that
+    # broke collection for two days cannot be reintroduced silently.
+    _cost_multiplier = 1 if COLLECT_NEWS_REUSE_SNAPSHOTS else 2
+    _worst_case = COLLECT_NEWS_BATCH_SIZE * _cost_multiplier
+    if _worst_case > COLLECT_NEWS_REQUEST_BUDGET:
+        raise ValueError(
+            f"a batch of {COLLECT_NEWS_BATCH_SIZE} costs {_worst_case} requests "
+            f"({_cost_multiplier}x: news"
+            + ("" if COLLECT_NEWS_REUSE_SNAPSHOTS else " + events refetch")
+            + f"), which exceeds the {COLLECT_NEWS_REQUEST_BUDGET}-request "
+            f"per-run budget. Lower the batch, raise the budget, or enable "
+            f"COLLECT_NEWS_REUSE_SNAPSHOTS"
+        )
+    if COLLECT_NEWS_ACTIVE_COLLECTORS < 1:
+        raise ValueError("at least one collector must be spending the quota")
+    # The COMBINED spend, which is what the provider actually sees. A per-run
+    # budget that each collector satisfies individually says nothing about two
+    # of them sharing one window.
+    _combined = (
+        COLLECT_NEWS_BATCH_SIZE * _cost_multiplier * COLLECT_NEWS_ACTIVE_COLLECTORS
+    )
+    # HEADROOM, not merely "fits". Spending the window exactly leaves nothing
+    # for a retry or an ad-hoc call, and MEASURED 2026-10-06 a steady state with
+    # no margin is how the outage began: the first unplanned request 429s and
+    # the rotation stalls. 80% is the most a routine schedule may occupy.
+    _headroom_cap = int(COLLECT_NEWS_ROLLING_ALLOWANCE * 0.8)
+    if _combined > _headroom_cap:
+        raise ValueError(
+            f"{COLLECT_NEWS_ACTIVE_COLLECTORS} collector(s) at batch "
+            f"{COLLECT_NEWS_BATCH_SIZE} spend {_combined} requests, above the "
+            f"{_headroom_cap} that keeps 20% of the provider's "
+            f"{COLLECT_NEWS_ROLLING_ALLOWANCE}-per-rolling-window allowance "
+            f"free for retries. Lower COLLECT_NEWS_BATCH_SIZE, or run fewer "
+            f"collectors"
         )
     if not COLLECT_NEWS_CURSOR_PATH.startswith("data/"):
         raise ValueError("the rotation cursor belongs under data/")
@@ -9441,12 +9582,24 @@ COLLECTION_ALERT_ON_PERISHABLE_LOSS = True
 # QUOTA EXHAUSTION IS NOT AN ALERT, and this is the judgement most likely to
 # be questioned. MEASURED: the free tier is 100 requests/24h on a rolling
 # window and one full sweep of 75 eligible tickers costs 75, so a quota day
-# is the EXPECTED steady state rather than an incident. The rotation cursor
-# is deliberately not advanced on a 429, so the unvisited tickers are retried
-# next run. Alerting here would produce a daily notification the operator
-# cannot act on, and would bury the perishable-loss alert underneath it —
-# A7 measured that an unsuppressed channel emits 15.01 alerts per episode
-# and nobody reads the fifteenth.
+# is the EXPECTED steady state rather than an incident. Alerting here would
+# produce a daily notification the operator cannot act on, and would bury the
+# perishable-loss alert underneath it — A7 measured that an unsuppressed
+# channel emits 15.01 alerts per episode and nobody reads the fifteenth.
+#
+# WHAT CHANGED 2026-10-06. This comment used to add "the rotation cursor is
+# deliberately not advanced on a 429, so the unvisited tickers are retried
+# next run". That was true and it was the bug: never advancing meant the next
+# run restarted at the SAME head, failed on the same ticker, and the rotation
+# never reached the rest of the list. MEASURED, the cursor sat at 5 for two
+# days and only 26 of 75 tickers had any event memory. The cursor now advances
+# by the work actually SERVED, which skips nothing and still guarantees
+# forward progress. Quota remains un-alerted; the deadlock it used to hide
+# does not.
+#
+# An AUTH failure is a different matter and IS alerted, in
+# `core.collection_monitor`: it presents the same "no news" surface but never
+# clears on its own.
 COLLECTION_ALERT_ON_QUOTA = False
 
 # How many BUSINESS days of no successful news capture before the collector

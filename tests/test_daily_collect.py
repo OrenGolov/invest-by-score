@@ -413,7 +413,19 @@ class QuotaAwareNewsTests(unittest.TestCase):
 
     def test_a_quota_error_stops_the_run_early(self):
         # Burning the rest of the batch on doomed calls only deepens the
-        # overage, and the cursor must NOT advance past untried tickers.
+        # overage, so the run must stop at the first quota error.
+        #
+        # WHAT THIS TEST USED TO ASSERT, AND WHY IT CHANGED. It required
+        # `self.assertFalse(cursor.exists())` -- the cursor must NOT advance --
+        # reasoning that advancing would skip untried tickers. MEASURED
+        # 2026-10-06, that rule was itself the bug: the next run restarted at
+        # the same head, hit the same quota error on the same ticker, and the
+        # rotation never reached the rest of the list. The cursor sat at 5 for
+        # two days while only 26 of 75 tickers had any event memory.
+        #
+        # The corrected contract advances by the tickers actually SERVED, which
+        # skips nothing -- the unserved ones are exactly where the next run
+        # starts -- while guaranteeing forward progress.
         calls = {"n": 0}
 
         def exhausted(ticker, as_of):
@@ -426,12 +438,118 @@ class QuotaAwareNewsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             cursor = Path(folder) / "cursor.json"
             with patch("core.news_adapter.build_news_snapshot", exhausted),                     patch.object(daily_collect, "COLLECT_NEWS_CURSOR_PATH", str(cursor)),                     patch.object(daily_collect, "REPO_ROOT", Path(folder)):
+                daily_collect._reset_news_cache()
                 result = daily_collect.collect_news(
                     ["AAPL", "MSFT", "NVDA", "AMD", "TSLA"] * 20, "2026-09-20", False
                 )
-                self.assertFalse(cursor.exists())
+                # The cursor DOES advance now, by the work served, so the next
+                # run resumes instead of retrying the same failing head.
+                self.assertTrue(cursor.exists())
+                state = json.loads(cursor.read_text(encoding="utf-8"))
         self.assertTrue(result["quota_exhausted"])
         self.assertEqual(calls["n"], 1)
+        self.assertEqual(result["served"], 1)
+        self.assertEqual(state["advanced_by"], 1)
+        self.assertEqual(state["reason"], "quota_exceeded")
+
+    def test_the_cursor_moves_even_when_nothing_is_served(self):
+        # The deadlock guard. A call that fails before anything is served (an
+        # auth error on the very first ticker) must not pin the rotation: the
+        # cursor nudges forward by one so the next run tries different names.
+        def exhausted(ticker, as_of):
+            return {
+                "status": "UNAVAILABLE",
+                "failure_kind": "authentication_failed",
+                "reason": "News provider unavailable: HTTP 401",
+            }
+
+        with tempfile.TemporaryDirectory() as folder:
+            cursor = Path(folder) / "cursor.json"
+            with patch("core.news_adapter.build_news_snapshot", exhausted),                     patch.object(daily_collect, "COLLECT_NEWS_CURSOR_PATH", str(cursor)),                     patch.object(daily_collect, "REPO_ROOT", Path(folder)):
+                daily_collect._reset_news_cache()
+                result = daily_collect.collect_news(
+                    ["AAPL", "MSFT", "NVDA", "AMD", "TSLA"] * 20, "2026-09-20", False
+                )
+                state = json.loads(cursor.read_text(encoding="utf-8"))
+        self.assertEqual(result["stopped_early_because"], "authentication_failed")
+        self.assertFalse(result["quota_exhausted"])  # auth is NOT a quota day
+        self.assertGreaterEqual(state["advanced_by"], 1)
+
+    def test_a_run_cannot_exceed_its_request_budget(self):
+        # The guard that stops a batch-arithmetic bug from overrunning the
+        # provider window: the budget is enforced at call time, not inferred
+        # from the batch size.
+        calls = {"n": 0}
+
+        def exhausted(ticker, as_of):
+            calls["n"] += 1
+            return {"status": "OK", "sentiment_score": 0.0}
+
+        with tempfile.TemporaryDirectory() as folder:
+            cursor = Path(folder) / "cursor.json"
+            with patch("core.news_adapter.build_news_snapshot", exhausted),                     patch.object(daily_collect, "COLLECT_NEWS_CURSOR_PATH", str(cursor)),                     patch.object(daily_collect, "REPO_ROOT", Path(folder)):
+                daily_collect._reset_news_cache()
+                # 30 DISTINCT tickers: a repeated 5-name list would be served
+                # whole (it is under the batch size) and the per-run cache
+                # would make the 2nd..20th copy of each name cost no request,
+                # so the budget would never be reached and the test would
+                # assert nothing.
+                universe = [f"T{index:02d}" for index in range(30)]
+                with patch.object(daily_collect, "COLLECT_NEWS_REQUEST_BUDGET", 3),                         patch.object(daily_collect, "news_batch",
+                                     lambda _t: (universe, [], 0)):
+                    result = daily_collect.collect_news(universe, "2026-09-20", False)
+        self.assertEqual(calls["n"], 3)
+        self.assertEqual(result["stopped_early_because"], "budget_exhausted")
+        self.assertEqual(result["requests_spent"], 3)
+
+    def test_the_events_stage_does_not_refetch_the_news_stage_snapshots(self):
+        # THE QUOTA BUG THAT HALVED THE AFFORDABLE BATCH. Both stages ask for
+        # the same (ticker, as_of); the adapter caches nothing, so the second
+        # stage used to pay for every ticker again. MEASURED 2026-10-06, the
+        # news stage stopped at 1 ticker on a 429 while the events stage went
+        # on to call the provider for all 40.
+        calls = []
+
+        def counted(ticker, as_of):
+            calls.append(ticker)
+            return {"status": "OK", "sentiment_score": 0.0, "articles": []}
+
+        with patch("core.news_adapter.build_news_snapshot", counted):
+            daily_collect._reset_news_cache()
+            for ticker in ["AAPL", "MSFT", "NVDA"]:
+                daily_collect.news_snapshot_cached(ticker, "2026-09-20")
+            after_news = len(calls)
+            for ticker in ["AAPL", "MSFT", "NVDA"]:  # the events stage
+                daily_collect.news_snapshot_cached(ticker, "2026-09-20")
+        self.assertEqual(after_news, 3)
+        self.assertEqual(len(calls), 3)  # not 6
+
+    def test_the_cache_does_not_serve_one_date_for_another(self):
+        # A backfill walks several as_of dates in one process. Keying on the
+        # ticker alone would serve the first date's articles for every later
+        # one, which is a point-in-time violation, not merely a stale read.
+        calls = []
+
+        def counted(ticker, as_of):
+            calls.append((ticker, as_of))
+            return {"status": "OK", "sentiment_score": 0.0}
+
+        with patch("core.news_adapter.build_news_snapshot", counted):
+            daily_collect._reset_news_cache()
+            daily_collect.news_snapshot_cached("AAPL", "2026-09-20")
+            daily_collect.news_snapshot_cached("AAPL", "2026-09-21")
+        self.assertEqual(len(calls), 2)
+
+    def test_the_batch_is_ordered_stalest_first(self):
+        # When the quota dies mid-run, whatever got fetched should be the
+        # tickers closest to losing their news permanently -- not whichever
+        # sorted first alphabetically.
+        captures = {"AAPL": "2026-10-05", "MSFT": "2026-10-05", "NVDA": "2026-09-29"}
+        with patch.object(daily_collect, "_last_news_capture", lambda: captures):
+            order = daily_collect._order_by_staleness(["AAPL", "MSFT", "NVDA", "TSLA"])
+        self.assertEqual(order[0], "TSLA")   # never fetched -> stalest
+        self.assertEqual(order[1], "NVDA")   # oldest capture next
+        self.assertEqual(order[2:], ["AAPL", "MSFT"])
 
     def test_the_events_stage_reuses_the_news_batch(self):
         # forward() fetches news itself, so passing the full list would spend
@@ -440,6 +558,73 @@ class QuotaAwareNewsTests(unittest.TestCase):
         events = source[source.index("def collect_events("):source.index("COLLECTORS =")]
         self.assertIn("news_batch(tickers)", events)
         self.assertNotIn("forward(tickers", events)
+        # ...and it must hand `forward` this run's snapshots, or the stage pays
+        # the provider a second time for every ticker.
+        self.assertIn("news_fetcher=news_snapshot_cached", events)
+
+
+class QuotaCostInvariantTests(unittest.TestCase):
+    """The arithmetic that broke collection, now asserted rather than commented.
+
+    MEASURED 2026-10-06: the config claimed a batch of 40 "leaves 60 calls
+    spare" because it counted one request per ticker, while the events stage
+    fetched every ticker a second time -- 80 requests against an allowance of
+    50 per 12h. The validator checked the batch against the daily ceiling and
+    saw nothing wrong. These tests pin the cost model instead of the batch size.
+    """
+
+    def setUp(self):
+        import core.config as config
+
+        self.config = config
+        self.saved = (
+            config.COLLECT_NEWS_BATCH_SIZE,
+            config.COLLECT_NEWS_REUSE_SNAPSHOTS,
+            config.COLLECT_NEWS_ACTIVE_COLLECTORS,
+        )
+
+    def tearDown(self):
+        (
+            self.config.COLLECT_NEWS_BATCH_SIZE,
+            self.config.COLLECT_NEWS_REUSE_SNAPSHOTS,
+            self.config.COLLECT_NEWS_ACTIVE_COLLECTORS,
+        ) = self.saved
+
+    def test_the_shipped_configuration_validates(self):
+        self.config._validate_collect_config()
+
+    def test_the_configuration_that_caused_the_outage_is_rejected(self):
+        # Batch 40 with the events stage refetching: the exact state on
+        # 2026-10-06, which the old validator accepted.
+        self.config.COLLECT_NEWS_BATCH_SIZE = 40
+        self.config.COLLECT_NEWS_REUSE_SNAPSHOTS = False
+        with self.assertRaises(ValueError) as caught:
+            self.config._validate_collect_config()
+        self.assertIn("80 requests", str(caught.exception))
+
+    def test_two_collectors_sharing_one_window_are_counted_together(self):
+        # A per-run budget each collector satisfies alone says nothing about
+        # two of them spending the same rolling allowance. Enabling the
+        # GitHub Actions workflow beside the local task is exactly this case.
+        self.config.COLLECT_NEWS_ACTIVE_COLLECTORS = 2
+        with self.assertRaises(ValueError) as caught:
+            self.config._validate_collect_config()
+        self.assertIn("2 collector(s)", str(caught.exception))
+
+    def test_two_collectors_are_allowed_at_a_batch_that_leaves_headroom(self):
+        self.config.COLLECT_NEWS_ACTIVE_COLLECTORS = 2
+        self.config.COLLECT_NEWS_BATCH_SIZE = 12
+        self.config._validate_collect_config()
+
+    def test_a_full_sweep_must_finish_inside_the_provider_window(self):
+        # The binding constraint is not the daily ceiling: it is that every
+        # eligible ticker must be revisited before its news expires at
+        # NEWS_LOOKBACK_DAYS, or the rotation is permanently losing coverage.
+        from core.config import NEWS_LOOKBACK_DAYS
+
+        eligible = 75  # MEASURED: 77 holdings less NASA and VOO
+        sweep_days = eligible / self.config.COLLECT_NEWS_BATCH_SIZE
+        self.assertLessEqual(sweep_days, NEWS_LOOKBACK_DAYS)
 
 
 if __name__ == "__main__":
