@@ -14,6 +14,21 @@ This folder contains the initial architecture and planning documents for the sco
 - [monitoring-dashboard.md](monitoring-dashboard.md) — dashboard and drift monitoring design
 - [roadmap.md](roadmap.md) — phased delivery plan
 
+## Operating
+
+- **Signup-Guide.docx** — the three accounts/keys only the operator can create,
+  step by step, with which network each one works from
+- **Quick-Reference.docx** — one page: scheduled jobs, how to run each one by
+  hand, and what the common messages mean
+- [operator-runbook.md](operator-runbook.md) — what to set up, what to check
+  daily, and how to run any job on demand instead of waiting for the scheduler
+
+## Incident reviews
+
+- [news-quota-review-2026-10-06.md](news-quota-review-2026-10-06.md) — why news
+  capture stopped for three days, the four compounding defects behind it, and
+  the quota model that now holds the arithmetic
+
 ## Project folders
 
 - [../agents](../agents) — agent contracts and runtime modules
