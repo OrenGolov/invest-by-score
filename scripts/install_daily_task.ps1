@@ -111,8 +111,19 @@ $trigger = New-ScheduledTaskTrigger -Weekly `
 # a laptop shut at 22:00 is the most likely way for this task to silently
 # stop, and StartWhenAvailable is what turns that into a late run instead of
 # a lost day.
+#
+# -WakeToRun WAS MISSING, and the comment above has claimed "wake the machine
+# if asleep" since this script was written. MEASURED 2026-10-06 on the
+# registered task: WakeToRun=False. A sleeping laptop at 22:00 therefore did
+# nothing at all, and StartWhenAvailable only catches the run up at the next
+# boot -- by which time the 7-day news window has already eaten the oldest day.
+#
+# StartWhenAvailable is still the right partner setting, because WakeToRun
+# cannot wake a machine that is powered off or hibernated; the two cover
+# different failure modes and neither replaces the other.
 $settings = New-ScheduledTaskSettingsSet `
     -StartWhenAvailable `
+    -WakeToRun `
     -DontStopIfGoingOnBatteries `
     -AllowStartIfOnBatteries `
     -ExecutionTimeLimit (New-TimeSpan -Hours 2)

@@ -1,0 +1,173 @@
+# Scheduled news capture, as a SUPPLEMENT to the local task -- not a replacement.
+#
+# WHY THIS EXISTS. News is perishable: NEWS_LOOKBACK_DAYS = 7, after which a day
+# can never be fetched again. The local Windows task is the primary collector,
+# but it cannot run while the laptop is shut down (WakeToRun wakes a sleeping
+# machine, not a powered-off one). MEASURED 2026-10-06, 16 business days are
+# already past the lookback window and are permanently unrecoverable.
+#
+# WHAT THIS DELIBERATELY DOES NOT DO: commit results back to the repository.
+# .gitignore already records the measurement that forbids it -- news writes
+# ~208 KB per ticker per day, so the 77-ticker universe produces ~15.7 MB/day
+# and ~3.9 GB/year. Git never forgets, so committing that is irreversible and
+# would make the repo unusable within months. data/ is already 149 MB.
+#
+# SO WHAT TRAVELS, AND WHAT STAYS. The split is by SIZE and MUTABILITY:
+#
+#   data/collect_cursor.json       60 B   mutable  -> Actions cache
+#   data/collection_report.jsonl  5.7 KB  append   -> Actions cache
+#   data/raw/newsapi_news/        1.1 MB  append   -> artifact, then discarded
+#
+# The cache carries the ~6 KB of state that must survive between runs so the
+# rotation advances instead of restarting at the head every time. The raw
+# articles are uploaded as a retention-limited artifact: downloadable if you
+# want them, never committed, and gone after the retention window.
+#
+# THE CONSEQUENCE, STATED PLAINLY. A cloud run captures sentiment for the day,
+# but the raw articles behind it live only in an artifact. If you do not
+# download them, that day's news-derived score is not reproducible from a fresh
+# clone -- which is the same limitation .gitignore already accepts for the local
+# machine, not a new one this introduces. The W6 acceptance proof covers
+# price/fundamentals/macro replay; news replay has always needed a backup that
+# is not git.
+#
+# BEFORE ENABLING, TWO STEPS -- the second is easy to miss and costs coverage:
+#
+#   1. Set the NEWS_PROVIDER_API_KEY repository secret. Without it the run still
+#      succeeds and reports provider_key_required: a missing secret is a setup
+#      state, not a collection failure.
+#
+#   2. Set COLLECT_NEWS_ACTIVE_COLLECTORS = 2 in core/config.py, and lower
+#      COLLECT_NEWS_BATCH_SIZE to 12. This workflow and the local Windows task
+#      spend the SAME provider quota. At the single-collector default (batch 25)
+#      the two together spend 50 requests against a 50-per-12h allowance --
+#      exactly the zero-headroom condition that caused the 2026-10-06 outage.
+#      Raising the collector count makes the config validator check the combined
+#      arithmetic instead of trusting this comment to be read; leaving it at 1
+#      means nothing warns you.
+#
+#      If you would rather retire the local task than shrink the batch, do that
+#      instead and leave the count at 1 -- one collector at batch 25 sweeps all
+#      75 eligible tickers in 3.0 days with half the window spare.
+#
+# ONE HONEST CAVEAT: GitHub throttles scheduled workflows under load and
+# disables them after 60 days of repository inactivity. This is a safety net
+# with a real failure mode, not a guarantee. Keep the local task as primary.
+
+name: Daily news collection
+
+on:
+  schedule:
+    # 21:30 UTC, Mon-Fri. Deliberately NOT on the hour: GitHub's scheduler is
+    # busiest at :00 and delays are longest there. This also sits before the
+    # local task's 22:00 local run, so the two cover different hours rather
+    # than racing for the same quota window.
+    - cron: "30 21 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Decide and report, but spend no quota"
+        type: boolean
+        default: false
+
+# Two runs writing the same cursor would corrupt the rotation, so a run waits
+# rather than overlapping. It does NOT cancel the one in flight: that run may
+# already have fetched perishable news, and killing it would lose the day.
+concurrency:
+  group: daily-collect
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # The rotation state. restore-keys lets a run inherit the newest previous
+      # cache when today's exact key misses, which is what makes the cursor
+      # advance across days instead of resetting to the head every run.
+      - name: Restore collection state
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/collect_cursor.json
+            data/collection_report.jsonl
+          key: collect-state-${{ github.run_id }}
+          restore-keys: |
+            collect-state-
+
+      - name: Collect
+        env:
+          NEWS_PROVIDER_API_KEY: ${{ secrets.NEWS_PROVIDER_API_KEY }}
+          ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            python scripts/daily_collect.py --dry-run
+          else
+            # The collector exits 1 when PERISHABLE data was lost, which on a
+            # free tier is an expected steady state rather than a broken build.
+            # The verdict that decides whether a human is needed is the
+            # monitor's, below -- so this step records the code without
+            # failing the job on it.
+            python scripts/daily_collect.py || echo "collector exit=$? (perishable loss is reported, not fatal)"
+          fi
+
+      - name: Coverage metrics
+        if: always()
+        run: python scripts/monitor_collection.py --explain-tickers || true
+
+      # Save unconditionally: a run that stopped early on a quota error still
+      # advanced the cursor by what it served, and discarding that would
+      # recreate the deadlock this workflow is meant to avoid.
+      - name: Save collection state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            data/collect_cursor.json
+            data/collection_report.jsonl
+          key: collect-state-${{ github.run_id }}
+
+      # The perishable evidence, kept retrievable without ever entering git.
+      - name: Upload raw news
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: raw-news-${{ github.run_id }}
+          path: data/raw/newsapi_news/
+          retention-days: 90
+          if-no-files-found: ignore
+
+      # Runs last and is allowed to fail the job: this is the signal that a
+      # human is needed (an auth failure, or sustained silence). A quota day
+      # stays silent by design -- see COLLECTION_ALERT_ON_QUOTA.
+      - name: Alert on collection failure
+        if: always()
+        env:
+          # These names are the ones core.config actually reads
+          # (ALERT_EMAIL_PASSWORD_ENV, TELEGRAM_BOT_TOKEN_ENV, ...), not the
+          # ones the variables are called in code. A near-miss here fails
+          # silently: delivery is best-effort, so a misspelled secret looks
+          # exactly like an unconfigured channel.
+          ALERT_EMAIL_USER: ${{ secrets.ALERT_EMAIL_USER }}
+          ALERT_EMAIL_PASSWORD: ${{ secrets.ALERT_EMAIL_PASSWORD }}
+          ALERT_EMAIL_TO: ${{ secrets.ALERT_EMAIL_TO }}
+          ALERT_TELEGRAM_TOKEN: ${{ secrets.ALERT_TELEGRAM_TOKEN }}
+          ALERT_TELEGRAM_CHAT_ID: ${{ secrets.ALERT_TELEGRAM_CHAT_ID }}
+        run: python scripts/monitor_collection.py

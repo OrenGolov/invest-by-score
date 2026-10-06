@@ -57,3 +57,8 @@ data/raw/newsapi_news/
 # append-only provenance ledger and data/feature_registry.jsonl is the M1
 # registry. "delete derived cache -> rebuild from raw -> reproduce the same
 # result" is only executable by a fresh clone if these travel with the repo.
+
+# Word lock files. Opening a .docx in Word creates `~$name.docx` next to it and
+# deletes it on close, so it is transient per-machine state, never content.
+~$*.docx
+~$*.xlsx
