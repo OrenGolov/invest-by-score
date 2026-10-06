@@ -77,6 +77,35 @@ $settings = New-ScheduledTaskSettingsSet `
     -WakeToRun `
     -ExecutionTimeLimit (New-TimeSpan -Hours 2)
 
+# -WakeToRun IS NOT SUFFICIENT ON ITS OWN, and that is the second half of the
+# same defect. The task flag only ASKS to wake the machine; Windows obeys it
+# only where the active power scheme permits wake timers.
+#
+# MEASURED on this machine (Dell laptop, Balanced scheme) right after setting
+# WakeToRun=True on all three tasks:
+#
+#     RTCWAKE  AC = 0x1 (Enable)     DC = 0x0 (Disable)
+#
+# So the flag was honoured while plugged in and SILENTLY IGNORED on battery --
+# with sleep after 45 minutes on DC, an unplugged laptop would keep missing the
+# slot exactly as it did on 2026-10-06, while every task still reported
+# WakeToRun=True. Checking the task alone would confirm the wrong thing.
+#
+# Enabled here for DC too, idempotently, so a reinstall cannot restore the half
+# of the fix that lives outside the task definition.
+powercfg /setdcvalueindex SCHEME_CURRENT SUB_SLEEP RTCWAKE 1 | Out-Null
+powercfg /setacvalueindex SCHEME_CURRENT SUB_SLEEP RTCWAKE 1 | Out-Null
+powercfg /setactive SCHEME_CURRENT | Out-Null
+Write-Host "Wake timers enabled on AC and battery (powercfg RTCWAKE = 1)"
+Write-Host ""
+
+# NOTE ON THIS MACHINE'S SLEEP MODEL, since it changes what to expect:
+# `powercfg /availablesleepstates` reports S0 Low Power Idle (Modern Standby)
+# with S1/S2/S3 unavailable. S0 keeps the network connected and honours wake
+# timers, which is BETTER for scheduled work than classic S3. Hibernation would
+# block an RTC wake, and HIBERNATEIDLE is 0 on AC and 0x7fffffff on DC -- never,
+# in both cases -- so it does not interfere.
+
 function Register-InvestTask {
     param(
         [string]$Name,
