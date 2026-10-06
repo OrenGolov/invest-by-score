@@ -137,6 +137,25 @@ function Register-InvestTask {
         -RepetitionInterval (New-TimeSpan -Hours 2) `
         -RepetitionDuration (New-TimeSpan -Hours 8)).Repetition
 
+    # NO -Principal IS PASSED, AND THAT DEFAULT IS LOAD-BEARING.
+    #
+    # Register-ScheduledTask defaults to LogonType=Interactive ("run only when
+    # the user is logged on"), which is what these tasks need: they read the
+    # operator's USER-scope environment variables (ALERT_EMAIL_PASSWORD,
+    # FINNHUB_API_KEY). A task registered to run "whether the user is logged on
+    # or not" runs in a session that does not have them, so email would silently
+    # report UNCONFIGURED and news would report no key -- the failure would look
+    # like a credential problem rather than a scheduling one.
+    #
+    # VERIFIED 2026-10-06 that the lock screen does NOT defeat this, which is
+    # the obvious worry: the logon session that started 10/05 12:35 was still
+    # alive 1d06h later, and the 22:00/22:15 tasks ran at 11:02 PM with
+    # result=0 while the machine was unattended. LOCKED, DISPLAY OFF and ASLEEP
+    # all keep the session logged on.
+    #
+    # The cases that DO stop these tasks are different: signing out, switching
+    # user, or rebooting and not signing back in. After a restart the operator
+    # must sign in once; nothing runs before that.
     Register-ScheduledTask -TaskName $Name -Action $action -Trigger $trigger `
         -Settings $settings -Description $Description -Force | Out-Null
 
