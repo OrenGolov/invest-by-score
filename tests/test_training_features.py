@@ -198,9 +198,39 @@ class ConfigPostureTests(unittest.TestCase):
         """Off restores the X5 blocker this work exists to fix."""
         self.assertTrue(TRAINING_INCLUDE_CONTEXTUAL_FEATURES)
 
-    def test_fundamental_routing_is_off_until_the_data_is_real(self):
-        """Not a preference: the values are measured constants today."""
-        self.assertFalse(TRAINING_INCLUDE_FUNDAMENTAL_FEATURES)
+    def test_fundamental_routing_is_on_now_that_the_data_is_real(self):
+        """The flag follows the DATA, which is why this test changed.
+
+        It previously asserted False, with the reason "the values are measured
+        constants today" — and that reason was correct: with no provider key
+        every fundamental metric was null and the producer substituted one
+        neutral vector for every company.
+
+        MEASURED 2026-10-06, that is no longer the state. A key is configured
+        and, after fixing two fields that were mapped to absolute currency
+        amounts rather than ratios, three of the five features carry real
+        cross-sectional variance (NVDA/KO/AAPL -> 3 distinct vectors).
+
+        So the assertion is inverted, and the guard that actually matters is
+        the one below it: two features ARE still constant, and routing them
+        without reporting that would inflate the apparent feature count.
+        """
+        self.assertTrue(TRAINING_INCLUDE_FUNDAMENTAL_FEATURES)
+
+    def test_routing_fundamentals_requires_reporting_zero_variance(self):
+        """The invariant that keeps the two dead features honest.
+
+        Alpha Vantage's OVERVIEW returns neither DebtToEquity nor FreeCashflow,
+        so balance_sheet_quality is pinned at 10.0 and free_cash_flow_quality
+        at 3.0 for every ticker. Routing five features while only three can
+        vary is defensible ONLY while the constant ones are named — otherwise
+        an ablation would "remove" a group that was never contributing, which
+        is the exact confusion X5 exists to prevent.
+        """
+        from core.config import TRAINING_REPORT_ZERO_VARIANCE_FEATURES
+
+        if TRAINING_INCLUDE_FUNDAMENTAL_FEATURES:
+            self.assertTrue(TRAINING_REPORT_ZERO_VARIANCE_FEATURES)
 
 
 class RenderTests(unittest.TestCase):

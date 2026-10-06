@@ -9690,7 +9690,35 @@ TRAINING_INCLUDE_CONTEXTUAL_FEATURES = True
 #
 # The gate below turns this on automatically once the metrics are real, so
 # the flag is a measured state rather than a preference.
-TRAINING_INCLUDE_FUNDAMENTAL_FEATURES = False
+# TURNED ON 2026-10-06, once the metrics became real.
+#
+# The measurement above (five tickers, one distinct vector) was taken with no
+# ALPHAVANTAGE_API_KEY. A key was configured on 2026-10-06 and the vectors were
+# STILL identical — because `fetch_fundamental_snapshot` mapped two ratio
+# fields to absolute currency amounts (GrossProfitTTM, RevenueTTM), which the
+# scorer clamps to 10.0 for every company. With that fixed:
+#
+#     ticker  margin  growth  valuation   balance   fcf
+#     NVDA     6.37   10.00     1.90       10.0     3.0
+#     KO       2.86    0.67     3.98       10.0     3.0
+#     AAPL     2.76    1.64     0.23       10.0     3.0
+#
+#     DISTINCT vectors across 3 tickers: 3
+#
+# So three of the five features now carry cross-sectional variance. The other
+# two do not and cannot yet: Alpha Vantage's OVERVIEW does not return
+# DebtToEquity or FreeCashflow at all, so balance_sheet_quality is pinned at
+# 10.0 and free_cash_flow_quality at 3.0. TRAINING_REPORT_ZERO_VARIANCE_FEATURES
+# is what keeps that visible instead of letting them inflate the feature count.
+#
+# WHY TURN IT ON WITH TWO FEATURES STILL CONSTANT. docs/open-decisions.md
+# section 28 measured that zero of seven learned estimators beat a no-feature
+# baseline on 16 price features, and that four of five feature groups were never
+# present to ablate. Price features have been TESTED AND FAILED; the untested
+# hypothesis is the other groups. Routing three real features is how that
+# hypothesis becomes testable, and the zero-variance report names the two that
+# are not pulling weight rather than hiding them.
+TRAINING_INCLUDE_FUNDAMENTAL_FEATURES = True
 
 # A feature whose value is identical across every row carries no information.
 # Variance is checked at dataset build time and a zero-variance column is
