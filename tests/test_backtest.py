@@ -234,6 +234,45 @@ class FoldGeometryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             build_walk_forward_folds(400, fold_sessions=50, embargo_sessions=59, holdout_sessions=40)
 
+    def test_the_embargo_is_judged_against_the_horizon_being_trained(self):
+        # MEASURED 2026-10-06: the gate always took the max over EVERY declared
+        # horizon (252, the 12m label), so a 20d fit was refused unless it
+        # embargoed a full year. `scripts/train.py` failed on its own documented
+        # command. A dataset trains one horizon; that is the one at risk.
+        geometry = build_walk_forward_folds(
+            600, fold_sessions=80, embargo_sessions=60, holdout_sessions=60,
+            target_horizon="20d",
+        )
+        self.assertTrue(geometry["folds"])
+
+    def test_an_embargo_shorter_than_its_own_horizon_is_still_rejected(self):
+        # The leakage rule itself is unchanged: a validation label must not
+        # overlap the training window, whichever horizon is being trained.
+        for horizon in ("120d", "252d"):
+            with self.subTest(horizon=horizon):
+                with self.assertRaises(ValueError):
+                    build_walk_forward_folds(
+                        2000, fold_sessions=80, embargo_sessions=60,
+                        holdout_sessions=60, target_horizon=horizon,
+                    )
+
+    def test_an_undeclared_horizon_is_refused_rather_than_ignored(self):
+        # Silently falling back to the max would turn a typo into a surprising
+        # geometry; naming the mistake is cheaper than debugging the folds.
+        with self.assertRaises(ValueError):
+            build_walk_forward_folds(
+                600, fold_sessions=80, embargo_sessions=300,
+                holdout_sessions=60, target_horizon="21d",
+            )
+
+    def test_omitting_the_horizon_keeps_the_conservative_default(self):
+        # Callers that do not know their horizon must still be held to the
+        # longest declared one.
+        with self.assertRaises(ValueError):
+            build_walk_forward_folds(
+                600, fold_sessions=80, embargo_sessions=60, holdout_sessions=60,
+            )
+
     def test_fold_geometry_boundaries_and_holdout_isolation(self):
         sessions = _EMBARGO * 5
         geometry = build_walk_forward_folds(

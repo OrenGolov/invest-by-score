@@ -185,23 +185,49 @@ def build_walk_forward_folds(
     fold_sessions: int | None = None,
     embargo_sessions: int | None = None,
     holdout_sessions: int | None = None,
+    target_horizon: str | None = None,
 ) -> dict:
     """Anchored walk-forward folds with a strict embargo and a tail holdout.
 
     Fold i: train [0, t1_i], embargo sessions (t1_i, t1_i + embargo],
     validation [t1_i + embargo + 1, t1_i + embargo + fold_sessions].
-    Validation windows never touch the holdout tail. Raises ValueError when
-    the embargo is shorter than the longest label horizon (spec: >= 60).
+    Validation windows never touch the holdout tail.
+
+    The embargo must be at least as long as the label horizon being trained,
+    or a validation row's label would overlap the training window and the
+    out-of-sample claim would be false.
+
+    `target_horizon` names THAT horizon (a key of LABEL_HORIZON_SESSIONS).
+    Omitting it keeps the conservative behaviour of requiring the embargo to
+    cover the LONGEST declared horizon.
+
+    **Why the horizon is a parameter now.** MEASURED 2026-10-06, the gate
+    always took the max over every declared horizon — 252 sessions, the 12m
+    label. A dataset trains ONE horizon, and the default is 20d, so a 20d fit
+    was refused unless it embargoed a full year: `scripts/train.py` failed on
+    its own documented command with "embargo (60) must be >= the max label
+    horizon (252)". Requiring a 252-session embargo to protect a 20-session
+    label is not conservatism, it is an unsatisfiable constraint on any
+    dataset short of several years. The leakage rule is unchanged; it is now
+    applied against the horizon that is actually at risk.
     """
     fold_sessions = fold_sessions if fold_sessions is not None else BACKTEST_FOLD_SESSIONS
     embargo = embargo_sessions if embargo_sessions is not None else BACKTEST_EMBARGO_SESSIONS
     holdout = holdout_sessions if holdout_sessions is not None else BACKTEST_HOLDOUT_SESSIONS
 
-    max_horizon = max(LABEL_HORIZON_SESSIONS.values())
-    if embargo < max_horizon:
+    if target_horizon is None:
+        required_horizon = max(LABEL_HORIZON_SESSIONS.values())
+        horizon_label = f"the max label horizon ({required_horizon})"
+    elif target_horizon not in LABEL_HORIZON_SESSIONS:
         raise ValueError(
-            f"embargo ({embargo}) must be >= the max label horizon ({max_horizon})"
+            f"target_horizon {target_horizon!r} is not a declared label horizon "
+            f"({', '.join(sorted(LABEL_HORIZON_SESSIONS))})"
         )
+    else:
+        required_horizon = LABEL_HORIZON_SESSIONS[target_horizon]
+        horizon_label = f"the {target_horizon} label horizon ({required_horizon})"
+    if embargo < required_horizon:
+        raise ValueError(f"embargo ({embargo}) must be >= {horizon_label}")
     if fold_sessions < 1 or holdout < 1:
         raise ValueError("fold_sessions and holdout_sessions must be positive")
     if session_count < fold_sessions + embargo + fold_sessions + holdout:

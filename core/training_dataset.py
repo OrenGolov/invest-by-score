@@ -506,9 +506,26 @@ def build_training_dataset(
     # feature can be declared, routed and still never arrive — and a
     # column that arrived constant carries no information while inflating
     # the feature count.
-    present: set[str] = set()
+    # INTERSECTION, not union. `core.training` builds its matrix as
+    #     [[row.features[name] for name in feature_names] for row in rows]
+    # so a name that is present on SOME rows and absent from others raises
+    # KeyError at fit time. MEASURED 2026-10-06, that is exactly how
+    # `scripts/train.py` failed once its embargo default was corrected:
+    # KeyError: 'regime_probability_proxy'.
+    #
+    # The comment below this block asserts that rows are "complete and
+    # identical in their key set by construction". That is the intent, and a
+    # union agrees with an intersection whenever it holds — so taking the
+    # intersection costs nothing when the invariant is true and prevents a
+    # KeyError when it is not. `partial_features` records any name that was
+    # dropped for this reason, because silently losing a feature is the other
+    # way this bug could hide.
+    present: set[str] = set(rows[0].features) if rows else set()
+    union: set[str] = set()
     for row in rows:
-        present.update(row.features)
+        present &= set(row.features)
+        union.update(row.features)
+    partial = sorted(union - present)
     constants = zero_variance_features([row.features for row in rows])
     routed_contextual = sorted(
         name for report in routing_reports for name in report.contextual_features
@@ -526,6 +543,9 @@ def build_training_dataset(
         "absent_from_every_row": sorted(
             {str(name) for name in declared} - present
         ),
+        # Present on some rows but not all, so excluded from feature_names.
+        # Normally empty; a non-empty list means a producer is intermittent.
+        "partial_features": partial,
         "routed_contextual": sorted(set(routed_contextual)),
         "routed_fundamental": sorted(set(routed_fundamental)),
         "zero_variance": constants,

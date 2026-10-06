@@ -433,7 +433,11 @@ def train_baseline(
 
     try:
         geometry = build_walk_forward_folds(
-            len(rows), fold_sessions, embargo_sessions, holdout_sessions
+            len(rows), fold_sessions, embargo_sessions, holdout_sessions,
+            # The embargo only has to cover the horizon THIS dataset labels.
+            # Passing it means a 20d fit is not held to the 252-session
+            # embargo the 12m label would need.
+            target_horizon=dataset.target_horizon,
         )
     except ValueError as exc:
         # Thin history is an ordinary, expected condition — recent listings

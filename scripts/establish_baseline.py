@@ -38,7 +38,11 @@ import pandas as pd  # noqa: E402
 
 from core.baseline_suite import best_simple_baseline  # noqa: E402
 from core.backtest.costs import COST_TABLE_V2  # noqa: E402
-from core.config import TRAINING_DEFAULT_SEED  # noqa: E402
+from core.config import (  # noqa: E402
+    LABEL_HORIZON_SESSIONS,
+    OUTCOME_LABEL_VERSION,
+    TRAINING_DEFAULT_SEED,
+)
 from core.trial_registry import Trial, load_trial_registry, persist_trial  # noqa: E402
 from core.training import persist_training_run, train_baseline_suite  # noqa: E402
 from core.training_dataset import (  # noqa: E402
@@ -72,9 +76,13 @@ def main() -> int:
     parser.add_argument("--times", type=int, default=25, help="prediction times per ticker")
     parser.add_argument("--horizon", default="20d", help="target label horizon")
     parser.add_argument("--seed", type=int, default=TRAINING_DEFAULT_SEED)
+    # Sized for the dataset this script builds, not for a multi-year backtest.
+    # 2*60 + 20 + 40 = 180 rows needed, against the ~300 it produces.
+    parser.add_argument("--fold-sessions", type=int, default=60)
+    parser.add_argument("--embargo-sessions", type=int, default=0,
+                        help="0 = use the label horizon (the honest minimum)")
+    parser.add_argument("--holdout-sessions", type=int, default=40)
     args = parser.parse_args()
-
-    from core.config import LABEL_HORIZON_SESSIONS
 
     if args.horizon not in LABEL_HORIZON_SESSIONS:
         print(f"unknown horizon {args.horizon!r}; known: {sorted(LABEL_HORIZON_SESSIONS)}")
@@ -141,7 +149,22 @@ def main() -> int:
         # family whose baseline the incumbent is expected to come from. M3's
         # vocabulary already includes 'sequence', which is what C6 will use.
         model_family="momentum",
-        label_version=getattr(dataset, "label_version", "outcome-label-v1"),
+        # The label contract the ROWS were built under, read from config rather
+        # than defaulted to a literal.
+        #
+        # MEASURED 2026-10-06, this line was
+        #     getattr(dataset, "label_version", "outcome-label-v1")
+        # and TrainingDataset has no `label_version` attribute — so the getattr
+        # ALWAYS fell through to the literal, which had been left behind when
+        # OUTCOME_LABEL_VERSION moved to v2. The registry then refused every
+        # trial: "label_version 'outcome-label-v1' != 'outcome-label-v2'".
+        # A hardcoded fallback for an attribute that cannot exist is not a
+        # fallback, it is the only path.
+        #
+        # `build_training_dataset` validates every row against
+        # OUTCOME_LABEL_VERSION (training_dataset.py), so this is the version
+        # the rows provably carry, not an assumption about them.
+        label_version=OUTCOME_LABEL_VERSION,
         horizons=[args.horizon],
         training_window={
             "start": str(first_time),
@@ -163,8 +186,30 @@ def main() -> int:
     trial_id = str(registered.get("trial_id", ""))
     print(f"  registered: {trial_id[:20]} status={registered.get('status')}")
 
-    print("\nTraining the M4 baseline suite (like-for-like, same folds/seed)...")
-    runs = train_baseline_suite(dataset, seed=args.seed)
+    # THE FOLD GEOMETRY MUST MATCH THE DATASET THIS SCRIPT BUILDS.
+    #
+    # MEASURED 2026-10-06: passing no geometry inherited the config defaults
+    # (fold 252 / embargo 252 / holdout 126), which need 882 rows. This script
+    # builds 12 tickers x 25 times = 300 prediction times, so every estimator
+    # failed with "history of 288 sessions is too short". Those defaults are
+    # sized for a multi-year daily-bar backtest, not for a baseline suite whose
+    # own arguments cap it at a few hundred rows.
+    #
+    # The embargo still has to cover the label horizon or the out-of-sample
+    # claim is false, so it is derived from the horizon rather than guessed:
+    # at 20d the minimum honest embargo is 20 sessions.
+    folds = {
+        "fold_sessions": args.fold_sessions,
+        "embargo_sessions": args.embargo_sessions or LABEL_HORIZON_SESSIONS[args.horizon],
+        "holdout_sessions": args.holdout_sessions,
+    }
+    needed = 2 * folds["fold_sessions"] + folds["embargo_sessions"] + folds["holdout_sessions"]
+    print(
+        f"\nTraining the M4 baseline suite (like-for-like, same folds/seed)...\n"
+        f"  folds: fold={folds['fold_sessions']} embargo={folds['embargo_sessions']} "
+        f"holdout={folds['holdout_sessions']} -> needs {needed} rows, have {rows}"
+    )
+    runs = train_baseline_suite(dataset, seed=args.seed, **folds)
     for name, run in sorted(runs.items()):
         metrics = run.metrics or {}
         accuracy = metrics.get("directional_accuracy")

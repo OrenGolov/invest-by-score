@@ -264,6 +264,32 @@ class TestEndToEndBuild(unittest.TestCase):
         self.assertEqual(len(self.dataset), len(self.times))
         self.assertEqual(self.dataset.excluded, [])
 
+    def test_every_declared_feature_exists_on_every_row(self) -> None:
+        """`feature_names` must be safe to index on EVERY row.
+
+        MEASURED 2026-10-06: `feature_names` was the UNION of row keys, so a
+        feature present on some rows and absent from others named a column that
+        `core.training` then demanded of all of them:
+
+            [[row.features[name] for name in feature_names] for row in rows]
+            -> KeyError: 'regime_probability_proxy'
+
+        An intersection makes that structurally impossible. This asserts the
+        property the matrix build depends on, rather than the implementation.
+        """
+        for row in self.dataset.rows:
+            missing = [n for n in self.dataset.feature_names if n not in row.features]
+            with self.subTest(prediction_time=row.prediction_time):
+                self.assertEqual(missing, [], f"declared but absent: {missing}")
+
+    def test_partially_present_features_are_reported_not_hidden(self) -> None:
+        """Dropping a name silently is the other way this bug could hide."""
+        routing = self.dataset.feature_routing or {}
+        self.assertIn("partial_features", routing)
+        # On a healthy single-ticker build every producer is either up or down
+        # for the whole run, so nothing should be partial.
+        self.assertEqual(routing["partial_features"], [])
+
     def test_every_row_is_registry_conformant(self) -> None:
         registry = build_default_registry()
         for row in self.dataset.rows:
