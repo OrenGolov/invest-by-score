@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from datetime import datetime, timedelta
 
 from agents.market_data_agent import fetch_market_snapshot
@@ -507,7 +508,28 @@ def _build_fundamental_features(snapshot: dict, fundamental_snapshot: dict | Non
     margin_score = max(0.0, min(10.0, (margin_quality * 100.0) / 10.0 if margin_quality else 5.0))
     free_cash_flow_quality = 8.0 if free_cash_flow > 0.0 else 3.0
     balance_sheet_quality = max(0.0, min(10.0, 10.0 - leverage_ratio * 5.0))
-    valuation_quality = max(0.0, min(10.0, 10.0 - (price_to_book - 2.0) * 1.5))
+    # LOG SCALE, because the linear one floored on this portfolio.
+    #
+    # The previous formula was `10 - (price_to_book - 2.0) * 1.5`, which reaches
+    # zero at P/B 8.67. MEASURED 2026-10-06 across seven holdings:
+    #
+    #     AAPL 45.74 -> 0.00    KO   10.55 -> 0.00    MSFT 8.36 -> 0.46
+    #     NVDA 23.78 -> 0.00    CSCO  8.34 -> 0.49    INTC 7.40 -> 1.90
+    #     V    19.58 -> 0.00
+    #
+    # Four of seven floored and the rest sat within 0.5 of the floor, so the
+    # feature was close to constant for a large-cap tech portfolio — it could
+    # not distinguish AAPL at 45.74 from KO at 10.55, a 4x difference.
+    #
+    # A log mapping over P/B 1..50 keeps the same 0-10 direction (cheaper is
+    # better) while spreading the range this portfolio actually occupies: the
+    # same seven names now score 0.23 to 4.88, all distinct.
+    #
+    # NOT sector-relative, deliberately: that needs a sector P/B distribution
+    # the repo does not have, and inventing one would be a guess wearing a
+    # number's clothes. This is a monotone rescale of the same input.
+    _pb = max(price_to_book, 0.01) if price_to_book else 4.0
+    valuation_quality = max(0.0, min(10.0, 10.0 * (1.0 - math.log(max(_pb, 1.0)) / math.log(50.0))))
     quality_score = max(0.0, min(10.0, (return_on_equity * 100.0) * 0.08 + 4.0))
 
     source_contract = (fundamental_snapshot or {}).get("source_contract", {})

@@ -536,13 +536,47 @@ def fetch_fundamental_snapshot(
             "forward_pe": _coerce_float(payload.get("ForwardPE")),
             "price_to_book": _coerce_float(payload.get("PriceToBookRatio")),
             "price_to_sales": _coerce_float(payload.get("PriceToSalesRatioTTM")),
+            # NOT RETURNED BY ALPHA VANTAGE'S `OVERVIEW` FUNCTION, verified
+            # 2026-10-06 against a live response: PayoutRatio, DebtToEquity,
+            # FreeCashflow, OperatingCashflow, EnterpriseValue. They are left
+            # mapped so the shape stays stable and a future provider (or a
+            # different AV function, e.g. BALANCE_SHEET / CASH_FLOW) can fill
+            # them, but they are NULL today and the features derived from them
+            # are therefore constants:
+            #
+            #     free_cash_flow_quality  -> always 3.0  (free_cash_flow null)
+            #     balance_sheet_quality   -> always 10.0 (debt_to_equity null)
+            #
+            # Two of the five fundamental features cannot carry information
+            # until a provider supplies these. Worth knowing before judging a
+            # fundamentals ablation.
             "payout_ratio": _coerce_float(payload.get("PayoutRatio")),
             "debt_to_equity": _coerce_float(payload.get("DebtToEquity")),
             "free_cash_flow": _coerce_float(payload.get("FreeCashflow")),
             "operating_cash_flow": _coerce_float(payload.get("OperatingCashflow")),
-            "revenue_growth": _coerce_float(payload.get("RevenueTTM")),
-            "gross_margins": _coerce_float(payload.get("GrossProfitTTM")),
-            "ebitda_margin": _coerce_float(payload.get("EBITDAMarginTTM")),
+            # RATIOS, NOT DOLLAR TOTALS. MEASURED 2026-10-06, these two were
+            # mapped to RevenueTTM and GrossProfitTTM — absolute currency
+            # amounts. Downstream, `_build_fundamental_features` scores them as
+            # `value * 100 / 10` and clamps to [0, 10], so NVDA's gross profit
+            # of 226,241,004,000 scored 10.0, and so did every other company:
+            #
+            #     NVDA / KO / AAPL  ->  margin 10.0, growth 10.0  (identical)
+            #
+            # The result was five fundamental features with ZERO cross-sectional
+            # variance even with a live key — indistinguishable from the neutral
+            # defaults the key was added to replace, which is why
+            # TRAINING_INCLUDE_FUNDAMENTAL_FEATURES stayed off.
+            #
+            # ProfitMargin (0.637) and QuarterlyRevenueGrowthYOY (1.059) are the
+            # fields that actually carry the ratio these names promise.
+            "revenue_growth": _coerce_float(payload.get("QuarterlyRevenueGrowthYOY")),
+            "gross_margins": _coerce_float(payload.get("ProfitMargin")),
+            # Alpha Vantage's OVERVIEW does not return EBITDAMarginTTM. The
+            # closest field it DOES return is OperatingMarginTTM, which is a
+            # ratio on the same scale; using it beats a permanent null.
+            "ebitda_margin": _coerce_float(
+                payload.get("EBITDAMarginTTM") or payload.get("OperatingMarginTTM")
+            ),
             "return_on_equity": _coerce_float(payload.get("ReturnOnEquityTTM")),
             "market_cap": _coerce_float(payload.get("MarketCapitalization")),
             "enterprise_value": _coerce_float(payload.get("EnterpriseValue")),
