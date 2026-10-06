@@ -14,6 +14,12 @@ This folder contains the initial architecture and planning documents for the sco
 - [monitoring-dashboard.md](monitoring-dashboard.md) — dashboard and drift monitoring design
 - [roadmap.md](roadmap.md) — phased delivery plan
 
+## Where we are
+
+- [SESSION_STATE_2026-10-06.md](SESSION_STATE_2026-10-06.md) — read this first:
+  what the last session changed, the two findings that matter, and exactly
+  where to pick up
+
 ## Operating
 
 - **Signup-Guide.docx** — the three accounts/keys only the operator can create,
