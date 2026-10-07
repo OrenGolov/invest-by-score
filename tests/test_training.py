@@ -265,5 +265,55 @@ class TestPersistence(TrainingTestCase):
             load_training_runs(self.path)
 
 
+class TrainCliHorizonTests(unittest.TestCase):
+    """X6: six horizons declared, one trainable.
+
+    MEASURED 2026-10-07, scripts/train.py had no --horizon flag at all, so five
+    of the six declared label horizons could not be trained from the command
+    line even though build_training_dataset has always accepted target_horizon.
+    X6 named multi-horizon training as priority 4 precisely because shorter
+    horizons need far less data per conclusion than 20d.
+
+    These tests read the script's source rather than invoking it, because a
+    real run fetches prices and takes minutes.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.source = (
+            pathlib.Path(__file__).resolve().parent.parent
+            / "scripts" / "train.py"
+        ).read_text(encoding="utf-8")
+
+    def test_the_cli_exposes_a_horizon_flag(self):
+        self.assertIn('"--horizon"', self.source)
+
+    def test_the_horizon_reaches_the_dataset_builder(self):
+        # A flag that is parsed and then ignored is worse than no flag: it
+        # reports a horizon the dataset does not actually carry.
+        self.assertIn("target_horizon=args.horizon", self.source)
+
+    def test_an_unknown_horizon_is_refused_rather_than_silently_defaulted(self):
+        self.assertIn("LABEL_HORIZON_SESSIONS", self.source)
+        self.assertIn("unknown horizon", self.source)
+
+    def test_the_unused_tail_is_derived_from_the_horizon(self):
+        """The bug that made long horizons quietly wrong.
+
+        The tail trim was hardcoded to 100 bars -- correct for a 20d label and
+        far too short for 60d/120d/252d, whose newest rows cannot have matured
+        labels. Those rows would be requested, rejected by the label builder,
+        and the dataset would come back thinner than asked for with no
+        explanation.
+        """
+        self.assertNotIn("args.rows + 100", self.source)
+        self.assertIn("horizon_sessions + 5", self.source)
+
+    def test_the_embargo_defaults_to_the_horizon_not_a_constant(self):
+        # A fixed embargo understates the leakage guard for long horizons, and
+        # the fold gate would then refuse the run outright.
+        self.assertIn("args.embargo_sessions or horizon_sessions", self.source)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -27,8 +27,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from core.config import (  # noqa: E402
+    LABEL_HORIZON_SESSIONS,
     OUTCOME_LABEL_VERSION,
     TRAINING_DEFAULT_SEED,
+    TRAINING_DEFAULT_TARGET_HORIZON,
 )
 from core.training import (  # noqa: E402
     BASELINE_ESTIMATORS,
@@ -60,21 +62,47 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--seed", type=int, default=TRAINING_DEFAULT_SEED)
     parser.add_argument("--rows", type=int, default=600, help="prediction times to use")
     parser.add_argument("--fold-sessions", type=int, default=80)
-    parser.add_argument("--embargo-sessions", type=int, default=60)
+    # 0 = derive from the horizon. A fixed default silently understates the
+    # embargo for long horizons, and the leakage gate would then refuse the run.
+    parser.add_argument("--embargo-sessions", type=int, default=0)
     parser.add_argument("--holdout-sessions", type=int, default=60)
     parser.add_argument("--persist", action="store_true", help="append to the run ledger")
     parser.add_argument("--register-trial", action="store_true")
     parser.add_argument("--hypothesis", default="")
     parser.add_argument("--primary-metric", default="directional_accuracy")
+    parser.add_argument(
+        "--horizon", default=TRAINING_DEFAULT_TARGET_HORIZON,
+        help=(
+            "label horizon to train. X6 named six declared horizons and ONE "
+            "trained; this is the flag that was missing to train the rest"
+        ),
+    )
     args = parser.parse_args(argv)
 
+    if args.horizon not in LABEL_HORIZON_SESSIONS:
+        raise SystemExit(
+            f"unknown horizon {args.horizon!r}; "
+            f"declared: {', '.join(LABEL_HORIZON_SESSIONS)}"
+        )
+    horizon_sessions = LABEL_HORIZON_SESSIONS[args.horizon]
+
     frame = _load_frame(args.ticker)
-    # Leave the tail unused: the newest bars cannot have a matured 20d label.
+    # Leave the tail unused: the newest bars cannot have a MATURED label, and
+    # how many bars that is depends on the horizon. This was hardcoded to 100,
+    # which is right for 20d and silently wrong for 60d/120d/252d -- those rows
+    # would be requested, rejected by the label builder, and the dataset would
+    # come back thinner than asked for with no explanation. A 252d label needs
+    # 252 unused bars at the tail, not 100.
+    tail = max(horizon_sessions + 5, 25)
     times = [
         ts.strftime("%Y-%m-%d %H:%M:%S")
-        for ts in frame.index[-(args.rows + 100):-100]
+        for ts in frame.index[-(args.rows + tail):-tail]
     ]
-    dataset = build_training_dataset({args.ticker.upper(): times}, {args.ticker.upper(): frame})
+    dataset = build_training_dataset(
+        {args.ticker.upper(): times},
+        {args.ticker.upper(): frame},
+        target_horizon=args.horizon,
+    )
     print(f"dataset: {len(dataset)} rows, {len(dataset.feature_names)} features")
     print(f"  hash {dataset.dataset_hash}")
     if dataset.excluded:
@@ -85,7 +113,7 @@ def main(argv: list[str] | None = None) -> int:
     estimators = list(BASELINE_ESTIMATORS) if args.all else [args.estimator]
     folds = {
         "fold_sessions": args.fold_sessions,
-        "embargo_sessions": args.embargo_sessions,
+        "embargo_sessions": args.embargo_sessions or horizon_sessions,
         "holdout_sessions": args.holdout_sessions,
     }
 

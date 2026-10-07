@@ -1214,6 +1214,74 @@ the distinction item 11 was created to enforce.
 collector failure reaches nobody, and `monitor_collection.py --explain-tickers`
 run by hand is the only substitute.
 
+## 32. Three modules are built, gated, tested — and called by nothing — OPEN
+
+**Raised:** 2026-10-07. **Owner:** unassigned.
+
+A twelve-area survey of the project looked for the gap between what exists and
+what RUNS. Most areas are healthier than expected. Three modules are not wired
+to any consumer at all:
+
+```
+module                    imported by (excluding its own gate and tests)
+core/forecast_joint.py            NOTHING
+core/stress_scenarios.py          NOTHING
+core/event_context_panel.py       NOTHING
+core/research_view.py             config + one unrelated gate only
+```
+
+Each has a passing governance gate (`check_research_view.py` passes), so the
+code is correct. It simply never executes outside its own test.
+
+**Why this is worth a decision rather than a shrug.** A gate that passes on an
+uncalled module reports health for something that cannot affect any output. The
+repository therefore counts 69 passing gates, some unknown number of which
+certify code on no live path — which is the same confusion item 26 names for
+the four dashboard panels, one level deeper.
+
+**What would settle it:** for each module, either wire it to a consumer or
+delete it and say why in the commit. "Built but unreachable" is the state an
+audit cannot distinguish from "built and working", and that is what makes it
+worth closing.
+
+**Not recommended:** wiring them to make the count look better. `research_view`
+has an obvious consumer (the dashboard, item 26); `forecast_joint` and
+`stress_scenarios` may genuinely belong to a sprint that was paused, in which
+case deleting them is the honest answer and git keeps the history.
+
+---
+
+## 33. The model registry's champions carry no metrics — OPEN
+
+**Raised:** 2026-10-07. **Owner:** unassigned.
+
+```
+registered models: 3
+  fundamental-v1   status=approved   has_metrics=False
+  market-data-v1   status=approved   has_metrics=False
+  technical-v1     status=approved   has_metrics=False
+```
+
+Meanwhile the training ledger holds 8 runs that DO carry metrics:
+
+```
+  momentum          dir_acc=0.575   obs=120
+  historical_mean   dir_acc=0.550   obs=120
+  elastic_net       dir_acc=0.533   obs=120
+```
+
+Section 28 already recorded that the three champions are "rule-based scorers
+carrying `metrics: {}`, documented as approved for governance rather than by
+comparison". What is new is that there is now a MEASURED incumbent to compare
+against -- `establish_baseline.py` runs end to end since 2026-10-06 and records
+one -- so the gap between "approved" and "measured" is now closable rather than
+merely noted.
+
+**What would settle it:** either register the measured baseline as the
+incumbent, or mark the three rule-based entries explicitly as
+governance-approved-without-metrics so a reader cannot mistake them for models
+that beat something.
+
 ## Closed
 
 - ~~**Live runs must use today's chart state.**~~ Fixed in `ad75f48`. The
