@@ -144,3 +144,89 @@ repo and worth reading before any modelling work:
   `EVENT_MEMORY_MIN_SIMILARITY` as a module attribute changes nothing, because
   `find_analogs` binds it as a default argument at import. The first sweep
   measured nothing; the table in item 29 passes it explicitly.
+
+
+---
+
+# Update — 2026-10-07
+
+## Overnight test result
+
+The 22:00 run did NOT fire on this laptop. Root cause was a power-plan setting
+one level below the task: `Allow wake timers` was enabled on AC and **disabled
+on DC**, and the machine loses AC power every evening (measured 17:55, 18:33,
+17:30 on three consecutive nights — a dock or desk socket, not the charger).
+`WakeToRun=True` was necessary but not sufficient.
+
+Fixed: wake timers now enabled on battery. **Untested on this machine** — tonight
+is its first real trial.
+
+A separate session on another machine (`sprints-vs`, commit f20160c) proved the
+same fix works: three timer wakes, three jobs run, 75 of 77 tickers, 10,771
+articles. It also documents a measurement trap I fell into — an S0 Modern
+Standby wake logs **no** Power-Troubleshooter event, so judging "did it wake?"
+that way is a false negative. Use Kernel-Power 506/507 pairs.
+
+Still unfixed: the task runs as `LogonType: Interactive`, so it needs an active
+session. Switching to S4U needs admin (`Access is denied`).
+
+## Alerting
+
+Audited end to end. The path is correct — the task does run the monitor,
+credentials are set at User level, a forced CRITICAL verdict renders proper
+subject and body. The send still fails, and the diagnostic is right about why:
+
+    tcp smtp.gmail.com:587   connects
+    SMTP greeting            NONE (b'')
+    https to google          200
+
+That is interception, not a block. No SMTP channel will work here.
+
+**But "no alert can leave this network" is too strong.** The probe that settles
+it had never been run:
+
+    api.telegram.org                                 HTTP 503
+    gmail.googleapis.com/gmail/v1/users/me/profile   HTTP 401
+
+401 is reachable-but-unauthenticated. A Gmail REST API sender would work from
+the office; it needs an OAuth2 refresh token instead of an app password.
+Registered as item 31.
+
+## Corrections to the 10-06 session
+
+**Fundamentals routing was reverted.** I enabled it on the strength of today's
+snapshot showing three distinct vectors. Training is point-in-time, and 200 of
+200 sampled historical cache files are all-null — Alpha Vantage's free tier has
+no historical fundamentals endpoint, so past vintages cannot be reconstructed.
+Routing them fed five neutral columns to nearly every row. This also settles
+item 30: the variance *axis* was never the issue.
+
+## New this session
+
+| Commit | What |
+|---|---|
+| `7dd72d5` | A quiet ticker is not a failed request |
+| `6785924` | Fundamentals need a rotation too (20/run vs a 25/day cap) |
+| `087d25f` | Alerting audit: a 443 channel IS reachable |
+| `bdbb652` | Revert fundamentals routing |
+| `580a201` | Multi-horizon training + a tail bug behind it |
+
+## Twelve-area survey
+
+Most areas are healthier than expected. Three findings worth acting on:
+
+- **Items 32** — `forecast_joint`, `stress_scenarios`, `event_context_panel`
+  have NO consumer outside their own gates and tests. `research_view` likewise.
+  A gate passing on uncalled code certifies nothing that can affect output.
+- **Item 33** — the model registry's three champions are `approved` with
+  `has_metrics=False`, while 8 training runs DO carry metrics. There is now a
+  measured incumbent to compare against.
+- **Sentiment is UNAVAILABLE by design** (no provider exists) and **macro needs
+  the FRED key**. Neither is a bug.
+
+## Pick up here
+
+1. Prove one alert channel from home wifi (`verify_alert_email.py`).
+2. Check tonight's 22:00 run using **Kernel-Power 506/507**, not the
+   Power-Troubleshooter event.
+3. Decide items 32 and 33 — both are "wire it or delete it" calls.
