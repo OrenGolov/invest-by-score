@@ -9756,7 +9756,34 @@ TRAINING_INCLUDE_CONTEXTUAL_FEATURES = True
 # hypothesis is the other groups. Routing three real features is how that
 # hypothesis becomes testable, and the zero-variance report names the two that
 # are not pulling weight rather than hiding them.
-TRAINING_INCLUDE_FUNDAMENTAL_FEATURES = True
+# TURNED BACK OFF 2026-10-07, one day after turning it on. The reason it was
+# turned on was real; the reason it is off again is bigger, and was only
+# visible once training actually ran with it enabled.
+#
+# TRAINING IS POINT-IN-TIME. Every row is a PAST as_of date, and fundamentals
+# are cached per date. MEASURED over 200 sampled NVDA cache files:
+#
+#     files with real metrics:    0
+#     files all-null:           200
+#
+# Every historical snapshot predates the API key, and Alpha Vantage's OVERVIEW
+# function returns only CURRENT values -- there is no historical fundamentals
+# endpoint on the free tier. So point-in-time fundamentals for past dates
+# cannot be reconstructed from this provider at all; only today forward can be
+# captured, one vintage per day, at 20 tickers per run.
+#
+# Routing them into training TODAY therefore feeds five neutral columns for
+# essentially every row -- which is precisely the harm this flag was False to
+# prevent. The 2026-10-06 measurement (three distinct vectors across NVDA/KO/
+# AAPL) was taken on TODAY's snapshot, where the values are real. It did not
+# generalise to the historical rows training actually consumes, and I did not
+# check that before flipping the flag.
+#
+# WHAT WOULD MAKE THIS TRUE LATER: enough accrued daily vintages that a
+# training window falls inside the period where fundamentals were captured
+# live. At 20 tickers/run that is months away, and it is a data-accrual
+# problem, not a configuration one -- the same bottleneck as section 28.
+TRAINING_INCLUDE_FUNDAMENTAL_FEATURES = False
 
 # A feature whose value is identical across every row carries no information.
 # Variance is checked at dataset build time and a zero-variance column is

@@ -198,24 +198,27 @@ class ConfigPostureTests(unittest.TestCase):
         """Off restores the X5 blocker this work exists to fix."""
         self.assertTrue(TRAINING_INCLUDE_CONTEXTUAL_FEATURES)
 
-    def test_fundamental_routing_is_on_now_that_the_data_is_real(self):
-        """The flag follows the DATA, which is why this test changed.
+    def test_fundamental_routing_is_off_while_history_is_unavailable(self):
+        """The flag follows the DATA, and the data is point-in-time.
 
-        It previously asserted False, with the reason "the values are measured
-        constants today" — and that reason was correct: with no provider key
-        every fundamental metric was null and the producer substituted one
-        neutral vector for every company.
+        This assertion has now moved twice, which is worth recording.
 
-        MEASURED 2026-10-06, that is no longer the state. A key is configured
-        and, after fixing two fields that were mapped to absolute currency
-        amounts rather than ratios, three of the five features carry real
-        cross-sectional variance (NVDA/KO/AAPL -> 3 distinct vectors).
+        It began as False ("the values are measured constants today") -- correct
+        with no provider key. On 2026-10-06 a key was configured and the field
+        mapping was fixed, TODAY's snapshot gained real cross-sectional variance
+        (NVDA/KO/AAPL -> 3 distinct vectors), and it was flipped to True.
 
-        So the assertion is inverted, and the guard that actually matters is
-        the one below it: two features ARE still constant, and routing them
-        without reporting that would inflate the apparent feature count.
+        That was wrong, and MEASURED 2026-10-07 shows why: training rows are
+        PAST as_of dates, fundamentals are cached per date, and 200 of 200
+        sampled historical cache files are all-null. Alpha Vantage's OVERVIEW
+        returns only current values, so past vintages cannot be reconstructed
+        at all. Routing them feeds five neutral columns to nearly every row --
+        the exact harm the flag exists to prevent.
+
+        The lesson the test should carry: a measurement on today's snapshot
+        does not license a claim about the historical rows training consumes.
         """
-        self.assertTrue(TRAINING_INCLUDE_FUNDAMENTAL_FEATURES)
+        self.assertFalse(TRAINING_INCLUDE_FUNDAMENTAL_FEATURES)
 
     def test_routing_fundamentals_requires_reporting_zero_variance(self):
         """The invariant that keeps the two dead features honest.
