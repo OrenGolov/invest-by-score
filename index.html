@@ -241,12 +241,88 @@
       body { padding: 14px; }
       .container { padding: 18px; }
     }
+
+    .tabs {
+      display: flex;
+      gap: 6px;
+      margin: 0 0 18px;
+      border-bottom: 1px solid var(--border);
+      flex-wrap: wrap;
+    }
+    .tab-btn {
+      /* `input, button { width: 100% }` above is global and would stack the
+         tabs one per row; width/height are reset here deliberately. */
+      width: auto;
+      height: auto;
+      background: transparent;
+      border: 1px solid transparent;
+      border-bottom: none;
+      color: var(--muted);
+      padding: 10px 18px;
+      font-size: 14px;
+      font-weight: bold;
+      cursor: pointer;
+      border-radius: 8px 8px 0 0;
+    }
+    .tab-btn:hover { color: var(--text); background: rgba(90, 168, 255, 0.08); }
+    .tab-btn.active {
+      color: var(--accent);
+      background: var(--panel);
+      border-color: var(--border);
+      margin-bottom: -1px;
+    }
+    .tab-view[hidden] { display: none; }
+    .sev {
+      display: inline-block;
+      padding: 2px 9px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: bold;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .sev-critical { background: rgba(255, 122, 122, 0.18); color: var(--danger); }
+    .sev-warn { background: rgba(255, 191, 105, 0.18); color: var(--warning); }
+    .sev-none { background: rgba(124, 227, 195, 0.15); color: var(--accent-2); }
+    .counts {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 14px;
+    }
+    .count-card {
+      background: var(--panel-alt);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px 16px;
+      min-width: 92px;
+    }
+    .count-card .n { font-size: 22px; font-weight: bold; }
+    .count-card .k { font-size: 11px; color: var(--muted); text-transform: uppercase; }
+    .caveat {
+      background: rgba(255, 191, 105, 0.1);
+      border-left: 3px solid var(--warning);
+      padding: 10px 14px;
+      border-radius: 6px;
+      font-size: 13px;
+      color: var(--muted);
+      margin-bottom: 16px;
+    }
+    .reasons { margin: 6px 0 0; padding-left: 18px; font-size: 13px; }
+    .reasons li { margin: 2px 0; }
+    .tickmore { color: var(--muted); font-size: 12px; }
   </style>
 </head>
 <body>
   <div class="container">
     <h1>Investment Score</h1>
 
+    <div class="tabs">
+      <button class="tab-btn active" data-tab="score">Score</button>
+      <button class="tab-btn" data-tab="alerts">Alerts Monitoring</button>
+    </div>
+
+    <div class="tab-view" id="view-score">
     <div class="controls">
       <div>
         <label for="ticker">Ticker</label>
@@ -265,6 +341,42 @@
     <div class="status" id="status">Default date is today.</div>
 
     <div id="output"></div>
+    </div>
+
+    <div class="tab-view" id="view-alerts" hidden>
+      <div class="controls">
+        <div>
+          <label for="a-start">From date</label>
+          <input id="a-start" type="date" />
+        </div>
+        <div>
+          <label for="a-end">To date</label>
+          <input id="a-end" type="date" />
+        </div>
+        <div>
+          <label for="a-ticker">Ticker</label>
+          <input id="a-ticker" type="text" placeholder="all tickers" />
+        </div>
+        <div>
+          <label for="a-sev">Minimum severity</label>
+          <select id="a-sev">
+            <option value="">All runs</option>
+            <option value="warn">Warn and above</option>
+            <option value="critical">Critical only</option>
+          </select>
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button id="a-apply">Apply filters</button>
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button id="a-clear">Clear</button>
+        </div>
+      </div>
+      <div class="status" id="a-status">Showing every stored collection run.</div>
+      <div id="a-output"></div>
+    </div>
   </div>
 
   <script>
@@ -774,6 +886,127 @@
     loadProviderHealth();
     loadAuditEvents();
     loadScore();
+
+    // ---------------------------------------------------- Alerts Monitoring
+    const tabButtons = Array.from(document.querySelectorAll('.tab-btn'));
+    let alertsLoaded = false;
+
+    tabButtons.forEach((button) => {
+      button.addEventListener('click', () => {
+        const name = button.dataset.tab;
+        tabButtons.forEach((other) => other.classList.toggle('active', other === button));
+        document.getElementById('view-score').hidden = name !== 'score';
+        document.getElementById('view-alerts').hidden = name !== 'alerts';
+        if (name === 'alerts' && !alertsLoaded) {
+          alertsLoaded = true;
+          loadAlerts();
+        }
+      });
+    });
+
+    function severityBadge(severity, shouldAlert) {
+      const key = severity === 'critical' ? 'critical' : severity === 'warn' ? 'warn' : 'none';
+      const label = shouldAlert ? severity : 'clean';
+      return `<span class="sev sev-${key}">${escapeHtml(label)}</span>`;
+    }
+
+    function renderAlertRows(rows) {
+      if (!rows.length) {
+        return '<div class="panel"><div class="muted">No collection runs match these filters.</div></div>';
+      }
+      const body = rows.map((row) => {
+        const failed = row.tickers_failed || [];
+        const shown = failed.slice(0, 6).map(escapeHtml).join(', ');
+        const more = failed.length > 6 ? ` <span class="tickmore">+${failed.length - 6} more</span>` : '';
+        const reasons = (row.reasons || []).length
+          ? `<ul class="reasons">${row.reasons.map((r) => `<li>${escapeHtml(r)}</li>`).join('')}</ul>`
+          : '';
+        return `<tr>
+          <td>${escapeHtml(row.as_of || '-')}</td>
+          <td>${severityBadge(row.severity, row.should_alert)}</td>
+          <td>${escapeHtml(String(row.news_written))} / ${escapeHtml(String(row.news_attempted))}</td>
+          <td>${failed.length ? shown + more : '<span class="muted">none</span>'}</td>
+          <td>${escapeHtml(row.subject || '')}${reasons}</td>
+        </tr>`;
+      }).join('');
+      return `<div class="panel"><h2>Collection runs</h2><table>
+        <thead><tr><th>Date</th><th>Verdict</th><th>News</th><th>Failed tickers</th><th>Detail</th></tr></thead>
+        <tbody>${body}</tbody></table></div>`;
+    }
+
+    function renderTickerDetail(detail, ticker) {
+      if (!detail || !detail.length) return '';
+      const body = detail.map((entry) => `<tr>
+        <td>${escapeHtml(entry.as_of)}</td>
+        <td>${escapeHtml(entry.kind)}</td>
+        <td>${escapeHtml(entry.reason)}</td>
+        <td>${escapeHtml(entry.action)}</td>
+      </tr>`).join('');
+      return `<div class="panel"><h2>Why ${escapeHtml(ticker)} has no news, per run</h2><table>
+        <thead><tr><th>Date</th><th>Kind</th><th>Reason</th><th>What to do</th></tr></thead>
+        <tbody>${body}</tbody></table></div>`;
+    }
+
+    function renderCounts(summary) {
+      const cards = [
+        ['runs', summary.runs], ['alerting', summary.alerting],
+        ['critical', summary.critical], ['warn', summary.warn], ['clean', summary.clean],
+      ];
+      return `<div class="counts">${cards.map(([k, n]) =>
+        `<div class="count-card"><div class="n">${escapeHtml(String(n))}</div><div class="k">${k}</div></div>`
+      ).join('')}</div>`;
+    }
+
+    async function loadAlerts() {
+      const status = document.getElementById('a-status');
+      const output = document.getElementById('a-output');
+      const ticker = document.getElementById('a-ticker').value.trim().toUpperCase();
+      const params = new URLSearchParams();
+      const start = document.getElementById('a-start').value;
+      const end = document.getElementById('a-end').value;
+      const severity = document.getElementById('a-sev').value;
+      if (start) params.set('start', start);
+      if (end) params.set('end', end);
+      if (ticker) params.set('ticker', ticker);
+      if (severity) params.set('severity', severity);
+      status.textContent = 'Loading alert history...';
+      output.innerHTML = '';
+      try {
+        const response = await fetch(`/api/alert-history?${params.toString()}`);
+        const payload = await response.json();
+        if (!payload.ok) {
+          status.textContent = 'Alert history unavailable.';
+          output.innerHTML = `<div class="panel"><div class="muted">${escapeHtml(payload.error || 'Request failed')}</div></div>`;
+          return;
+        }
+        const data = payload.data;
+        const summary = data.summary || {};
+        status.textContent = `${data.returned} of ${data.total_runs_on_disk} stored runs`
+          + (summary.oldest ? ` | ${summary.oldest} to ${summary.newest}` : '');
+        output.innerHTML = renderCounts(summary)
+          + `<div class="caveat">${escapeHtml(data.delivery_caveat || '')}</div>`
+          + renderAlertRows(data.rows || [])
+          + renderTickerDetail(data.ticker_detail, data.filters && data.filters.ticker);
+      } catch (error) {
+        status.textContent = 'Alert history unavailable.';
+        output.innerHTML = `<div class="panel"><div class="muted">${escapeHtml(error.message || 'Request failed')}</div></div>`;
+      }
+    }
+
+    document.getElementById('a-apply').addEventListener('click', loadAlerts);
+    document.getElementById('a-clear').addEventListener('click', () => {
+      ['a-start', 'a-end', 'a-ticker'].forEach((id) => { document.getElementById(id).value = ''; });
+      document.getElementById('a-sev').value = '';
+      loadAlerts();
+    });
+    document.getElementById('a-ticker').addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') loadAlerts();
+    });
+
+    if (new URLSearchParams(location.search).get('tab') === 'alerts') {
+      const alertsTab = document.querySelector('[data-tab="alerts"]');
+      if (alertsTab) alertsTab.click();
+    }
   </script>
 </body>
 </html>

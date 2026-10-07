@@ -8,6 +8,7 @@ from urllib.parse import parse_qs, urlparse
 
 from agents.market_data_agent import fetch_market_snapshot
 from core.agent_contracts import NoTradeDecision
+from core.alert_history import alert_history
 from core.audit_store import get_audit_events, get_decision_by_replay_hash
 from core.orchestrator import orchestrate_score
 from fetch_data import get_provider_health_matrix
@@ -72,6 +73,33 @@ class AppHandler(SimpleHTTPRequestHandler):
 
         if parsed.path == "/api/provider-health":
             self._send_json(200, {"ok": True, "data": get_provider_health_matrix()})
+            return
+
+        if parsed.path == "/api/alert-history":
+            params = parse_qs(parsed.query)
+
+            def _one(key: str, default: str = "") -> str:
+                return (params.get(key, [default])[0] or default).strip()
+
+            limit_raw = _one("limit", "200")
+            try:
+                limit = int(limit_raw)
+            except ValueError:
+                self._send_json(400, {"ok": False, "error": "limit must be an integer"})
+                return
+            try:
+                data = alert_history(
+                    start=_one("start"),
+                    end=_one("end"),
+                    ticker=_one("ticker"),
+                    severity=_one("severity"),
+                    only_alerting=_one("only_alerting").lower() in ("1", "true", "yes"),
+                    limit=limit,
+                )
+            except Exception as error:  # a monitoring view must not 500 silently
+                self._send_json(200, {"ok": False, "error": str(error)})
+                return
+            self._send_json(200, {"ok": True, "data": data})
             return
 
         if parsed.path == "/api/audit-events":
