@@ -92,7 +92,15 @@ class QuotaConsumptionTests(unittest.TestCase):
         # Reporting "0 requests spent" for a run that in fact exhausted the
         # quota is worse than reporting that the number is not known: it reads
         # as spare capacity that does not exist.
-        reports = [_report("2026-10-06", {"ok": 0})]  # no requests_spent key
+        #
+        # `collected_at` is relative to NOW, not a fixed date. quota_consumption
+        # counts a trailing 24h window, so a hardcoded timestamp silently stops
+        # being inside it -- this test passed on 2026-10-06 and failed on 10-07
+        # for that reason alone, which is a test bug, not a finding.
+        from datetime import datetime, timedelta, timezone
+
+        recent = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+        reports = [_report("2026-10-06", {"ok": 0}, collected_at=recent)]
         result = quota_consumption(reports)
         self.assertEqual(result["unknown_runs"], 1)
         self.assertEqual(result["requests_spent"], 0)

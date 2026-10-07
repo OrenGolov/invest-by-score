@@ -96,6 +96,17 @@ FAILURE_AUTH = "authentication_failed"
 FAILURE_UNAVAILABLE = "provider_unavailable"
 FAILURE_NO_KEY = "provider_key_required"
 FAILURE_UNKNOWN = "unknown_error"
+# NOT A FAILURE. The provider answered, the key worked, and there were simply no
+# articles for this ticker inside the point-in-time window. MEASURED 2026-10-07,
+# five tickers (BKR, CCEP, CGNX, CSCO, DDOG) took this path and were reported as
+# `unknown_error` because the snapshot carried no kind and the collector
+# defaulted an absent kind to "unknown". That reads as five broken requests in
+# the operator's failure count when nothing was broken.
+#
+# Absence of news is an OBSERVATION, and a quiet ticker is the commonest reason
+# for it. Keeping it out of the error bucket is what lets a real unknown error
+# stay visible.
+FAILURE_NO_ARTICLES = "no_articles_in_window"
 
 # The operator-facing sentence for each kind: what happened, and what to do.
 # A notification the reader cannot act on is how a channel gets muted, so
@@ -121,6 +132,11 @@ FAILURE_GUIDANCE: dict[str, str] = {
         "no news provider is configured. Until NEWS_PROVIDER_API_KEY is set, "
         "no OBSERVED event memory can exist and the model runs on price-"
         "derived features alone."
+    ),
+    FAILURE_NO_ARTICLES: (
+        "the provider answered and had no articles for this ticker inside the "
+        "point-in-time window. Nothing is wrong: the key worked, the request "
+        "succeeded, and the absence of news is itself an observation."
     ),
     FAILURE_UNKNOWN: (
         "the news provider failed for a reason this code does not recognise. "
@@ -675,12 +691,15 @@ def build_news_snapshot(ticker: str, as_of: str, timeout: float = NEWS_PROVIDER_
     )
 
     if not raw_records:
-        return _unavailable_snapshot(
+        empty = _unavailable_snapshot(
             ticker,
             as_of_text,
             reason="Provider returned no articles inside the point-in-time window.",
             source_id=NEWS_SOURCE_ID,
         )
+        # Typed so the collector does not count a quiet ticker as an error.
+        empty["failure_kind"] = FAILURE_NO_ARTICLES
+        return empty
 
     eligible, rejected = pit_filter(raw_records, as_of_dt)
     # STEP 2: resolve each article to a ticker AT INGESTION, using E2's

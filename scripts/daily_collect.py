@@ -90,6 +90,7 @@ from core.config import (  # noqa: E402
 )
 from core.news_adapter import (  # noqa: E402
     FAILURE_AUTH,
+    FAILURE_NO_ARTICLES,
     FAILURE_GUIDANCE,
     FAILURE_NO_KEY,
     FAILURE_QUOTA,
@@ -367,6 +368,7 @@ def collect_news(tickers, as_of: str, dry_run: bool) -> dict:
     eligible_count = len(tickers) - len(skipped)
 
     ok, unavailable, failed = 0, [], []
+    quiet: list[str] = []       # fetched fine, provider simply had no articles
     ok_tickers: list[str] = []  # so an alert can say "fetched, no articles"
                                 # rather than lumping it in with "not tried"
     served = 0            # tickers this run actually reached
@@ -391,8 +393,19 @@ def collect_news(tickers, as_of: str, dry_run: bool) -> dict:
             served += 1
             status = str(snapshot.get("status", "")).upper()
             if status == "UNAVAILABLE":
-                unavailable.append(ticker)
                 kind = _failure_kind(snapshot)
+                if kind == FAILURE_NO_ARTICLES:
+                    # NOT A FAILURE AND NOT A GAP. The provider answered and had
+                    # nothing for this ticker in the window. MEASURED 2026-10-07,
+                    # five tickers took this path and were reported as
+                    # `unknown_error`, which reads as five broken requests when
+                    # nothing broke. Absence of news is an observation, so it is
+                    # counted as served-and-quiet rather than banked as an error.
+                    quiet.append(ticker)
+                    served += 1
+                    time.sleep(COLLECT_THROTTLE_SECONDS)
+                    continue
+                unavailable.append(ticker)
                 kinds[kind] = kinds.get(kind, 0) + 1
                 # THREE kinds end the run; the rest are per-ticker noise.
                 # Quota and auth mean every further call is certain to fail,
@@ -428,6 +441,7 @@ def collect_news(tickers, as_of: str, dry_run: bool) -> dict:
         "attempted": len(batch), "ok": ok,
         "unavailable": unavailable, "failed": failed,
         "ok_tickers": ok_tickers,
+        "no_articles": quiet,
         "batch": len(batch), "eligible": eligible_count,
         "skipped_sectorless": sorted(skipped),
         "cursor_start": start,
