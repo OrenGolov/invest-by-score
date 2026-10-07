@@ -563,6 +563,63 @@ class QuotaAwareNewsTests(unittest.TestCase):
         self.assertIn("news_fetcher=news_snapshot_cached", events)
 
 
+class FundamentalsRotationTests(unittest.TestCase):
+    """Fundamentals hit the same wall as news: allowance < universe.
+
+    MEASURED 2026-10-07, collect_fundamentals attempted all 77 tickers against
+    Alpha Vantage's 25/day allowance. The first ~25 spent the day, the rest
+    failed, and a later run found nothing left -- reporting
+    `fundamentals FAILED` with all 77 listed, which cannot distinguish an outage
+    from an allowance spent an hour earlier.
+    """
+
+    def _run(self, folder, universe, calls):
+        def snapshot(ticker, as_of):
+            calls.append(ticker)
+            return {"valuation_metrics": {"trailing_pe": 20.0, "gross_margins": 0.3}}
+
+        with patch("fetch_data.fetch_fundamental_snapshot", side_effect=snapshot),                 patch.object(daily_collect, "REPO_ROOT", Path(folder)),                 patch.object(daily_collect, "COLLECT_FUNDAMENTALS_THROTTLE_SECONDS", 0):
+            return daily_collect.collect_fundamentals(universe, "2026-10-07", False)
+
+    def test_a_run_covers_a_batch_not_the_whole_universe(self):
+        universe = [f"T{index:02d}" for index in range(77)]
+        calls = []
+        with tempfile.TemporaryDirectory() as folder:
+            result = self._run(folder, universe, calls)
+        self.assertEqual(len(calls), daily_collect.COLLECT_FUNDAMENTALS_BATCH_SIZE)
+        self.assertEqual(result["attempted"], len(calls))
+        self.assertEqual(result["eligible"], 77)
+
+    def test_consecutive_runs_sweep_the_universe_instead_of_repeating(self):
+        # The deadlock guard. Without an advancing cursor every run re-fetches
+        # the same head and the tail is never reached at all.
+        universe = [f"T{index:02d}" for index in range(77)]
+        covered = set()
+        with tempfile.TemporaryDirectory() as folder:
+            for _ in range(4):
+                calls = []
+                self._run(folder, universe, calls)
+                covered |= set(calls)
+        self.assertEqual(len(covered), 77)
+
+    def test_a_universe_smaller_than_the_batch_is_returned_whole(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as folder:
+            result = self._run(folder, ["AAPL", "MSFT"], calls)
+        self.assertEqual(sorted(calls), ["AAPL", "MSFT"])
+        self.assertEqual(result["cursor_start"], 0)
+
+    def test_the_batch_cannot_exceed_the_providers_daily_allowance(self):
+        from core.config import (
+            COLLECT_FUNDAMENTALS_BATCH_SIZE,
+            COLLECT_FUNDAMENTALS_DAILY_ALLOWANCE,
+        )
+
+        self.assertLessEqual(
+            COLLECT_FUNDAMENTALS_BATCH_SIZE, COLLECT_FUNDAMENTALS_DAILY_ALLOWANCE
+        )
+
+
 class QuotaCostInvariantTests(unittest.TestCase):
     """The arithmetic that broke collection, now asserted rather than commented.
 

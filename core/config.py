@@ -3019,6 +3019,34 @@ COLLECT_THROTTLE_SECONDS = 0.2
 # sleeps between price fetches.
 COLLECT_FUNDAMENTALS_THROTTLE_SECONDS = 1.5
 
+# Fundamentals get a ROTATION, for the same reason news does.
+#
+# MEASURED 2026-10-07: `collect_fundamentals` attempted all 77 tickers on every
+# run while Alpha Vantage's free tier allows 25 requests/day. So the first ~25
+# consumed the entire daily allowance, the remaining ~52 failed, and any later
+# run that day -- or any ad-hoc verification -- found nothing left. The run
+# reported `fundamentals FAILED` with all 77 tickers listed, which is accurate
+# and useless: it cannot distinguish a provider outage from an allowance that
+# was spent an hour earlier.
+#
+# This is the news deadlock in a second place. News was fixed with a batch plus
+# a cursor that advances by work served; fundamentals had neither.
+#
+# 20 of a 25/day allowance leaves 5 spare for retries and ad-hoc checks, and
+# sweeps all 77 holdings in 4 runs. Fundamentals are NOT perishable -- the
+# values are re-fetchable and only the vintage is lost -- so a 4-day sweep costs
+# far less than a news gap of the same length.
+COLLECT_FUNDAMENTALS_BATCH_SIZE = 20
+
+# Where the fundamentals rotation cursor lives. Separate from the news cursor:
+# the two sweeps have different lengths and different providers, so sharing one
+# position would couple two unrelated rotations.
+COLLECT_FUNDAMENTALS_CURSOR_PATH = "data/collect_fundamentals_cursor.json"
+
+# The provider's documented daily allowance, asserted so the batch cannot
+# silently grow past it.
+COLLECT_FUNDAMENTALS_DAILY_ALLOWANCE = 25
+
 # A ceiling per run so one invocation cannot hang for hours on a large
 # universe. 200 comfortably covers the current 77-ticker portfolio.
 COLLECT_MAX_TICKERS_PER_RUN = 200
@@ -3213,6 +3241,16 @@ def _validate_collect_config() -> None:
             f"100-request daily ceiling on its own, before any retry or "
             f"ad-hoc call"
         )
+    if COLLECT_FUNDAMENTALS_BATCH_SIZE < 1:
+        raise ValueError("a fundamentals run must cover at least one ticker")
+    if COLLECT_FUNDAMENTALS_BATCH_SIZE > COLLECT_FUNDAMENTALS_DAILY_ALLOWANCE:
+        raise ValueError(
+            f"a fundamentals batch of {COLLECT_FUNDAMENTALS_BATCH_SIZE} exceeds "
+            f"the provider's {COLLECT_FUNDAMENTALS_DAILY_ALLOWANCE}-request "
+            f"daily allowance on its own, before any retry or ad-hoc call"
+        )
+    if not COLLECT_FUNDAMENTALS_CURSOR_PATH.startswith("data/"):
+        raise ValueError("the fundamentals cursor belongs under data/")
     if COLLECT_NEWS_REQUEST_BUDGET < 1:
         raise ValueError("a run must be allowed at least one request")
     # THE INVARIANT THAT WAS MISSING. The old validator checked the batch

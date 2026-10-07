@@ -72,6 +72,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from core.config import (  # noqa: E402
+    COLLECT_FUNDAMENTALS_BATCH_SIZE,
+    COLLECT_FUNDAMENTALS_CURSOR_PATH,
     COLLECT_FUNDAMENTALS_THROTTLE_SECONDS,
     COLLECT_MAX_TICKERS_PER_RUN,
     COLLECT_NEWS_ADVANCE_CURSOR_ON_QUOTA,
@@ -111,6 +113,52 @@ def _tickers(explicit: str) -> list[str]:
     from fetch_data import PORTFOLIO_TICKERS
 
     return sorted({str(t).upper() for t in PORTFOLIO_TICKERS if str(t).strip()})
+
+
+def _rotate(tickers, batch_size: int, cursor_path: str) -> tuple[list[str], int]:
+    """The slice of `tickers` this run should cover, and where it started.
+
+    The same rotation the news stage uses, factored out because fundamentals hit
+    the identical wall: a provider allowance smaller than the universe. Returns
+    the whole list unchanged when it already fits.
+    """
+    ordered = sorted(tickers)
+    if not ordered or len(ordered) <= batch_size:
+        return ordered, 0
+    cursor = 0
+    try:
+        raw = (REPO_ROOT / cursor_path).read_text(encoding="utf-8")
+        cursor = int(json.loads(raw)["cursor"])
+    except Exception:
+        cursor = 0  # a missing or unreadable cursor starts at the head
+    start = cursor % len(ordered)
+    batch = [ordered[(start + offset) % len(ordered)] for offset in range(batch_size)]
+    return batch, start
+
+
+def _advance_simple_cursor(cursor_path: str, start: int, served: int, total: int) -> None:
+    """Move a rotation cursor on by the work actually served.
+
+    Same rule as the news cursor, and for the same measured reason: advancing by
+    the intended batch would skip tickers a short run never reached, while never
+    advancing pins the rotation on whatever failed first.
+    """
+    if total <= 0:
+        return
+    step = max(1, int(served))
+    try:
+        path = REPO_ROOT / cursor_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({
+                "cursor": (start + step) % total,
+                "updated": datetime.now(timezone.utc).isoformat(),
+                "advanced_by": step,
+            }),
+            encoding="utf-8",
+        )
+    except Exception as exc:  # a cursor failure must not fail the collection
+        LOGGER.warning("could not advance the cursor %s: %s", cursor_path, exc)
 
 
 def collect_prices(tickers, as_of: str, dry_run: bool) -> dict:
@@ -467,8 +515,16 @@ def collect_fundamentals(tickers, as_of: str, dry_run: bool) -> dict:
     """
     from fetch_data import fetch_fundamental_snapshot
 
+    # ROTATE, like news. MEASURED 2026-10-07: attempting all 77 against a
+    # 25/day allowance spent the day on the first ~25 and failed the rest, and a
+    # second run that day found nothing left. A batch plus a cursor sweeps the
+    # universe in 4 runs and keeps 5 calls spare.
+    batch, start = _rotate(
+        tickers, COLLECT_FUNDAMENTALS_BATCH_SIZE, COLLECT_FUNDAMENTALS_CURSOR_PATH
+    )
+
     ok, failed, throttled = 0, [], []
-    for ticker in tickers:
+    for ticker in batch:
         if dry_run:
             ok += 1
             continue
@@ -485,7 +541,16 @@ def collect_fundamentals(tickers, as_of: str, dry_run: bool) -> dict:
             LOGGER.warning("fundamentals fetch failed for %s: %s", ticker, exc)
             failed.append(ticker)
         time.sleep(COLLECT_FUNDAMENTALS_THROTTLE_SECONDS)
-    result = {"attempted": len(tickers), "ok": ok, "failed": failed}
+
+    if not dry_run:
+        _advance_simple_cursor(
+            COLLECT_FUNDAMENTALS_CURSOR_PATH, start, len(batch), len(tickers)
+        )
+
+    result = {
+        "attempted": len(batch), "ok": ok, "failed": failed,
+        "batch": len(batch), "eligible": len(tickers), "cursor_start": start,
+    }
     if throttled:
         # Named separately from `failed`: nothing broke, the allowance ran out.
         # The values are re-fetchable tomorrow, so this is not a lost day.
