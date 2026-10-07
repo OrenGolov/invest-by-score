@@ -1174,6 +1174,46 @@ fundamentals sweep takes 4 days. Vintage capture is therefore partial by
 construction on the free tier — not a fault, but it bounds how quickly a
 fundamentals hypothesis can be tested at all.
 
+## 31. A 443-based alert channel IS reachable on the Aman network — OPEN
+
+**Raised:** 2026-10-07. **Owner:** unassigned.
+
+Item 11 established that outbound SMTP is intercepted here, and item 24 that
+api.telegram.org returns 503. Both still hold, MEASURED again 2026-10-07:
+
+```
+smtp.gmail.com:587          TCP connects, then NO SMTP greeting (b'')  -> intercepted
+api.telegram.org            HTTP 503  (captive portal / decryption appliance)
+www.google.com              HTTP 200  (control: general egress is fine)
+```
+
+So the running conclusion has been "no alert can leave this network". That is
+too strong, and the probe that settles it was never run:
+
+```
+gmail.googleapis.com/gmail/v1/users/me/profile   HTTP 401
+```
+
+**401 is reachable-but-unauthenticated.** The Gmail REST API host answers on
+port 443, which the SMTP probe already proved is open. The block is on the SMTP
+protocol and on Telegram's domain, not on Google's API surface.
+
+**What this would take.** The Gmail REST API needs an OAuth2 refresh token
+rather than the 16-character app password the SMTP path uses — a one-time
+browser consent, then a stored refresh token. `core/alert_delivery.py` is
+already structured for it: `send_alert_email` takes an injectable transport
+(`smtp_factory`) and returns a typed `DeliveryResult`, so a second sender can
+sit beside it without touching the monitor.
+
+**What would settle it:** obtain a refresh token on any network, then send one
+real alert from the office network. Until a message actually lands in the
+inbox, this is a reachability measurement and nothing more — which is exactly
+the distinction item 11 was created to enforce.
+
+**Worth stating plainly:** while no channel is proven from here, a 22:00
+collector failure reaches nobody, and `monitor_collection.py --explain-tickers`
+run by hand is the only substitute.
+
 ## Closed
 
 - ~~**Live runs must use today's chart state.**~~ Fixed in `ad75f48`. The
