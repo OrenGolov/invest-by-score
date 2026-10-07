@@ -99,22 +99,34 @@ powercfg /setactive SCHEME_CURRENT | Out-Null
 Write-Host "Wake timers enabled on AC and battery (powercfg RTCWAKE = 1)"
 Write-Host ""
 
-# WHAT IS PROVEN AND WHAT IS NOT, because the difference matters here.
+# WAKE-FROM-STANDBY IS NOW PROVEN ON THIS MACHINE. Measured overnight
+# 2026-10-06 -> 10-07, with the operator not touching the machine from 19:34.
 #
-# A one-off probe task (WakeToRun=True, 3 minutes out) fired at 19:31:11 for a
-# 19:31:10 schedule, result=0. That proves the SCHEDULER fires on time; it does
-# NOT prove a timer can wake a sleeping machine, because Kernel-Power logged no
-# sleep/resume transition in that window -- the machine stayed awake throughout.
+# Kernel-Power 506 (entered Modern Standby) / 507 (exited) pairs line up exactly
+# with the task runs:
 #
-# STILL UNVERIFIED: a genuine wake-from-sleep. Every wake in this machine's
-# 7-day history has a blank WakeSourceText, i.e. the operator opening the lid.
-# `powercfg /waketimers` needs elevation, so the armed state cannot be read
-# from an unelevated session either. Dell firmware can override Windows on lid
-# close, and no amount of reading settings settles it.
+#     10-06 21:32  506 entered standby
+#     10-06 22:44  507 exited        <- news collect ran, last=22:44:41
+#     10-06 22:44  506 entered standby
+#     10-07 03:30  507 exited        <- alerts ran, 00:30 UTC
+#     10-07 03:30  506 entered standby
+#     10-07 07:55  507 exited        <- daily collect + alerts ran
 #
-# The decisive evidence will be a scheduled run completing while the machine is
-# genuinely asleep. Until one does, treat wake-from-sleep as configured-but-
-# unproven and prefer leaving the machine awake for a run that matters.
+# THREE separate timer wakes from S0 standby, each running its job. Note what
+# this required: RTCWAKE enabled on BOTH rails (DC was 0x0 until 2026-10-06) and
+# -WakeToRun actually passed. Before those two fixes the same night produced a
+# missed run and a lost day of news.
+#
+# Note also that NO Power-Troubleshooter event accompanies these wakes. That is
+# normal for S0 Modern Standby -- it is not a full S3 resume -- so judging
+# "did it wake?" by WakeSourceText alone reports a false negative. The 506/507
+# pairing against task run times is the signal that works here.
+#
+# A ONE-OFF PROBE IS NOT EVIDENCE FOR THIS. A task armed 3 minutes out fired at
+# 19:31:11 for 19:31:10 with result=0, which looked like confirmation and was
+# not: Kernel-Power logged no standby transition in that window, so it tested
+# the scheduler while the machine was awake. Only an unattended night settled
+# it.
 #
 # NOTE ON THIS MACHINE'S SLEEP MODEL, since it changes what to expect:
 # `powercfg /availablesleepstates` reports S0 Low Power Idle (Modern Standby)
@@ -216,6 +228,20 @@ Register-InvestTask `
 
 Write-Host "Verify with:  Get-ScheduledTask -TaskName 'invest-by-score*'"
 Write-Host "Run one now:  Start-ScheduledTask -TaskName 'invest-by-score alerts'"
+Write-Host ""
+# MACRO IS UNCONFIGURED AND HAS ALWAYS BEEN, found in the 2026-10-07 overnight
+# log: `macro FAILED {'attempted': 1, 'failed': ['AAPL'], 'status':
+# 'UNAVAILABLE'}` appears 9 times, and FRED_API_KEY is not set at USER scope.
+# That single source failing is what makes `daily collect` exit 1 on a night
+# where prices and fundamentals both reported 77 of 77 -- so the task result
+# reads as a failed run when one optional source is simply absent.
+#
+# Listed here because it was documented NOWHERE, which is why it went unnoticed:
+# the note below named the news and email variables and not this one.
+Write-Host "NOTE: macro collection needs FRED_API_KEY (free, from"
+Write-Host "      fred.stlouisfed.org/docs/api/api_key.html). Without it the macro"
+Write-Host "      source reports UNAVAILABLE every run and the task exits 1 even"
+Write-Host "      when every other source succeeded."
 Write-Host ""
 Write-Host "NOTE: news collection needs NEWS_PROVIDER_API_KEY in the environment,"
 Write-Host "      and it must be set at USER or MACHINE scope -- a variable set"
