@@ -176,7 +176,30 @@ def offline_replay_seam(history_by_ticker: dict):
     with patch("agents.market_data_agent.fetch_price_history", _provider), \
             patch("core.regime_agent.fetch_price_history", _provider), \
             patch("core.labels.fetch_price_history", _provider), \
-            patch.dict(os.environ, {"NEWS_PROVIDER_API_KEY": "", "FRED_API_KEY": ""}):
+            patch.dict(os.environ, {
+                "NEWS_PROVIDER_API_KEY": "",
+                "FRED_API_KEY": "",
+                # ALPHAVANTAGE WAS MISSING, and it broke reproducibility.
+                #
+                # MEASURED 2026-10-07: with a key configured, this seam cleared
+                # two provider keys and left the third set, so an "offline"
+                # backtest made LIVE fundamentals calls. Alpha Vantage's free
+                # tier allows 25 requests/day and throttles per second, and a
+                # throttled call does not raise -- it returns no metrics and the
+                # scorer substitutes neutral defaults.
+                #
+                # So two identical runs could differ: the first got real values,
+                # the second got defaults once the allowance ran out.
+                # `test_identical_inputs_rerun_to_identical_results` failed in a
+                # full-suite run and passed in isolation, which is the signature
+                # of exactly this.
+                #
+                # A replay seam that leaves any provider live is not a seam. The
+                # point is that a backtest depends only on the frames handed to
+                # it, so the same inputs give the same answer on any machine, on
+                # any day, whatever a provider happens to be serving.
+                "ALPHAVANTAGE_API_KEY": "",
+            }):
         yield
 
 

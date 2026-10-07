@@ -229,6 +229,48 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual(first["metrics_version"], "backtest-metrics-v1")
 
 
+class OfflineSeamTests(unittest.TestCase):
+    """A replay seam that leaves a provider live is not a seam.
+
+    MEASURED 2026-10-07: the seam cleared NEWS_PROVIDER_API_KEY and FRED_API_KEY
+    and left ALPHAVANTAGE_API_KEY set, so an "offline" backtest made live
+    fundamentals calls. Alpha Vantage allows 25 requests/day and throttles per
+    second, and a throttled call does not raise -- it returns no metrics and the
+    scorer substitutes neutral defaults. Two identical runs could therefore
+    differ: the first got real values, the second got defaults.
+
+    `test_identical_inputs_rerun_to_identical_results` failed in a full-suite
+    run and passed in isolation, which is the signature of exactly this.
+    """
+
+    def test_every_provider_key_is_cleared_inside_the_seam(self):
+        import os
+
+        from core.backtest.engine import offline_replay_seam
+
+        keys = ("NEWS_PROVIDER_API_KEY", "FRED_API_KEY", "ALPHAVANTAGE_API_KEY")
+        with patch.dict(os.environ, {key: "live-looking-value" for key in keys}):
+            with offline_replay_seam({"TEST": pd.DataFrame()}):
+                for key in keys:
+                    with self.subTest(provider_key=key):
+                        self.assertEqual(
+                            os.getenv(key), "",
+                            f"{key} leaks into an offline replay, so a backtest "
+                            f"can depend on what a provider served that day",
+                        )
+
+    def test_the_seam_restores_the_environment_afterwards(self):
+        # Clearing a key permanently would break the collector that runs next.
+        import os
+
+        from core.backtest.engine import offline_replay_seam
+
+        with patch.dict(os.environ, {"ALPHAVANTAGE_API_KEY": "restore-me"}):
+            with offline_replay_seam({"TEST": pd.DataFrame()}):
+                pass
+            self.assertEqual(os.getenv("ALPHAVANTAGE_API_KEY"), "restore-me")
+
+
 class FoldGeometryTests(unittest.TestCase):
     def test_embargo_below_max_horizon_is_rejected(self):
         with self.assertRaises(ValueError):
