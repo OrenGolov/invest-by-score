@@ -1,6 +1,64 @@
-﻿venv/
+venv/
 __pycache__/
 *.pyc
 .env
 .vscode/
-data/
+
+# Derived caches and provider snapshots: rebuildable from data/raw/, so they
+# stay out of git. Everything the replay proof needs is tracked below.
+data/*.parquet
+data/*_fundamentals_*.json
+data/decision_audit.jsonl
+data/paper_orders.jsonl
+
+# The event-memory store. Its INFERRED memories are derived: the backfill
+# rebuilds them deterministically from data/raw/ via
+# `python scripts/build_event_memory.py --mode backfill --years 15`, so
+# shipping ~3k generated rows would be committing a cache.
+#
+# NOTE for whoever turns the forward builder on: OBSERVED memories are NOT
+# rebuildable, because the news window that produced them closes after
+# NEWS_LOOKBACK_DAYS (7) and the articles are gone. Once real observed
+# memories start accruing, this store stops being a cache and needs either a
+# tracked observed-only file or a backup that is not git.
+data/event_memory.jsonl
+
+# Collection run artefacts. The report is an operational log of WHEN the
+# collector ran, not evidence for any score, and collect.log is raw stdout.
+# The coverage gate reads the report locally; committing it would mean every
+# machine's schedule history colliding in one file.
+data/collection_report.jsonl
+data/collect.log
+
+# The forecast ledger and its rotation cursor. The ledger is a local record of
+# what THIS machine forecast and how those forecasts scored; committing it
+# would mean every machine's scoreboard colliding in one file, and it grows
+# ~24 MB/year at full portfolio coverage. It is rebuildable in the sense that
+# re-running scripts/run_forecasts.py re-derives the same rows from the same
+# memories — but the SCOREBOARD it accumulates is this machine's history.
+data/forecast_ledger.jsonl
+data/collect_cursor.json
+
+# The NEWS ledger is the one W6 exception, and it is deliberate.
+#
+# MEASURED: news writes ~208 KB per ticker per day, so the 77-ticker universe
+# produces ~15.7 MB/day, ~345 MB/month, ~3.9 GB/year. Git never forgets, so
+# committing that is irreversible even if the files are deleted later, and
+# GitHub soft-warns at 1 GB. The repo would be unusable within months.
+#
+# CONSEQUENCE, stated plainly: a fresh clone can still replay every PRICE-,
+# FUNDAMENTALS- and MACRO-derived score from raw records, which is what the
+# W6 acceptance proof covers. It CANNOT replay a news-derived sentiment or an
+# OBSERVED event memory, because those raw articles live only on the machine
+# that collected them. That machine needs a backup that is not git.
+data/raw/newsapi_news/
+
+# NOT ignored (tracked on purpose): the rest of data/raw/ is the W6
+# append-only provenance ledger and data/feature_registry.jsonl is the M1
+# registry. "delete derived cache -> rebuild from raw -> reproduce the same
+# result" is only executable by a fresh clone if these travel with the repo.
+
+# Word lock files. Opening a .docx in Word creates `~$name.docx` next to it and
+# deletes it on close, so it is transient per-machine state, never content.
+~$*.docx
+~$*.xlsx

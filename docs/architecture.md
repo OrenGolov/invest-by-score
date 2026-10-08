@@ -37,6 +37,27 @@ flowchart LR
 - The ensemble records calibrated, versioned model weights.
 - Risk Management and Performance Auditor vetoes are fail-closed and visible.
 
+## Source Registry and Provider Quality Model
+
+Every provider domain is tracked through a registry with service class, source ID,
+confidence floor, fallback order, freshness requirement, and outage policy. The
+registry is not advisory: the orchestrator checks it before a score is allowed to
+use a source.
+
+| Domain | Primary candidate | Fallback candidate | Minimum confidence | Freshness policy |
+| --- | --- | --- | --- | --- |
+| Price/OHLCV | Yahoo Finance adapter | licensed exchange feed | 0.70 | bars must be <= as_of |
+| Fundamentals | Alpha Vantage / SEC filings | Financial Modeling Prep | 0.70 | source timestamp must be <= as_of |
+| News | licensed news feed | SEC release feed | 0.65 | event-driven, evidence-backed |
+| Sentiment | licensed sentiment provider | aggregated social news | 0.60 | 5-15m freshness window |
+| Macro | FRED / official releases | OECD / World Bank | 0.75 | release-based source gating |
+
+The provider score is computed as a weighted source quality model using
+coverage + reliability + freshness + rate-limit resilience + licensing fit.
+If a domain's primary provider fails or is stale, the orchestrator downgrades
+the source confidence and returns `ANALYSIS_ONLY` unless the fallback source is
+approved and valid.
+
 ## Sprint 2 Vendor and Source Policy
 
 Score each vendor from 0 to 5 for coverage, reliability, rate-limit capacity,

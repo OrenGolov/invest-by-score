@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Test suite
+        run: python -m pytest tests/ -q
+
+      # The governance gates — DISCOVERED, not enumerated.
+      #
+      # This step used to list each gate by hand, and the list silently fell
+      # behind: 26 gate scripts existed while only 16 were named here, so
+      # every Sprint C and F gate passed locally and never ran on a push. A
+      # drift detector that is itself subject to drift is not a detector.
+      #
+      # Now every scripts/check_*.py runs. Adding a gate makes it enforced;
+      # there is no second place to remember. The step fails if the directory
+      # is empty, because "no gates found" must never read as "all gates
+      # passed".
+      - name: Governance gates
+        run: |
+          set -u
+          shopt -s nullglob
+          gates=(scripts/check_*.py)
+          if [ ${#gates[@]} -eq 0 ]; then
+            echo "no governance gates found -- refusing to report success"
+            exit 1
+          fi
+          echo "running ${#gates[@]} governance gates"
+          failed=()
+          for gate in "${gates[@]}"; do
+            echo "::group::$gate"
+            if python "$gate"; then
+              echo "PASS $gate"
+            else
+              echo "FAIL $gate"
+              failed+=("$gate")
+            fi
+            echo "::endgroup::"
+          done
+          if [ ${#failed[@]} -gt 0 ]; then
+            echo "FAILED GATES (${#failed[@]}/${#gates[@]}):"
+            printf '  - %s\n' "${failed[@]}"
+            exit 1
+          fi
+          echo "all ${#gates[@]} governance gates passed"

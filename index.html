@@ -1,0 +1,1012 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Investment Score</title>
+  <style>
+    :root {
+      --bg: #071827;
+      --bg-deep: #020b14;
+      --panel: #0f1f2d;
+      --panel-alt: #122738;
+      --panel-soft: #18314a;
+      --text: #eaf4ff;
+      --muted: #9bb0c7;
+      --accent: #5aa8ff;
+      --accent-2: #7ce3c3;
+      --warning: #ffbf69;
+      --danger: #ff7a7a;
+      --border: rgba(124, 158, 196, 0.22);
+      --shadow: rgba(0, 0, 0, 0.3);
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+      background: linear-gradient(180deg, var(--bg) 0%, var(--bg-deep) 100%);
+      color: var(--text);
+      min-height: 100vh;
+      padding: 24px;
+    }
+    .container {
+      width: min(1200px, 100%);
+      margin: 0 auto;
+      background: rgba(15, 31, 45, 0.9);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      box-shadow: 0 18px 40px var(--shadow);
+      padding: 24px;
+    }
+    h1 {
+      margin: 0 0 20px;
+      font-size: clamp(1.8rem, 2vw, 2.5rem);
+    }
+    .controls {
+      display: grid;
+      grid-template-columns: 1.2fr 1.2fr auto;
+      gap: 14px;
+      margin-bottom: 18px;
+    }
+    label {
+      display: block;
+      margin-bottom: 8px;
+      font-size: 0.8rem;
+      color: var(--muted);
+    }
+    input, button {
+      width: 100%;
+      height: 46px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: var(--panel-alt);
+      color: var(--text);
+      font-size: 1rem;
+      padding: 0 12px;
+    }
+    button {
+      cursor: pointer;
+      background: linear-gradient(135deg, var(--accent), #3d7af5);
+      border: none;
+      color: white;
+      font-weight: 700;
+      transition: transform 0.15s ease;
+    }
+    button:hover { transform: translateY(-1px); }
+    .status {
+      margin: 8px 0 14px;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(160px, 1fr));
+      gap: 16px;
+      margin: 18px 0 24px;
+    }
+    .card {
+      background: linear-gradient(180deg, var(--panel-alt), var(--panel));
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px;
+      min-height: 110px;
+    }
+    .card .label {
+      font-size: 0.78rem;
+      color: var(--muted);
+      margin-bottom: 8px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+    .card .value {
+      font-size: clamp(1.2rem, 2vw, 2rem);
+      font-weight: 700;
+    }
+    .card .sub {
+      font-size: 0.82rem;
+      color: var(--muted);
+      margin-top: 6px;
+    }
+    .score-good { color: var(--accent-2); }
+    .score-warn { color: var(--warning); }
+    .score-bad { color: var(--danger); }
+    .layout {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(300px, 1fr));
+      gap: 20px;
+      margin-top: 20px;
+    }
+    .panel {
+      background: rgba(12, 25, 38, 0.9);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 18px;
+    }
+    .panel h2 {
+      margin: 0 0 14px;
+      font-size: 1.1rem;
+    }
+    .recommendation-list,
+    .list,
+    .source-list {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .recommendation-item,
+    .source-item,
+    .insight-item {
+      background: rgba(255,255,255,0.02);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px 12px;
+    }
+    .tag {
+      display: inline-block;
+      border-radius: 999px;
+      padding: 5px 10px;
+      font-size: 0.72rem;
+      font-weight: 700;
+      background: rgba(95, 168, 255, 0.12);
+      color: var(--accent);
+      margin-right: 8px;
+      vertical-align: middle;
+    }
+    .strong { font-weight: 700; }
+    ul {
+      margin: 0;
+      padding-left: 18px;
+    }
+    li { margin: 8px 0; color: var(--text); }
+    .muted { color: var(--muted); }
+    .metric-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 8px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+    }
+    .metric-row:last-child { border-bottom: none; }
+    .full-width {
+      grid-column: 1 / -1;
+    }
+    .health-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 14px;
+      margin-top: 12px;
+    }
+    .health-card {
+      background: rgba(255,255,255,0.02);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px;
+    }
+    .health-card .metric {
+      font-size: 1.5rem;
+      font-weight: 700;
+      margin: 10px 0;
+    }
+    .chart-shell {
+      background: rgba(255,255,255,0.02);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px;
+      margin-top: 12px;
+    }
+    .chart-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(120px, 1fr));
+      gap: 8px;
+      margin-top: 12px;
+    }
+    .mini-stat {
+      background: rgba(255,255,255,0.02);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 10px;
+      font-size: 0.9rem;
+    }
+    th, td {
+      text-align: left;
+      padding: 10px 8px;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+      vertical-align: top;
+    }
+    th {
+      color: var(--muted);
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      font-size: 0.72rem;
+    }
+    @media (max-width: 900px) {
+      .summary-grid, .layout {
+        grid-template-columns: 1fr 1fr;
+      }
+      .controls {
+        grid-template-columns: 1fr;
+      }
+    }
+    @media (max-width: 640px) {
+      .summary-grid, .layout {
+        grid-template-columns: 1fr;
+      }
+      body { padding: 14px; }
+      .container { padding: 18px; }
+    }
+
+    .tabs {
+      display: flex;
+      gap: 6px;
+      margin: 0 0 18px;
+      border-bottom: 1px solid var(--border);
+      flex-wrap: wrap;
+    }
+    .tab-btn {
+      /* `input, button { width: 100% }` above is global and would stack the
+         tabs one per row; width/height are reset here deliberately. */
+      width: auto;
+      height: auto;
+      background: transparent;
+      border: 1px solid transparent;
+      border-bottom: none;
+      color: var(--muted);
+      padding: 10px 18px;
+      font-size: 14px;
+      font-weight: bold;
+      cursor: pointer;
+      border-radius: 8px 8px 0 0;
+    }
+    .tab-btn:hover { color: var(--text); background: rgba(90, 168, 255, 0.08); }
+    .tab-btn.active {
+      color: var(--accent);
+      background: var(--panel);
+      border-color: var(--border);
+      margin-bottom: -1px;
+    }
+    .tab-view[hidden] { display: none; }
+    .sev {
+      display: inline-block;
+      padding: 2px 9px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: bold;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .sev-critical { background: rgba(255, 122, 122, 0.18); color: var(--danger); }
+    .sev-warn { background: rgba(255, 191, 105, 0.18); color: var(--warning); }
+    .sev-none { background: rgba(124, 227, 195, 0.15); color: var(--accent-2); }
+    .counts {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 14px;
+    }
+    .count-card {
+      background: var(--panel-alt);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px 16px;
+      min-width: 92px;
+    }
+    .count-card .n { font-size: 22px; font-weight: bold; }
+    .count-card .k { font-size: 11px; color: var(--muted); text-transform: uppercase; }
+    .caveat {
+      background: rgba(255, 191, 105, 0.1);
+      border-left: 3px solid var(--warning);
+      padding: 10px 14px;
+      border-radius: 6px;
+      font-size: 13px;
+      color: var(--muted);
+      margin-bottom: 16px;
+    }
+    .reasons { margin: 6px 0 0; padding-left: 18px; font-size: 13px; }
+    .reasons li { margin: 2px 0; }
+    .tickmore { color: var(--muted); font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Investment Score</h1>
+
+    <div class="tabs">
+      <button class="tab-btn active" data-tab="score">Score</button>
+      <button class="tab-btn" data-tab="alerts">Alerts Monitoring</button>
+    </div>
+
+    <div class="tab-view" id="view-score">
+    <div class="controls">
+      <div>
+        <label for="ticker">Ticker</label>
+        <input id="ticker" type="text" value="MSFT" />
+      </div>
+      <div>
+        <label for="date">Date</label>
+        <input id="date" type="date" />
+      </div>
+      <div>
+        <label>&nbsp;</label>
+        <button id="submit">Get score</button>
+      </div>
+    </div>
+
+    <div class="status" id="status">Default date is today.</div>
+
+    <div id="output"></div>
+    </div>
+
+    <div class="tab-view" id="view-alerts" hidden>
+      <div class="controls">
+        <div>
+          <label for="a-start">From date</label>
+          <input id="a-start" type="date" />
+        </div>
+        <div>
+          <label for="a-end">To date</label>
+          <input id="a-end" type="date" />
+        </div>
+        <div>
+          <label for="a-ticker">Ticker</label>
+          <input id="a-ticker" type="text" placeholder="all tickers" />
+        </div>
+        <div>
+          <label for="a-sev">Minimum severity</label>
+          <select id="a-sev">
+            <option value="">All runs</option>
+            <option value="warn">Warn and above</option>
+            <option value="critical">Critical only</option>
+          </select>
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button id="a-apply">Apply filters</button>
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button id="a-clear">Clear</button>
+        </div>
+      </div>
+      <div class="status" id="a-status">Showing every stored collection run.</div>
+      <div id="a-output"></div>
+    </div>
+  </div>
+
+  <script>
+    const tickerInput = document.getElementById('ticker');
+    const dateInput = document.getElementById('date');
+    const output = document.getElementById('output');
+    const status = document.getElementById('status');
+    const submitBtn = document.getElementById('submit');
+
+    function setToday() {
+      const d = new Date();
+      const pad = (n) => String(n).padStart(2, '0');
+      const value = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+      dateInput.value = value;
+    }
+
+    function escapeHtml(value) {
+      return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    }
+
+    function renderList(items, fallback = 'None') {
+      if (!items || !items.length) return `<div class="muted">${fallback}</div>`;
+      return '<ul>' + items.map(item => `<li>${escapeHtml(item)}</li>`).join('') + '</ul>';
+    }
+
+    function renderMetricRows(obj) {
+      if (!obj || typeof obj !== 'object') return '<div class="muted">No metrics available.</div>';
+      return Object.entries(obj).map(([key, value]) => `
+        <div class="metric-row">
+          <span class="muted">${escapeHtml(key.replace(/_/g, ' '))}</span>
+          <span class="strong">${escapeHtml(String(value))}</span>
+        </div>
+      `).join('');
+    }
+
+    // Macro context rows pinned to the TOP of the weights panel. These are
+    // macro SERIES (inputs to the macroeconomic agent), not ensemble agents —
+    // they carry no weight of their own, so they render as context with an
+    // explicit status rather than a number that looks like a weight.
+    const PINNED_MACRO_SERIES = [
+      { key: 'vix', label: 'VIX', note: 'implied volatility — inverted: high = risk-off' },
+      { key: '10y_yield', label: '10Y Treasury Yield', note: 'long rate' },
+      { key: '30y_yield', label: '30Y Treasury Yield', note: 'ultra-long rate / term premium' },
+    ];
+
+    function renderPinnedMacroRows(agentOutputs = []) {
+      const macro = (agentOutputs || []).find(a => a && a.agent === 'macroeconomic');
+      const payload = (macro && macro.payload) || {};
+      const values = payload.series_values || {};
+      const status = macro ? macro.status : 'UNAVAILABLE';
+      return PINNED_MACRO_SERIES.map(series => {
+        const raw = values[series.key];
+        const shown = (raw === undefined || raw === null)
+          ? `<span class="muted">${escapeHtml(status)}</span>`
+          : `<span class="strong">${escapeHtml(String(raw))}</span>`;
+        return `
+        <div class="metric-row">
+          <span class="muted">${escapeHtml(series.label)}<br><small class="muted">${escapeHtml(series.note)}</small></span>
+          ${shown}
+        </div>`;
+      }).join('');
+    }
+
+    function renderWeightRows(weights, agents, horizon = 'current') {
+      if (!weights || typeof weights !== 'object' || !Object.keys(weights).length) {
+        return '<div class="muted">No ensemble weights available.</div>';
+      }
+      // Heaviest first, so the agent actually carrying the score reads first.
+      const ordered = Object.entries(weights).sort((a, b) => Number(b[1]) - Number(a[1]));
+      return ordered.map(([agent, weight]) => {
+        const line = (agents || {})[agent] || {};
+        const status = line.status ? String(line.status) : '';
+        const pct = (Number(weight) * 100).toFixed(1);
+        const effective = horizon === 'long'
+          ? line.effective_weight_long
+          : line.effective_weight_current;
+        const effNote = (effective !== undefined && effective !== null && Number(effective) !== Number(weight))
+          ? ` <small class="muted">(effective ${(Number(effective) * 100).toFixed(1)}%)</small>`
+          : '';
+        return `
+        <div class="metric-row">
+          <span class="muted">${escapeHtml(agent.replace(/_/g, ' '))}${status ? ` <small class="muted">[${escapeHtml(status)}]</small>` : ''}</span>
+          <span class="strong">${pct}%${effNote}</span>
+        </div>`;
+      }).join('');
+    }
+
+    function renderRecommendationOptions(options = []) {
+      if (!options.length) return '<div class="muted">No recommendation options available.</div>';
+      return options.map(option => `
+        <div class="recommendation-item">
+          <div>
+            <span class="tag">${option.status ? 'Selected' : 'Option'}</span>
+            <span class="strong">${escapeHtml(option.label)}</span>
+          </div>
+          <div class="muted" style="margin-top: 8px;">Confidence: ${Number(option.confidence_pct ?? 0).toFixed(1)}%</div>
+        </div>
+      `).join('');
+    }
+
+    function renderSourceList(sources = []) {
+      if (!sources.length) return '<div class="muted">No source metadata available.</div>';
+      return sources.map(source => `
+        <div class="source-item">
+          <div><span class="strong">${escapeHtml(source.name)}</span></div>
+          <div class="muted">Reliability: ${(Number(source.reliability_score ?? 0) * 100).toFixed(0)}%</div>
+          <div class="muted">${escapeHtml(source.coverage ?? '')}</div>
+        </div>
+      `).join('');
+    }
+
+    function renderConfidenceNote(breakdown) {
+      if (!breakdown || !Array.isArray(breakdown.factors) || !breakdown.factors.length) {
+        return { text: 'Model confidence', full: '' };
+      }
+      const sortedFactors = [...breakdown.factors].sort((a, b) => Number(a.value ?? 0) - Number(b.value ?? 0));
+      const weakest = sortedFactors[0];
+      const penalties = Array.isArray(breakdown.penalties) ? breakdown.penalties : [];
+      const factorSummary = `${weakest.name} ${Math.round(Number(weakest.value ?? 0) * 100)}%`;
+      const penaltySummary = penalties.length
+        ? `, ${penalties.length} penalt${penalties.length === 1 ? 'y' : 'ies'}`
+        : '';
+      const detail = [
+        ...breakdown.factors.map(f => `${f.name}: ${Math.round(Number(f.value ?? 0) * 100)}% (weight ${f.weight})`),
+        ...penalties.map(p => `penalty: ${p.name} −${p.magnitude}`),
+      ];
+      return {
+        text: `evidence-based · weakest: ${factorSummary}${penaltySummary}`,
+        full: detail.join(' | '),
+      };
+    }
+
+    function render(data) {
+      const decision = data?.data || data;
+      const score = Number(decision.score ?? 0);
+      const currentScore = Number(decision.current_time_score ?? decision.score ?? 0);
+      const longTermScore = Number(decision.long_term_score ?? decision.score ?? 0);
+      const confidence = Number(decision.confidence ?? 0) * 100;
+      const primaryAction = decision.recommended_actions?.primary || decision.action || 'ANALYSIS_ONLY';
+      const scoreClass = score >= 7 ? 'score-good' : score >= 4 ? 'score-warn' : 'score-bad';
+      const currentClass = currentScore >= 7 ? 'score-good' : currentScore >= 4 ? 'score-warn' : 'score-bad';
+      const longTermClass = longTermScore >= 7 ? 'score-good' : longTermScore >= 4 ? 'score-warn' : 'score-bad';
+      const vetoReasons = Array.isArray(decision.veto_reasons) ? decision.veto_reasons : [];
+      const confNote = renderConfidenceNote(decision.confidence_breakdown);
+
+      const summary = `
+        <div class="panel full-width">
+          <h2>Decision State</h2>
+          <div class="metric-row"><span class="muted">Mode</span><span class="strong">${escapeHtml(decision.mode || 'ANALYSIS_ONLY')}</span></div>
+          <div class="metric-row"><span class="muted">Action</span><span class="strong">${escapeHtml(decision.action || primaryAction)}</span></div>
+          <div class="metric-row"><span class="muted">Decision type</span><span class="strong">${escapeHtml(decision.decision_type || 'score')}</span></div>
+          <div class="metric-row"><span class="muted">Replay hash</span><span class="strong">${escapeHtml(decision.replay_hash || 'N/A')}</span></div>
+          <div style="margin-top: 12px;"><strong>Veto reasons:</strong> ${vetoReasons.length ? renderList(vetoReasons) : '<span class="muted">None</span>'}</div>
+        </div>
+
+        <div class="summary-grid">
+          <div class="card">
+            <div class="label">Ticker</div>
+            <div class="value">${escapeHtml(decision.ticker || 'N/A')}</div>
+            <div class="sub">${escapeHtml(decision.as_of || 'N/A')}</div>
+          </div>
+          <div class="card">
+            <div class="label">Current</div>
+            <div class="value ${currentClass}">${Number(currentScore).toFixed(2)}/10</div>
+            <div class="sub">Short-term / news-driven</div>
+          </div>
+          <div class="card">
+            <div class="label">Long term</div>
+            <div class="value ${longTermClass}">${Number(longTermScore).toFixed(2)}/10</div>
+            <div class="sub">150d / 200d trend</div>
+          </div>
+          <div class="card">
+            <div class="label">Final</div>
+            <div class="value ${scoreClass}">${Number(score).toFixed(2)}/10</div>
+            <div class="sub">Blended score</div>
+          </div>
+          <div class="card">
+            <div class="label">Confidence</div>
+            <div class="value">${confidence.toFixed(0)}%</div>
+            <div class="sub"${confNote.full ? ` title="${escapeHtml(confNote.full)}"` : ''}>${confNote.text}</div>
+          </div>
+        </div>
+
+        <div class="layout">
+          <div class="panel">
+            <h2>Recommended Actions</h2>
+            <div class="recommendation-list">
+              ${renderRecommendationOptions(decision.recommended_actions?.options || [])}
+            </div>
+            <div class="muted" style="margin-top: 16px;"><strong>Re-evaluation date:</strong> ${escapeHtml(decision.recommended_actions?.re_evaluation_date || 'TBD')}</div>
+          </div>
+
+          <div class="panel">
+            <h2>Latest Financial Report</h2>
+            <div class="muted"><strong>Publication date:</strong> ${escapeHtml(data.latest_financial_report?.publication_date || 'N/A')}</div>
+            <div class="list" style="margin-top: 12px;">
+              ${renderList(data.latest_financial_report?.key_highlights || [], 'No highlights available.')}
+            </div>
+            <div style="margin-top: 14px;">
+              <div><strong>Deviation:</strong> ${escapeHtml(data.latest_financial_report?.deviations_from_expectations || 'N/A')}</div>
+              <div style="margin-top: 8px;"><strong>Market reaction:</strong> ${escapeHtml(data.latest_financial_report?.market_reaction_summary || 'N/A')}</div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <h2>Next Expected Report</h2>
+            <div class="muted"><strong>Next report:</strong> ${escapeHtml(data.next_expected_report?.publication_date || 'N/A')}</div>
+            <div style="margin-top: 12px;">
+              <div><strong>Consensus:</strong></div>
+              ${renderMetricRows(data.next_expected_report?.expected_consensus || {})}
+            </div>
+            <div style="margin-top: 14px;">
+              <div><strong>Potential catalysts:</strong></div>
+              ${renderList(data.next_expected_report?.potential_catalysts || [], 'None listed.')}
+            </div>
+            <div style="margin-top: 14px;">
+              <div><strong>Risks:</strong></div>
+              ${renderList(data.next_expected_report?.risks || [], 'None listed.')}
+            </div>
+          </div>
+
+          <div class="panel">
+            <h2>Insights</h2>
+            <div>
+              <div><strong>Bullish signals:</strong></div>
+              ${renderList(decision.insights?.bullish_signals || [], 'None listed.')}
+            </div>
+            <div style="margin-top: 14px;">
+              <div><strong>Bearish signals:</strong></div>
+              ${renderList(decision.insights?.bearish_signals || [], 'None listed.')}
+            </div>
+            <div style="margin-top: 14px;">
+              <div><strong>Opportunities:</strong></div>
+              ${renderList(decision.insights?.opportunities || [], 'None listed.')}
+            </div>
+            <div style="margin-top: 14px;">
+              <div><strong>Risks:</strong></div>
+              ${renderList(decision.insights?.risks || [], 'None listed.')}
+            </div>
+            <div style="margin-top: 14px;"><strong>Trend:</strong> ${escapeHtml(decision.insights?.trend_analysis || 'N/A')}</div>
+            <div style="margin-top: 8px;"><strong>Sentiment:</strong> ${escapeHtml(decision.insights?.sentiment_analysis || 'N/A')}</div>
+          </div>
+
+          <div class="panel full-width">
+            <h2>Scoring & Weighting Explanation</h2>
+            <div class="metric-row">
+              <span class="muted">Current-time score</span>
+              <span class="strong">${Number(data.current_time_score ?? currentScore).toFixed(2)}/10</span>
+            </div>
+            <div class="metric-row">
+              <span class="muted">Long-term score</span>
+              <span class="strong">${Number(data.long_term_score ?? longTermScore).toFixed(2)}/10</span>
+            </div>
+            <div class="metric-row">
+              <span class="muted">Final score</span>
+              <span class="strong">${Number(data.scoring_breakdown?.final_score ?? score).toFixed(2)}/10</span>
+            </div>
+            ${renderMetricRows(data.scoring_breakdown?.weighted_contributions || {})}
+            <div style="margin-top: 14px;">
+              <div><strong>Current-time breakdown:</strong></div>
+              ${renderMetricRows(data.scoring_breakdown?.current_time_breakdown || {})}
+            </div>
+            <div style="margin-top: 14px;">
+              <div><strong>Long-term breakdown:</strong></div>
+              ${renderMetricRows(data.scoring_breakdown?.long_term_breakdown || {})}
+            </div>
+            <div style="margin-top: 14px;">
+              <div><strong>Score drivers:</strong></div>
+              ${renderList(data.scoring_breakdown?.score_change_drivers || [], 'No drivers listed.')}
+            </div>
+            <div style="margin-top: 14px;">
+              <div><strong>Historical comparison:</strong> ${escapeHtml(data.scoring_breakdown?.historical_comparison || 'N/A')}</div>
+            </div>
+          </div>
+
+          <div class="panel full-width">
+            <h2>Scoring Weights</h2>
+            <div class="muted" style="margin-bottom: 10px;">
+              Macro context first, then the governed ensemble weights behind this score.
+            </div>
+            <div style="margin-bottom: 14px;">
+              <div><strong>Macro context:</strong></div>
+              ${renderPinnedMacroRows(decision.agent_outputs || [])}
+            </div>
+            <div>
+              <div><strong>Ensemble weights (current-time):</strong></div>
+              ${renderWeightRows(decision.ensemble_breakdown?.weights_current, decision.ensemble_breakdown?.agents)}
+            </div>
+            <div style="margin-top: 14px;">
+              <div><strong>Ensemble weights (long-term):</strong></div>
+              ${renderWeightRows(decision.ensemble_breakdown?.weights_long, decision.ensemble_breakdown?.agents, 'long')}
+            </div>
+            <div style="margin-top: 14px;" class="muted">
+              Ensemble version: ${escapeHtml(String(decision.ensemble_breakdown?.calculation_version || 'N/A'))}
+            </div>
+          </div>
+
+          <div class="panel full-width">
+            <h2>Source Reliability</h2>
+            <div class="source-list">
+              ${renderSourceList(decision.source_reliability?.sources || [])}
+            </div>
+            <div style="margin-top: 14px;">
+              <strong>Cross-validation:</strong> ${escapeHtml(decision.source_reliability?.cross_validation || 'N/A')}
+            </div>
+          </div>
+
+          <div class="panel full-width">
+            <h2>Price & Moving Average Snapshot</h2>
+            <div id="chart-panel" class="chart-shell"></div>
+          </div>
+
+          <div class="panel full-width">
+            <h2>Provider Health</h2>
+            <div id="provider-health-panel" class="health-grid"></div>
+          </div>
+
+          <div class="panel full-width">
+            <h2>Decision Audit Trail</h2>
+            <div id="audit-events-panel"></div>
+          </div>
+        </div>
+      `;
+
+      output.innerHTML = summary;
+      loadProviderHealth();
+      loadAuditEvents();
+    }
+
+    function renderChartSeries(data) {
+      const panel = document.getElementById('chart-panel');
+      if (!panel) return;
+      const series = Array.isArray(data?.chart_series) ? data.chart_series : [];
+      if (!series.length) {
+        panel.innerHTML = '<div class="muted">No chart history available.</div>';
+        return;
+      }
+
+      const width = 760;
+      const height = 220;
+      const padding = 20;
+      const closes = series.map((point) => Number(point.close || 0));
+      const ma50 = series.map((point) => Number(point.ma_50 || 0));
+      const ma100 = series.map((point) => Number(point.ma_100 || 0));
+      const ma200 = series.map((point) => Number(point.ma_200 || 0));
+      const minY = Math.min(...closes, ...ma50, ...ma100, ...ma200) * 0.98;
+      const maxY = Math.max(...closes, ...ma50, ...ma100, ...ma200) * 1.02;
+      const xStep = series.length > 1 ? (width - padding * 2) / (series.length - 1) : 0;
+
+      const toPath = (values, offset = 0) => values.map((value, index) => {
+        const x = padding + index * xStep;
+        const y = height - padding - ((value - minY) / (maxY - minY || 1)) * (height - padding * 2);
+        return `${index === 0 ? 'M' : 'L'} ${x} ${y + offset}`;
+      }).join(' ');
+
+      const closePath = toPath(closes);
+      const ma50Path = toPath(ma50, 0);
+      const ma100Path = toPath(ma100, 0);
+      const ma200Path = toPath(ma200, 0);
+
+      panel.innerHTML = `
+        <svg viewBox="0 0 ${width} ${height}" width="100%" height="220" style="display:block;border-radius:8px;background:rgba(255,255,255,0.01)">
+          <path d="${ma200Path}" stroke="#7a8ba8" stroke-width="1.2" fill="none" stroke-dasharray="4 4" />
+          <path d="${ma100Path}" stroke="#7ce3c3" stroke-width="1.5" fill="none" />
+          <path d="${ma50Path}" stroke="#5aa8ff" stroke-width="2" fill="none" />
+          <path d="${closePath}" stroke="#ffbf69" stroke-width="2.2" fill="none" />
+        </svg>
+        <div class="chart-grid">
+          <div class="mini-stat"><div class="muted">Close</div><div class="strong">${Number(data?.close ?? series.at(-1)?.close ?? 0).toFixed(2)}</div></div>
+          <div class="mini-stat"><div class="muted">50d MA</div><div class="strong">${Number(data?.moving_averages?.['50d'] ?? series.at(-1)?.ma_50 ?? 0).toFixed(2)}</div></div>
+          <div class="mini-stat"><div class="muted">200d MA</div><div class="strong">${Number(data?.moving_averages?.['200d'] ?? series.at(-1)?.ma_200 ?? 0).toFixed(2)}</div></div>
+        </div>
+      `;
+    }
+
+    function renderProviderHealth(data) {
+      const entries = Object.entries(data || {});
+      const panel = document.getElementById('provider-health-panel');
+      if (!panel) return;
+      if (!entries.length) {
+        panel.innerHTML = '<div class="muted">No provider-health data available.</div>';
+        return;
+      }
+      panel.innerHTML = entries.map(([key, value]) => {
+        const healthScore = Number(value?.health_score ?? 0) * 100;
+        const status = value?.status || 'unknown';
+        const provider = value?.provider || key;
+        return `
+          <div class="health-card">
+            <div class="label">${escapeHtml(key)}</div>
+            <div class="metric">${healthScore.toFixed(0)}%</div>
+            <div class="muted">Provider: ${escapeHtml(provider)}</div>
+            <div class="muted">Status: ${escapeHtml(status)}</div>
+            <div class="muted">Fallback rank: ${escapeHtml(String(value?.fallback_rank ?? 'n/a'))}</div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function renderAuditEvents(events) {
+      const panel = document.getElementById('audit-events-panel');
+      if (!panel) return;
+      if (!events || !events.length) {
+        panel.innerHTML = '<div class="muted">No persisted audit events yet.</div>';
+        return;
+      }
+      panel.innerHTML = `
+        <table>
+          <thead>
+            <tr>
+              <th>Ticker</th>
+              <th>As of</th>
+              <th>Action</th>
+              <th>Score</th>
+              <th>Replay</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${events.slice().reverse().map((event) => `
+              <tr>
+                <td>${escapeHtml(event.ticker || 'N/A')}</td>
+                <td>${escapeHtml(event.as_of || 'N/A')}</td>
+                <td>${escapeHtml(event.action || 'N/A')}</td>
+                <td>${Number(event.score ?? 0).toFixed(2)}</td>
+                <td>${escapeHtml((event.replay_hash || '').slice(0, 12) || 'N/A')}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      `;
+    }
+
+    async function loadChart() {
+      try {
+        const ticker = (tickerInput.value || 'MSFT').trim();
+        const dateValue = dateInput.value || new Date().toISOString().slice(0, 10);
+        const response = await fetch(`/api/chart?ticker=${encodeURIComponent(ticker)}&date=${encodeURIComponent(dateValue)}`);
+        const payload = await response.json();
+        renderChartSeries(payload?.data || {});
+      } catch (error) {
+        const panel = document.getElementById('chart-panel');
+        if (panel) panel.innerHTML = '<div class="muted">Chart data unavailable.</div>';
+      }
+    }
+
+    async function loadProviderHealth() {
+      try {
+        const response = await fetch('/api/provider-health');
+        const payload = await response.json();
+        renderProviderHealth(payload?.data || {});
+      } catch (error) {
+        const panel = document.getElementById('provider-health-panel');
+        if (panel) panel.innerHTML = '<div class="muted">Provider-health unavailable.</div>';
+      }
+    }
+
+    async function loadAuditEvents() {
+      try {
+        const response = await fetch('/api/audit-events?limit=10');
+        const payload = await response.json();
+        renderAuditEvents(payload?.data || []);
+      } catch (error) {
+        const panel = document.getElementById('audit-events-panel');
+        if (panel) panel.innerHTML = '<div class="muted">Audit view unavailable.</div>';
+      }
+    }
+
+    async function loadScore() {
+      const ticker = (tickerInput.value || 'MSFT').trim();
+      const dateValue = dateInput.value || new Date().toISOString().slice(0, 10);
+      status.textContent = `Requesting ${ticker} for ${dateValue}...`;
+      output.innerHTML = '<div class="muted">Loading...</div>';
+
+      try {
+        const params = new URLSearchParams({ ticker, date: dateValue });
+        const response = await fetch(`/api/score?${params.toString()}`);
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.error || 'Request failed');
+        }
+
+        status.textContent = 'Result below';
+        render(data);
+        await loadChart();
+      } catch (error) {
+        output.innerHTML = `<div class="panel"><h2>Error</h2><div class="muted">${escapeHtml(error.message || 'Request failed')}</div></div>`;
+        status.textContent = 'Error';
+      }
+    }
+
+    setToday();
+    submitBtn.addEventListener('click', loadScore);
+    tickerInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') loadScore();
+    });
+    dateInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') loadScore();
+    });
+
+    loadChart();
+    loadProviderHealth();
+    loadAuditEvents();
+    loadScore();
+
+    // ---------------------------------------------------- Alerts Monitoring
+    const tabButtons = Array.from(document.querySelectorAll('.tab-btn'));
+    let alertsLoaded = false;
+
+    tabButtons.forEach((button) => {
+      button.addEventListener('click', () => {
+        const name = button.dataset.tab;
+        tabButtons.forEach((other) => other.classList.toggle('active', other === button));
+        document.getElementById('view-score').hidden = name !== 'score';
+        document.getElementById('view-alerts').hidden = name !== 'alerts';
+        if (name === 'alerts' && !alertsLoaded) {
+          alertsLoaded = true;
+          loadAlerts();
+        }
+      });
+    });
+
+    function severityBadge(severity, shouldAlert) {
+      const key = severity === 'critical' ? 'critical' : severity === 'warn' ? 'warn' : 'none';
+      const label = shouldAlert ? severity : 'clean';
+      return `<span class="sev sev-${key}">${escapeHtml(label)}</span>`;
+    }
+
+    function renderAlertRows(rows) {
+      if (!rows.length) {
+        return '<div class="panel"><div class="muted">No collection runs match these filters.</div></div>';
+      }
+      const body = rows.map((row) => {
+        const failed = row.tickers_failed || [];
+        const shown = failed.slice(0, 6).map(escapeHtml).join(', ');
+        const more = failed.length > 6 ? ` <span class="tickmore">+${failed.length - 6} more</span>` : '';
+        const reasons = (row.reasons || []).length
+          ? `<ul class="reasons">${row.reasons.map((r) => `<li>${escapeHtml(r)}</li>`).join('')}</ul>`
+          : '';
+        return `<tr>
+          <td>${escapeHtml(row.as_of || '-')}</td>
+          <td>${severityBadge(row.severity, row.should_alert)}</td>
+          <td>${escapeHtml(String(row.news_written))} / ${escapeHtml(String(row.news_attempted))}</td>
+          <td>${failed.length ? shown + more : '<span class="muted">none</span>'}</td>
+          <td>${escapeHtml(row.subject || '')}${reasons}</td>
+        </tr>`;
+      }).join('');
+      return `<div class="panel"><h2>Collection runs</h2><table>
+        <thead><tr><th>Date</th><th>Verdict</th><th>News</th><th>Failed tickers</th><th>Detail</th></tr></thead>
+        <tbody>${body}</tbody></table></div>`;
+    }
+
+    function renderTickerDetail(detail, ticker) {
+      if (!detail || !detail.length) return '';
+      const body = detail.map((entry) => `<tr>
+        <td>${escapeHtml(entry.as_of)}</td>
+        <td>${escapeHtml(entry.kind)}</td>
+        <td>${escapeHtml(entry.reason)}</td>
+        <td>${escapeHtml(entry.action)}</td>
+      </tr>`).join('');
+      return `<div class="panel"><h2>Why ${escapeHtml(ticker)} has no news, per run</h2><table>
+        <thead><tr><th>Date</th><th>Kind</th><th>Reason</th><th>What to do</th></tr></thead>
+        <tbody>${body}</tbody></table></div>`;
+    }
+
+    function renderCounts(summary) {
+      const cards = [
+        ['runs', summary.runs], ['alerting', summary.alerting],
+        ['critical', summary.critical], ['warn', summary.warn], ['clean', summary.clean],
+      ];
+      return `<div class="counts">${cards.map(([k, n]) =>
+        `<div class="count-card"><div class="n">${escapeHtml(String(n))}</div><div class="k">${k}</div></div>`
+      ).join('')}</div>`;
+    }
+
+    async function loadAlerts() {
+      const status = document.getElementById('a-status');
+      const output = document.getElementById('a-output');
+      const ticker = document.getElementById('a-ticker').value.trim().toUpperCase();
+      const params = new URLSearchParams();
+      const start = document.getElementById('a-start').value;
+      const end = document.getElementById('a-end').value;
+      const severity = document.getElementById('a-sev').value;
+      if (start) params.set('start', start);
+      if (end) params.set('end', end);
+      if (ticker) params.set('ticker', ticker);
+      if (severity) params.set('severity', severity);
+      status.textContent = 'Loading alert history...';
+      output.innerHTML = '';
+      try {
+        const response = await fetch(`/api/alert-history?${params.toString()}`);
+        const payload = await response.json();
+        if (!payload.ok) {
+          status.textContent = 'Alert history unavailable.';
+          output.innerHTML = `<div class="panel"><div class="muted">${escapeHtml(payload.error || 'Request failed')}</div></div>`;
+          return;
+        }
+        const data = payload.data;
+        const summary = data.summary || {};
+        status.textContent = `${data.returned} of ${data.total_runs_on_disk} stored runs`
+          + (summary.oldest ? ` | ${summary.oldest} to ${summary.newest}` : '');
+        output.innerHTML = renderCounts(summary)
+          + `<div class="caveat">${escapeHtml(data.delivery_caveat || '')}</div>`
+          + renderAlertRows(data.rows || [])
+          + renderTickerDetail(data.ticker_detail, data.filters && data.filters.ticker);
+      } catch (error) {
+        status.textContent = 'Alert history unavailable.';
+        output.innerHTML = `<div class="panel"><div class="muted">${escapeHtml(error.message || 'Request failed')}</div></div>`;
+      }
+    }
+
+    document.getElementById('a-apply').addEventListener('click', loadAlerts);
+    document.getElementById('a-clear').addEventListener('click', () => {
+      ['a-start', 'a-end', 'a-ticker'].forEach((id) => { document.getElementById(id).value = ''; });
+      document.getElementById('a-sev').value = '';
+      loadAlerts();
+    });
+    document.getElementById('a-ticker').addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') loadAlerts();
+    });
+
+    if (new URLSearchParams(location.search).get('tab') === 'alerts') {
+      const alertsTab = document.querySelector('[data-tab="alerts"]');
+      if (alertsTab) alertsTab.click();
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,4120 @@
+# Engineering Task Breakdown — Governed Multi-Agent Scoring Platform
+
+Audience: senior engineers executing in small, verifiable increments.
+Scope: everything between the current baseline (Sprints 1–3 substantially done,
+orchestration scaffolding present, governance decorative) and release
+readiness. Each task states its objective, design constraints, touched files,
+edge cases, and acceptance gates. Nothing here may violate the platform's
+non-negotiables: point-in-time eligibility, fail-closed governance, no silent
+data invention, deterministic replay.
+
+Baseline reference (do not re-litigate, verify instead):
+- PIT filtering + feature provenance: `agents/market_data_agent.py`, `core/schemas.py` (FeatureContract)
+- Source registry (2 domains): `fetch_data.py::SOURCE_REGISTRY`
+- Typed contracts: `core/agent_contracts.py`, `core/orchestrator.py` (6 agents)
+- Deterministic evidence-weighted confidence: `core/score_engine.py::_compute_confidence` (`evidence-confidence-v2`)
+- Audit store: `core/audit_store.py` (append-only JSONL + replay lookups)
+- Landed data-integrity fixes: commit `4fbb92c` (pct-change anchor, weekend gap false positives, collinear MA-term de-duplication)
+
+---
+
+## Sprint W — Governance Wiring (immediate cycle)
+
+Rationale: the orchestrator runs six agents but the headline score ignores
+them; Risk and Auditor are passive relays. Every later sprint (news, ML,
+backtest) compounds on this fault line. Close it first.
+
+### W1. Versioned ensemble wiring — agent outputs drive the final score ✓ DONE
+
+- Objective: make the published score the weighted product of live agent
+  outputs instead of an independent hand-built blend, without losing the
+  current-time / long-term decomposition the dashboard relies on.
+- Design constraints:
+  - `core/config.py` gains `ENSEMBLE_WEIGHTS_CURRENT` and
+    `ENSEMBLE_WEIGHTS_LONG`: dicts keyed by agent name (`market_data`,
+    `technical_analysis`, `fundamental_analysis`, `news_intelligence`,
+    `sentiment`, `macroeconomic`, `market_regime`), plus `ENSEMBLE_VERSION`
+    stamped into every decision. Both sets must sum to 1.0 — assert at import
+    time (tolerance 1e-9). Agents not yet implemented hold explicit `0.0`
+    weights; presence in the dict is the contract, absence is a startup error.
+  - Renormalization rule: when an agent's status is not `OK`, its weight is
+    redistributed proportionally across `OK` agents; if none are `OK`, the
+    decision is `NO_TRADE` with reason `no_eligible_agents`. Never treat a
+    missing agent as silently neutral.
+  - Determinism: weights are code constants, not runtime config; no
+    wall-clock or randomness in the score path (audit timestamps attach
+    outside the engine, as today).
+- Implementation notes:
+  - Each agent contribution maps to 0–10 before weighting: technical_analysis
+    → blended `(current+long)/2` from ONE canonical scorer (see W5);
+    fundamental_analysis → `fundamental_score`; market_data →
+    data-quality-derived informational score; future agents → contract score.
+  - Extend the payload with `ensemble_breakdown`:
+    per-agent `{weight, contribution, status, renormalized}` so the UI panel
+    and the number can never disagree.
+- Edge cases: agent score `None` → excluded from renormalization (not coerced
+  to 0); the two weight sets must stay proportional or the blend loses
+  meaning (assert the ratio invariant in tests).
+- Files: `core/config.py`, `core/score_engine.py`, `core/orchestrator.py`,
+  `core/schemas.py` (new field), tests.
+- Acceptance: flipping the fundamental weight visibly moves score and
+  breakdown; a failing provider renormalizes provably in a unit test; two
+  identical calls produce byte-identical `to_dict()`.
+
+### W2. Risk agent becomes a real fail-closed gate ✓ DONE
+
+- Status: **implemented** — `core/risk_policy.py` evaluates `RISK_POLICY_V2`
+  (core/config.py); the orchestrator's risk agent carries the full structured
+  rule evaluation and `veto_rule_ids` replace `_build_veto_reasons`; mode
+  selection is centralized in `_select_mode` with the tested invariant that
+  PAPER is unreachable while any veto-severity rule fires.
+
+- Objective: replace the relay (`status:"OK", veto_ready:True`) with a
+  deterministic policy evaluation that cannot be bypassed downstream.
+- Design constraints:
+  - Inputs (all already persisted): `confidence_breakdown`, `governance`,
+    `source_quality`, `risk_flags`, source statuses.
+  - Policy table `RISK_POLICY_V2` in `core/config.py`: explicit thresholds —
+    minimum confidence, maximum total penalty, forbidden statuses (`INVALID`,
+    `STALE` on critical inputs), minimum data-quality score, maximum
+    volatility-regime penalty. Each rule yields structured
+    `{rule_id, severity: veto|warning, triggered, detail}`.
+  - Fail-closed semantics: missing/`None` inputs evaluate to triggered veto
+    rules, never to pass; policy version stamped into the payload.
+- Implementation notes:
+  - Move `_build_veto_reasons` threshold literals (quality < 60, source <
+    0.7, score < 5.5, analysis-only) into the policy table — one place
+    governs gates; the orchestrator consumes rule results instead of
+    duplicating comparisons.
+  - `risk_agent.payload` carries the full rule evaluation; `veto_reasons`
+    become structured (`rule_id` + human text) while keeping the existing
+    string keys so `index.html` keeps rendering.
+- Edge cases: confidence exactly at floor; only warning-severity rules
+  triggered; governance state contradicting policy state.
+- Acceptance: table-driven unit tests prove each rule triggers and —
+  critically — that no input combination can produce `mode == "PAPER"` while
+  any `veto`-severity rule is triggered.
+
+### W3. Auditor agent becomes an evidence-and-replay validator ✓ DONE
+
+- Status: **implemented** — `core/audit_policy.py` (owning canonical hashing)
+  evaluates seven checks: evidence sufficiency, agent input-hash integrity,
+  snapshot-hash recomputation, a determinism probe (second in-process build
+  via `build_score(persist_audit=False)`), calibration sanity, ensemble
+  consistency, and evidence-ledger consistency (warning). A failed
+  veto-severity check appends the `auditor_veto` reason, blocking PAPER
+  through the `_select_mode` invariant.
+
+- Objective: the auditor independently verifies that a decision is provable
+  and may veto on audit failure (its reserved severity), per the design docs.
+- Checks (each returns pass/fail + detail, assembled into `payload.findings`):
+  - Evidence sufficiency: every `OK` agent carries non-empty `evidence` with
+    a `source_record_id`; evidence-ledger status consistent with governance.
+  - Hash integrity: each agent's `input_hash` recomputes from its payload;
+    `snapshot_hash` stable across a second in-process build.
+  - Determinism probe: run `build_score` twice on identical inputs and
+    compare `to_dict()` modulo audit-only fields; mismatch → veto.
+  - Calibration sanity: confidence within `[FLOOR, CAP]`; breakdown value
+    agrees with the headline within 0.005.
+- Acceptance: tampering a payload or hash flips the decision to `NO_TRADE`
+  with an `auditor_veto` reason; the happy path adds no network or I/O.
+
+### W4. Failure-state taxonomy across every contract ✓ DONE
+
+- Status: **implemented** — `AgentStatus` enum (OK/UNAVAILABLE/STALE/
+  INCOMPLETE/CONTRADICTORY/INVALID + VETO for governance agents) in
+  `core/schemas.py` with `STATUS_POSTURE` propagation and `worst_status`
+  combiner; `AgentContract.__post_init__` rejects unknown statuses;
+  `_derive_agent_statuses` (orchestrator) maps raw signals onto the
+  taxonomy reusing risk-policy thresholds; worst data-agent posture
+  propagates (`INVALID/CONTRADICTORY → agent_status_no_trade veto`,
+  `STALE/INCOMPLETE → ANALYSIS_ONLY floor`).
+
+- Objective: one vocabulary for degraded data, replacing ad-hoc strings.
+- Design: `AgentStatus` (str-Enum) in `core/schemas.py`:
+  `OK, UNAVAILABLE, STALE, INCOMPLETE, CONTRADICTORY, INVALID`.
+  `AgentContract.status` stays a plain string but must validate against the
+  enum at construction (raise on unknown) — JSON shape unchanged.
+- Mapping rules (documented in the enum docstring):
+  - `STALE`: freshness factor below threshold (surface from
+    `confidence_breakdown.factors[freshness]`) or cache older than TTL on read.
+  - `INVALID`: `timestamp_valid == False`, future-dated payload, schema violation.
+  - `INCOMPLETE`: data-quality below the governance threshold or missing
+    critical fields (close, valuation_metrics empty).
+  - `CONTRADICTORY`: reserved until ≥2 same-domain sources exist and disagree
+    beyond tolerance (lands with Sprint N adapters).
+  - `UNAVAILABLE`: provider unconfigured or empty response (news today).
+- Propagation: `orchestrate_score` derives posture from the worst agent
+  status — `INVALID`/`CONTRADICTORY` on critical agents → `NO_TRADE`;
+  `STALE`/`INCOMPLETE` → `ANALYSIS_ONLY` floor. The policy table (W2) consumes
+  statuses instead of raw float comparisons.
+- Acceptance: table-driven tests map each snapshot corruption to the intended
+  status, and each status to the intended decision posture.
+
+### W5. Single technical truth ✓ DONE
+
+- Status: **implemented** — `agents/technical_agent.py` is now a thin adapter
+  over the canonical scorers (`_score_current_time`/`_score_long_term`);
+  the independent formula is deleted, as is `score_engine`'s dead import of
+  it (which had created a circular-import hazard). The orchestrator passes
+  the decision's real news snapshot so the agent view matches the ensemble's
+  embedded-news view. Invariant test: agent score equals the rounded blend
+  of the raw views within the 2-dp rounding envelope.
+
+- Objective: eliminate the split-brain where `agents/technical_agent.py::
+  score_technical` feeds the technical AgentContract while the headline score
+  comes from `_score_current_time`/`_score_long_term` with different
+  coefficients.
+- Decision: `score_technical` becomes a thin documented wrapper returning the
+  blended technical view `(current + long) / 2` computed by the shared
+  functions in `core/score_engine.py`; its independent formula is deleted.
+  The disjoint-feature contract (current never reads long-horizon inputs and
+  vice versa) is preserved and stays test-enforced.
+- Consequence for W1: the technical agent's contribution equals a component
+  of the headline by construction — the ensemble becomes coherent.
+- Acceptance: separation tests still pass; a new invariant test asserts
+  `|agent_technical.score − blend(current, long)| < 1e-9`.
+
+### W6. Append-only raw-record store (Sprint-1 leftover, minimal viable) ✓ DONE
+
+- Status: **implemented** — `core/raw_store.py`: `append_raw_records` (one
+  JSONL line per fetch under `data/raw/{source_id}/{YYYY-MM-DD}.jsonl` with
+  `ingested_time`/`payload_sha256`/`schema_version`, fail-soft via the
+  `raw_store_write_failed` warning), `load_raw_records` (request-key
+  filtering, supersede-on-refetch marking older versions with
+  `superseded_by`), and `rebuild_price_frame` (latest-version OHLCV frame
+  reconstruction). Wired into `fetch_price_history` (bars, before cache
+  write) and both `fetch_fundamental_snapshot` return paths (full snapshot
+  payload). Acceptance proven: deleting the VOO parquet cache and
+  rebuilding from raw yields a value- and index-identical frame; the MSFT
+  rebuild-from-raw test reproduces the full snapshot feature-for-feature.
+
+- Objective: satisfy raw immutability / replayability without a database —
+  no fetch may leave the system unable to rebuild what it saw.
+- Design:
+  - Path scheme `data/raw/{source_id}/{YYYY-MM-DD}.jsonl`; one JSON object
+    per line: `{ingested_time, source_id, request_key, payload_sha256,
+    schema_version, records:[…]}` — records are normalized bars
+    (already point-in-time filtered) or raw provider fields (fundamentals).
+  - Writes append-only; re-fetching the same bar appends a new version line
+    (dedupe key `{request_key, bar_time}`; readers keep both and mark
+    `superseded_by` — mirrors the data-model doc's versioning rule).
+  - Reader helper `load_raw_records(source_id, request_key, as_of)` rebuilds
+    input state for audit replays.
+- Constraints: the store write lives inside the adapter before the cache
+  write, wrapped so failures log a `raw_store_write_failed` quality warning
+  and never corrupt scoring (degraded-but-flagged is acceptable).
+- Acceptance: delete the Parquet cache, rebuild a historical snapshot purely
+  from `data/raw` for a past as_of, assert feature equality with the original
+  run within float tolerance.
+
+### W7. Audit event enrichment ✓ DONE
+
+- Status: **implemented** — events are now `audit-event-v3` (v2 + the M2
+  `model_resolutions` block): `schema_version`,
+  `ensemble_version`, `model_versions` (agent → version), `agent_statuses`,
+  `veto` (risk rule ids + auditor check ids), and
+  `confidence_breakdown_digest` (hash, not the bulk payload). The enriched
+  write moved to the orchestrator (where statuses/versions/vetoes are all
+  known); the determinism probe uses `persist_audit=False` so a decision
+  still produces exactly one event. `get_events_since(cursor)` added for the
+  timeline API; append-only log with no backfill migration.
+
+- `persist_decision_audit` gains: `schema_version`, `ensemble_version`,
+  `model_versions` (agent → version), `veto` object (agent, rule_ids,
+  severity), `agent_statuses`, and a `confidence_breakdown_digest` (hash, not
+  the bulk payload).
+- Keep the log append-only; add `get_events_since(cursor)` for the upcoming
+  timeline API. No backfill migration — old lines stay readable via `.get`
+  defaults.
+
+Sprint W exit criteria: `python main.py MSFT 2026-08-26` twice → identical
+output; tamper any payload → `NO_TRADE` with a named rule; weights visible
+and effective in `/api/score`; raw-store rebuild test green; suite ≥ 60
+hermetic tests.
+
+---
+
+## Sprint N — News, Sentiment, Macro, and Regime (context layer)
+
+Governing rule inherited from the design docs: every new agent is born wired —
+it enters `ENSEMBLE_WEIGHTS` with a nonzero weight and has a veto-path test on
+the day it lands. An agent that only decorates the payload is a defect.
+
+### N1. News intelligence agent (real ingestion + classification) ✓ DONE
+
+Implemented 2026-09-01 (commit 5dc7099). Full pipeline end-to-end, all
+acceptance gates verified.
+
+- Adapter: `core/news_adapter.py` (~660 lines) behind existing contract
+  (`core/news_contract.py`; `fetch_news_snapshot` signature unchanged).
+  Provider resolution via `NEWS_PROVIDER_API_KEY_ENV`; no-key path remains
+  byte-for-byte UNAVAILABLE legacy stub (tested).
+- Query window: PIT filter gates articles by `published_time <= as_of`; 
+  window 7d lookback (config). Future-dated or unparseable → rejected INVALID
+  (fail-closed); PIT policy enforced before any scoring.
+- Per-article record: `{source_id, source_record_id, published_time, headline,
+  url, category, tone, tone_derivation, relevance, source_weight,
+  included_in_aggregation, exclusion_reason}`.
+- Classifier v2 (curated pattern sets, `NEWS_CLASSIFIER_VERSION`; v2 extended
+  litigation and regulation coverage — derivative/countersuit phrasing, SEC
+  reporting/rules/requirements): earnings,
+  guidance, litigation, regulation, product_launch, macro_shock, m_and_a,
+  strategic_announcement, management_commentary, other. First match wins;
+  taxonomy defined in `NEWS_CATEGORY_PATTERNS` as data constant.
+- Tone v1: provider-supplied when in [−1, 1], else lexicon fallback
+  (`NEWS_TONE_LEXICON_VERSION`). Lexicon: curated positive/negative terms
+  with negation handling (negator within 3 tokens flips sign). Derivation
+  stamped per record (`provider` or `lexicon:v1`).
+- Relevance: ticker exact match (1.0), company name token subset (0.7),
+  off-entity (0.0). Relevance 0 stays in evidence, excluded from aggregation
+  (audit trail via `exclusion_reason`).
+- Source weighting: `base_confidence × source_quality × recency_decay`
+  (exponential, half-life 3d). Zero-quality sources cannot raise confidence
+  and are fail-closed from contradiction aggregation.
+- Contradiction v1: same-day, same-category cluster with opposite-sign mean
+  tone, |Δ| > 0.6 → status `CONTRADICTORY`, both positive/negative sides
+  surfaced. Contradictory never averages to neutral; confidence floored to
+  0.10. Only credible articles (non-zero weight + relevance) enter clustering.
+- Novelty: duplicate headlines (normalized) deduplicated; first occurrence
+  wins (reproducible via sorted order). Duplicates stay in evidence with
+  `exclusion_reason: duplicate_headline`.
+- Aggregation: sentiment = weighted mean tone (weight = relevance × source_weight);
+  confidence = f(count/5, mean_weight, 1−dispersion, weakest_source); capped
+  at weakest contributor. Empty → `UNAVAILABLE` or `INCOMPLETE` per status.
+- Raw immutability: `append_raw_records()` logs all fetches under
+  `data/raw/newsapi_news/{YYYY-MM-DD}.jsonl` (one JSONL line per request key).
+- Status contract: UNAVAILABLE (no key, fetch failed, no articles), OK
+  (credible aggregation), CONTRADICTORY (opposite-sign cluster), INVALID
+  (future-dated rejection), INCOMPLETE (no credible articles).
+- Acceptance: no-key contract byte-for-byte + tests pass; zero-quality source
+  cannot raise confidence (test suite); contradictory cluster yields status
+  with both sides + confidence floor (test suite); as_of filtering proven
+  (future-dated test). Smoke: 6/6 checks pass.
+
+### N2. Sentiment agent (social/positioning, distinct from news tone) ✓ DONE
+
+- Scope per design docs: retail/institutional positioning and social signals —
+  not a re-broadcast of news tone. Until a real provider lands, ship
+  `UNAVAILABLE` with a typed placeholder documenting intended inputs
+  (mention volume, tone trend, disagreement, manipulation flags).
+- Any derivation from news tone must be labeled `derived_from_news` in the
+  payload with reduced confidence (×0.5); silent proxying is prohibited by
+  the news contract's docstring rule.
+- Acceptance: a contract test pins the UNAVAILABLE shape so a future provider
+  cannot silently change the public schema.
+- Status: **implemented** — `core/sentiment_contract.py::fetch_sentiment_snapshot`
+  (signature accepts ONLY `ticker, as_of`, so silent proxying is impossible by
+  construction) over the `SentimentSnapshot` schema (`derivation: "none"`,
+  `intended_inputs`, anti-proxy reason). `build_score` fetches it, hashes it
+  into the replay metadata, and emits a zero-weight `sentiment` ensemble line;
+  `orchestrate_score` carries it as the 7th agent (audit event
+  `model_versions`/`agent_statuses` included, `expected_input_hashes`
+  verified) while deliberately sitting OUTSIDE the data-agent posture loop —
+  its absence renormalizes to nothing and cannot floor a healthy decision to
+  `ANALYSIS_ONLY`. The `derived_from_news` labeling is now an enforced,
+  test-pinned contract: `core/config.py::SENTIMENT_DERIVED_CONFIDENCE_SCALE`
+  (0.5) and `core/sentiment_contract.py::derive_sentiment_from_news` — the
+  ONLY sanctioned path to news-derived sentiment — is fail-closed (any news
+  snapshot that is not status OK with in-range numeric tone/confidence yields
+  the UNAVAILABLE placeholder; degraded or CONTRADICTORY evidence is never
+  laundered into a sentiment value), stamps
+  `derivation: "derived_from_news"` + `source_id: "sentiment_derived_from_news"`,
+  and scales `source_confidence` ×0.5 so the single-source dependency is
+  priced into confidence, not merely documented. It is deliberately NOT wired
+  into the production pipeline; promoting it requires a feature-registry entry
+  and an explicit ensemble-weight decision. Anti-proxying is proven three ways
+  in `tests/test_sentiment_contract.py`: the pinned UNAVAILABLE shape,
+  behavioral invariance (output identical under wildly different patched
+  news/technical pipeline states), and an AST import-hygiene guard (the module
+  may import only config + schemas; importing news/technical/market code fails
+  the suite). A source-scan test also forbids production references to the
+  derived path until it is formally registered.
+  `tests/test_sentiment_contract.py` pins the shape byte-for-byte.
+
+### N3. Macroeconomic agent ✓ DONE
+
+Implemented 2026-09-01. Full vintage-aware series registry, PIT filtering,
+risk regime classification, and sector sensitivity mapping complete.
+Vintage-aware v2 (publication-time vintages) completed 2026-09-15.
+VIX + 30Y yield added to the signal set 2026-09-18 (macro-adapter-v3).
+
+- Series registry: `core/macro_registry.py` (data constant `MacroSeries` entries
+  for fed_funds, cpi_yoy, initial_claims, gdp_growth, 10y_yield, 30y_yield,
+  vix). Each series
+  carries complete metadata: provider (FRED), series_id, unit, frequency,
+  transformation, publication_lag_days, reference_period_field,
+  published_time_field, feature_version, lookback_periods, description,
+  pit_policy (`published_time_gate_first_release_retained`) and vintage_source
+  (`fred_alfred_realtime` for all seven series).
+- Adapter: `core/macro_adapter.py` (~500 lines) implementing full pipeline:
+  FETCH → PROVIDER GATE → PIT FILTER → REVISION HANDLING → INDICATOR ANALYSIS
+  → SECTOR-WEIGHTED REGIME → CONFIDENCE CALCULATION.
+- PIT policy: articles/releases with published_time > as_of are rejected
+  (INVALID, fail-closed). Eligible records are PIT-filtered before analysis.
+  Revisions append to raw_store (W6) with request_key-based versioning.
+- Sector sensitivity v1: `core/macro_registry.py::SECTOR_MACRO_LOADINGS` maps
+  GICS sectors to (rates_sensitivity, energy_beta, usd_beta) loadings (static,
+  curated, `MACRO_SENSITIVITY_VERSION`). Symbol→sector mapping table
+  (`SYMBOL_TO_SECTOR`) v1 for portfolio holdings; extensible later via
+  classification service.
+- Risk regime classification: compute_risk_regime() evaluates fed_funds (rates
+  level: >4% restrictive, <2% accommodative), cpi_yoy (inflation: >3.5% high,
+  <1.5% subdued), initial_claims (labor: >450k elevated, <200k tight),
+  gdp_growth (growth: <1% weak, >3% strong), 10y_yield (yields: >3.5%
+  elevated, <1.5% depressed), 30y_yield (long end: >4% elevated, <2%
+  depressed — same orientation as the 10Y, banded one notch higher for the
+  term premium), and vix (>30 stress, >20 elevated, <14 calm). Mean signal →
+  risk_score ∈ [0, 1] (0 = risk-off, 0.5 = neutral, 1.0 = risk-on). Regime:
+  risk_off if score < 0.3, risk_on if score > 0.7, neutral otherwise.
+- VIX IS INVERTED. Every other series reads "higher = more risk-on"; a high
+  VIX is the market pricing fear, so its signal sign is flipped. A sign error
+  would turn a panic into a buy signal, so the inversion is pinned by
+  `VixAndLongYieldSignalTests` and stated in the series description itself.
+- Signal-set widening is versioned, not silent: risk_score is the MEAN of
+  available signals, so going from 5 to 7 series changes every historical
+  score (each signal's share moves from 1/5 to 1/7). That is why
+  MACRO_ADAPTER_VERSION moved v2 → v3.
+- Status contract: UNAVAILABLE (no provider key), OK (all series available),
+  INCOMPLETE (missing series; confidence degraded by MACRO_MISSING_SERIES_PENALTY
+  per series), INVALID (future-dated or unparseable publication times).
+- Per-series contributions: each series carries source_record_ids, published_time,
+  value, credibility status, and a `vintage` block (source, reference_date,
+  vintage_date, first_release_value, first_release_vintage_date, revision_count).
+  Aggregation uses `resolve_vintage()` as-of-known selection, never FIFO-last.
+- Vintage awareness v2 (macro-adapter-v2): FRED's standard endpoint returns only
+  the CURRENT vintage of each observation; consuming it for a historical as_of
+  would silently apply later revisions (the prohibited revised-data-in-history
+  failure). The adapter fetches the AS-OF-KNOWN vintage via the ALFRED realtime
+  endpoint (`fetch_fred_vintages`), and `resolve_vintage()` performs
+  deterministic VINTAGE SELECTION: latest eligible reference period, selected
+  value = the vintage known at as_of, first-release value retained,
+  revision_count = revision history where available. A vintage-feed failure
+  falls back to the current-vintage endpoint but is DISCLOSED (pipeline
+  `vintage_source_used`, `vintage_gaps`, `current_vintage_fallback`; per-series
+  `vintage.source = "none"`), never silent. Covered by `VintageTests` in
+  `tests/test_macro_registry.py` (as-of-known selection, no revision leak past
+  as_of, published-time proxy degradation, fallback disclosure).
+- Confidence: base 0.9 for FRED data, penalized by 0.15 per missing series.
+  Never silent zero-fill; missing series explicitly flagged.
+- Output: `MacroSnapshot` dataclass with ticker, as_of, status, regime,
+  regime_score, series_values, series_credibility, sector_loadings,
+  per_series_contributions, reason.
+- Contract: `core/macro_contract.py::fetch_macro_snapshot(ticker, as_of)` —
+  thin entry point, stable signature, returns full MacroSnapshot dict.
+- Raw immutability: all fetches logged to `data/raw/fred_macro/{YYYY-MM-DD}.jsonl`.
+- Acceptance: no-key contract byte-for-byte + tests pass; missing series
+  confirmed visible and penalized; future-dated rejection verified;
+  risk-on/off regime classification tested (risk_on score > 0.7, risk_off < 0.3).
+  Smoke: 6/6 checks pass.
+
+### N4. Market Regime agent ✓ DONE
+
+Implemented 2026-09-03. Five-state governance classification with STRESS →
+NO_TRADE coupling and RISK_OFF momentum dampening complete.
+
+- Classifier: `core/regime_agent.py` — pipeline FETCH → PIT FILTER → FEATURE
+  SERIES → RULE CHAIN (per session) → LABEL + PROBABILITY PROXY + TRANSITION
+  RISK. States: `bullish, bearish, range, risk_off, stress`
+  (`REGIME_LABELS`, `REGIME_CLASSIFIER_VERSION = regime-classifier-v1`,
+  `REGIME_PIPELINE_VERSION`, `REGIME_CONTRACT_VERSION`).
+- Rule chain v1 (strict precedence stress > risk_off > range > bearish >
+  bullish; every comparison strict): `stress` = 30d realized vol strictly
+  above its trailing 1y 95th percentile AND drawdown from the 60-session
+  high > 15%; `risk_off` = vol strictly above the 1y 80th percentile OR
+  (MA50 < MA200 with 20d AND 60d momentum both negative); `range` = both MA
+  distances strictly inside ±2%; `bearish` = close < MA200 and MA50 < MA200
+  without aligned negative momentum; `bullish` default. Pure scalar core
+  `evaluate_rules` is the boundary-testable unit; `classify_regime` labels
+  every session (transition risk needs per-session labels).
+- Volatility percentiles compare the current session against the PRIOR 252
+  sessions only (never part of its own reference distribution); windows
+  require `REGIME_REQUIRED_SESSIONS = 283` eligible sessions, else INCOMPLETE
+  with `regime` explicitly None (a partial rule evaluation would make the
+  label depend on data availability, not the contract).
+- Output: `{label, probability_proxy (per-label distance from the deciding
+  boundary, scaled by REGIME_TREND_MARGIN_SCALE / REGIME_MOMENTUM_MARGIN_SCALE,
+  clipped [0,1]), transition_risk (flips per trailing 20 sessions, flip_rate,
+  labels)}` plus full `inputs` and `rule_trace` evidence.
+- Failure states are statuses, never neutral labels: UNAVAILABLE (fetch
+  failed / no eligible bars), INVALID (schema violation), INCOMPLETE
+  (history shorter than the strict windows), OK. Future bars are excluded
+  and counted before any feature is computed.
+- Contract: `core/regime_contract.py::fetch_regime_snapshot(ticker, as_of)`.
+  `RegimeSnapshot` dataclass in `core/schemas.py`; `ScoreResult.
+  market_regime_snapshot` carries it; replay metadata adds
+  `regime_snapshot_hash`. The legacy 3-state `market_regime` display
+  heuristic in the market snapshot is untouched and ungoverned.
+- Governance coupling: `market_regime_stress` veto rule (severity `veto`) in
+  `RISK_POLICY_V2`, evaluated by `core/risk_policy.py` (the only evaluator) —
+  triggers on the STRESS label AND fail-closed on a missing/unknown label;
+  the orchestrator couples that veto to `effective_action = "NO_TRADE"`
+  (regime stress blocks trades; threshold vetoes keep their ANALYSIS_ONLY
+  semantics). `risk_off` multiplies the current-time momentum coefficients
+  (momentum_1d/5d/20d, trend_vs_20d_mean) by
+  `REGIME_RISKOFF_MOMENTUM_DAMPING = 0.5` inside `_score_current_time`,
+  mirrored exactly in the scoring breakdown (`regime_momentum_damping` +
+  a score-change driver note) so the explanation cannot contradict the
+  number; RSI/MA-distance/volume terms and the long-term view are not
+  dampened.
+- Born wired: `market_regime` is the ninth decision agent — in
+  `_derive_agent_statuses`, the data-agent posture loop (UNAVAILABLE/
+  INCOMPLETE floors to ANALYSIS_ONLY), the risk context, audit
+  model_versions/agent_statuses, expected_input_hashes, and agent_outputs.
+  Ensemble weight stays 0.0 (gate, not a vote) until forecast conditioning.
+- Acceptance: boundary tests at each threshold/percentile (strict
+  comparisons pinned at and past every boundary); precedence, proxy bounds,
+  transition flips, PIT future-bar exclusion, failure-state statuses,
+  fail-closed veto coupling, dampening mirror, and an orchestrator test
+  proving a stress snapshot cannot reach PAPER regardless of score.
+  Full suite: 236/236 pass.
+
+### N5. Narrative vs fundamental attribution ✓ DONE
+
+Implemented 2026-09-03. The published score decomposes into governed
+contribution buckets so the system can state whether a thesis is supported
+by business reality, market narrative, or both.
+
+- Evaluator: `core/score_engine.py::build_attribution` (pure, deterministic,
+  `score-attribution-v1`). It reads the per-agent, per-horizon
+  `contribution_current`/`contribution_long` entries from the ensemble
+  breakdown — the single source of contribution math — and only classifies
+  and aggregates them, so the attribution can never contradict the
+  published score.
+- Buckets (`ATTRIBUTION_BUCKETS`, versioned in `core/config.py` with an
+  import-time partition guard): `operational` = fundamental_analysis +
+  technical_analysis (the long-horizon technical view anchors the bucket;
+  its current-horizon component is tactical but still technical evidence);
+  `narrative` = news_intelligence + sentiment ONLY; `macro_shock` =
+  macroeconomic + market_regime. `market_data` is the zero-weight
+  informational line and sits outside the buckets
+  (`ATTRIBUTION_INFORMATIONAL_LINES`).
+- Block shape: `per-agent lines {bucket, contribution_current,
+  contribution_long, total, status, eligible_current/long}`; `buckets
+  {total, stance, members}` with stance supports/opposes/neutral against
+  `ATTRIBUTION_SUPPORT_THRESHOLD = 0.25`; `thesis_support` ∈
+  {operational, narrative, operational_and_narrative, neither};
+  `attributed_total` + `reconciles` (strict equality against the published
+  score via the same rounding path); `summary` sentence.
+- Acceptance: with news at zero weight (ineligible) the narrative bucket
+  reads exactly `0.0` — no phantom narrative; the summary states WHY
+  (no provider vs provider-OK-but-scoreless). Weight renormalization moves
+  absolute contributions when a line enters/leaves; the pinned invariant is
+  the underlying agent score plus the exact narrative-line equality.
+- Explanation assembly: the `explanation` string appends the attribution
+  sentence (bucket totals + thesis support + summary) built from the same
+  block, so the UI can state why the score moved without ever disagreeing
+  with the numbers.
+- Semantics note: with the current 0-10 weighted-average ensemble every
+  contribution is non-negative, so the `opposes` stance is unreachable
+  through the blend — it is reserved for the signed contribution semantics
+  of forecast decomposition (Sprint F6) and pinned by a synthetic signed
+  breakdown test.
+- Location: `scoring_breakdown["attribution"]` on every `ScoreResult`.
+- Acceptance: 17 new tests (`tests/test_attribution.py`) covering the
+  partition guard, line/bucket math, the zero-narrative criterion, stance
+  and thesis classification, exact reconciliation, explanation assembly,
+  and determinism. Full suite: 253/253 pass.
+
+### N6. Deferred-but-slotted feature gaps ✓ DONE
+
+Implemented 2026-09-03. Features are registered with full provenance and
+DEFERRED — none may enter a scorer without a weight and a test (pinned).
+
+- ATR(14): `agents/market_data_agent.py::_average_true_range` — simple mean
+  of true range over the last 14 sessions (not Wilder smoothing; versioned
+  with `MARKET_FEATURE_VERSION`). True range = max(high − low,
+  |high − prev_close|, |low − prev_close|); the first session's TR is
+  explicitly undefined (NaN — high-low never masquerades as a full range).
+  Strict window: `None` until 15 sessions exist; a shorter mean is a
+  different, noisier quantity and must not be published as `atr_14`.
+- 60d trend slope: `_trend_slope` — exact least-squares slope of the last
+  60 closes versus session position (price/session, signed); strict window,
+  `None` until 60 sessions.
+- 50/100/150/200d trailing returns: reuse the anchored `_pct_change` family
+  convention (0.0 until the anchor session exists), matching the existing
+  `change_20d/60d` behavior.
+- All six (`change_50d/100d/150d/200d`, `atr_14`, `trend_slope_60d`) appear
+  as top-level snapshot fields AND provenance-complete feature contracts;
+  `MarketSnapshot.from_dict` canonicalizes them.
+- Scorer neutrality is test-enforced: the names are absent from
+  `CURRENT_SCORE_FEATURES`/`LONG_TERM_SCORE_FEATURES` and mutating the new
+  snapshot fields cannot move `_score_current_time`/`_score_long_term`.
+  Wiring one in later requires a weight and a test by house rule.
+- Breadth/participation: explicitly deferred with a `breadth` entry in
+  `fetch_data.SOURCE_REGISTRY` (`provider_key_required`,
+  `base_confidence: 0.0`, `domain: market_breadth`). Survivorship-safe
+  breadth requires an index-constituent adapter and can never be inferred
+  from price, volume, or technical indicators.
+- Acceptance: 18 hermetic tests (`tests/test_deferred_features.py`) —
+  value correctness against hand-computed/independent definitions, strict
+  windows, provenance, PIT (future bars cannot change features), scorer
+  neutrality, and the breadth placeholder.
+
+---
+
+## Sprint V — Outcome Labels, Walk-Forward Backtest, Paper Engine
+
+Ordering rule: this sprint precedes any ML work. A model trained before a
+leakage-safe label and validation harness exists would be unvalidatable by
+construction. The shared-research contract in `docs/validation.md` is binding:
+the backtester consumes the same feature contracts and scorers as live —
+no side research dataset, ever.
+
+### V1. Outcome label builder ✓ DONE
+
+Implemented 2026-09-03. Point-in-time-safe labels for every persisted
+decision, computed strictly from bars in `(as_of, as_of + h]` with h in
+trading sessions.
+
+- Evaluator: `core/labels.py::build_outcome_labels` (pure with respect to
+  the dataset state; `OUTCOME_LABEL_VERSION = outcome-label-v1`).
+  Per-horizon labels: `forward_return` (exit close vs entry close),
+  `realized_vol` (the h close-to-close returns realizing inside the window,
+  the first anchored at the entry close), `risk_adjusted` (return / realized
+  vol — `None` for the 1d horizon where dispersion is undefined and for
+  zero-vol windows, computed from the PUBLISHED rounded values so the block
+  is self-consistent), and for the 20d window: `adverse_excursion` (worst
+  low vs entry close within the window) and `label_20d_up` (strictly greater
+  than `OUTCOME_LABEL_UP_THRESHOLD = 0.0`).
+- Boundary rule: a horizon's label is null until the horizon has fully
+  elapsed RELATIVE TO THE DATA'S LATEST BAR — eligibility is derived from
+  the fetched frame's newest bar, never wall-clock, so the same dataset
+  state always produces the same labels. Partially elapsed horizons are
+  null in the snapshot and NEVER persisted (no partial-window leakage).
+  Horizons are trading-session based; the window is `bars.index > as_of`
+  (an intraday as_of starts the window after the moment).
+- Statuses: OK (all four matured), PARTIAL (some — the spec acceptance:
+  a decision dated 10 sessions ago has 1d/5d labels and 20d/60d null),
+  PENDING (none), UNAVAILABLE (fetch failed / empty / no entry bar at or
+  before as_of). A future as_of raises ValueError (timestamp violation,
+  mirroring the market data agent).
+- Storage: append-only `data/outcomes.jsonl` keyed
+  `{ticker, as_of, horizon, label_version}`. Re-appending a byte-identical
+  latest record is a no-op (idempotent recompute); a genuinely different
+  value is appended with `supersedes` pointing at the previous record hash —
+  history preserved, never mutated. `record_hash`/`labels_hash` are
+  canonical SHA-256 digests (labels_hash is the future dataset-hash seed for
+  M2). Malformed lines raise (integrity is loud, never skipped).
+- Single price truth: the same Yahoo close series the scoring path uses; no
+  separate adjustment.
+- Leakage safety is test-pinned with poisoned-frame probes: bars beyond a
+  horizon's window cannot change that horizon's label (or its realized vol);
+  interior window bars change realized vol but not the exit-close-based
+  return; pre-as_of bars other than the entry close change nothing; the
+  labels_hash is stable under all of these.
+- Contract: `OutcomeLabelSet` dataclass in `core/schemas.py`;
+  `build_and_persist_outcome_labels` for the append flow;
+  `latest_outcome_labels` resolves the newest record per horizon.
+- Acceptance: 28 hermetic tests (`tests/test_labels.py`). Full suite:
+  299/299 pass.
+
+### V2. Walk-forward backtest engine ✓ DONE
+
+Implemented 2026-09-03. Package core/backtest/ — costs.py, metrics.py,
+manifest.py, engine.py — validation infrastructure only (never a
+production trading path).
+
+- Folding (engine.py::build_walk_forward_folds): anchored train
+  [0, t1] → embargo (t1, t1 + e] → validation
+  [t1 + e + 1, t1 + e + fold_sessions] → advance. The embargo is
+  enforced >= the max label horizon (60 sessions) at import time
+  (BACKTEST_EMBARGO_SESSIONS) and again per fold construction; the final
+  BACKTEST_HOLDOUT_SESSIONS tail is excluded from every fold and evaluated
+  once with the frozen configuration (evaluation: holdout_once).
+- Offline replay seam (offline_replay_seam): injects cached price frames
+  into the market-data agent, the regime agent, and the V1 label builder,
+  and forces news/sentiment/macro to their no-key UNAVAILABLE contracts
+  (fundamentals take the documented offline fallback) — the LIVE scoring
+  path (uild_score) replays offline and deterministically. Provider
+  overrides are recorded in the manifest.
+- Execution model (costs.py, COST_TABLE_V1 / acktest-cost-table-v1):
+  decisions at bar t act at bar t+1 open; per-side costs = half spread by
+  liquidity bucket (fail-closed: unknown liquidity pays the widest spread)
+  + square-root market impact (bps = coefficient x sqrt(participation),
+  worst-case participation when unknown) + commission. All parameters in
+  the versioned table, never inline.
+- Metrics (metrics.py, acktest-metrics-v1): pure, deterministic —
+  CAGR, Sharpe (annualized, configurable rf), Sortino, Calmar, max
+  drawdown, win rate, profit factor, exposure, turnover, rejection rate;
+  documented None conventions keep results JSON-safe. Per-fold and
+  aggregate (pooled daily returns/trades/decisions).
+- Run manifest (manifest.py, acktest-manifest-v1): code commit,
+  feature/ensemble/score/label/cost-table/strategy versions, canonical data
+  digest, config snapshot (including the cost table), seed, provider
+  overrides; 
+un_hash is the canonical SHA-256 of all of it.
+  alidate_manifest treats an incomplete manifest as an invalid run;
+  seed: None is legitimate (no randomness).
+- Harness strategy (acktest-strategy-v1): enter long at score >= 6.5
+  when the posture is not NO_TRADE; exit below 4.5; hold between. The final
+  bar's signal cannot execute inside a window (documented boundary).
+- Label alignment: every injected label is verified per decision against
+  the canonical V1 recomputation by 
+ecord_hash; any mismatch aborts the
+  run with BacktestLeakageError (leaked_labels_detected) before any
+  metric exists.
+- Acceptance: a deliberately leaked variant (labels shifted one bar early)
+  is detected and rejected by the harness (test); identical inputs rerun to
+  identical results — the full run dict is byte-equal (manifest carries no
+  wall-clock); cost parameters demonstrably change final equity and the run
+  hash (test). 23 tests in 	ests/test_backtest.py. Full suite: 322/322
+  pass.
+
+### V3. Transaction costs and slippage assumptions made explicit ✓ DONE
+
+Implemented 2026-09-03. The cost model evolved to acktest-cost-table-v2
+(core/backtest/costs.py) — transaction costs and slippage are now
+first-class, versioned, itemized artifacts, never hidden inside a price.
+
+- Volatility-adjusted square-root impact (the classic law made explicit):
+  impact_bps = impact_coefficient_bps * vol_factor * sqrt(participation)
+  with ol_factor = clamp(daily_vol / impact_vol_baseline_daily, min, max)
+  — daily_vol is the realized 20-session close-to-close volatility,
+  computed by the engine for every decision (
+ealized_vol_daily).
+- Explicit floor/cap: 	otal_bps is clamped to
+  [min_total_side_cost_bps, max_total_side_cost_bps] — never a
+  zero-cost fill, never an absurd-cost fill; every record states
+  clamped.
+- Fail-closed fallbacks made explicit: unknown liquidity → widest
+  spread; unknown participation → worst case 1.0; unknown volatility
+  → neutral vol factor 1.0 with ol_available: false stamped on the
+  record (the engine always computes it).
+- Itemized attribution: every execution emits
+  execution_cost_record (side, open/executed price, order notional,
+  participation, average dollar volume, daily vol, bucket, half-spread,
+  impact, vol factor, commission, raw and clamped totals, cost notional);
+  trades carry entry_costs/exit_costs; the aggregate reports
+  	otal_cost_notional, vg_execution_cost_bps, and cost_drag
+  (cost notional / initial capital).
+- Versioning: COST_TABLE_V1 frozen (no vol term, no clamp) so historical
+  runs replay under their original assumptions — V1-shaped records carry
+  no vol fields at all; every table carries its own
+  cost_table_version; the manifest states which table produced the run.
+- Binding documentation: docs/validation.md gains the “Transaction
+  Costs and Slippage Assumptions” section with the full model, every
+  parameter, and the explicitly accepted limitations (no intraday timing,
+  no partial fills, no borrow costs, no fees/rebates/taxes, open-gap risk
+  borne by the strategy, split-adjusted feed).
+- Acceptance: 10 new tests (vol scaling and clip bounds, floor/cap,
+  itemized records, unknown-table-version rejection, V1 backward
+  compatibility, explicit attribution in the engine, expensive table pays
+  more per execution and per unit of capital). Full suite: 332/332 pass.
+
+### V4. Run manifests mandatory for every backtest ✓ DONE
+
+Implemented 2026-09-03. V2 built the manifest builder; this task made
+manifests MANDATORY and PERSISTED — a backtest run without a persisted,
+valid manifest does not exist.
+
+- Mandatory enforcement (`engine.py::BacktestManifestError`): the manifest
+  is validated BEFORE any fold is replayed — a run whose manifest fails
+  validation is refused outright (no decisions, no metrics, no partial
+  results). `manifest_issues` in a returned result is therefore always
+  empty by construction.
+- Persistence (`manifest.py::persist_run_manifest`): every completed run
+  appends its manifest to the append-only `data/backtest_runs.jsonl`
+  (override via `manifest_store_path` for isolation). Idempotent per
+  `run_hash`: a byte-identical recompute appends nothing. A same-hash/
+  different-content record raises an integrity violation — the run hash is
+  the canonical digest of all inputs, so that is corruption, not a
+  revision. Aborted runs (e.g. leakage rejection) persist nothing: only
+  completed runs exist in the store.
+- Integrity on load: `load_run_manifests` / `load_manifest_by_run_hash`
+  raise on malformed lines (loud, never skipped), and
+  `require_valid_manifest` re-validates any manifest on demand.
+- Store mirrors the outcomes/paper-order conventions: JSONL, append-only,
+  `Path`-overridable for hermetic tests.
+- Acceptance: 6 new tests (`ManifestMandateTests`) — every completed run
+  persists a valid manifest; identical reruns are idempotent in the store;
+  the engine refuses an invalid manifest before any work and stores
+  nothing; same-hash/different-content is an integrity violation;
+  malformed lines fail loudly; aborted runs persist nothing. Full suite:
+  338/338 pass.
+
+### V5. Shared feature/scoring contracts — research == production ✓ DONE
+
+Implemented 2026-09-03. The Shared Research Contract is now an enforced,
+test-pinned invariant — no parallel ad hoc path.
+
+- Toolkit: `core/contract_verification.py`
+  (`shared-contract-verification-v1`) — pure, diff-precise problem lists:
+  `feature_contract_problems` (every feature contract complete + current
+  MARKET_FEATURE_VERSION), `snapshot_field_problems` and
+  `score_identity_problems` (identity across paths, including the N6
+  slotted features and the ensemble/governance layer),
+  `engine_version_problems` (manifest versions must equal the live config
+  constants — drift is a failure), and `parallel_path_problems`
+  (structural scan: research modules must call the canonical producers and
+  must never define `build_score`/scorers/label builders of their own).
+- Identity proof: a direct (production-reference) call and the same call
+  under the offline research seam produce byte-identical market snapshots,
+  score layers, and V1 labels — the seam changes only the data source,
+  never the computation.
+- Acceptance: 11 tests (`tests/test_shared_contracts.py`), including a
+  seeded-violation test proving the parallel-path detector catches a
+  rogue scorer and that removal restores a clean scan.
+
+### V6. Paper-trading order engine (simulation only) ✓ DONE
+
+- Objective: simulate the decision → order → fill loop with governance
+  intact, producing the trade evidence later sprints consume.
+- Flow: accepted decisions (`mode == "PAPER"`) emit an order intent
+  `{order_id (deterministic hash of ticker+as_of+intent), side, quantity,
+  intent_time}`; fill simulated at next bar open ± slippage; rejections
+  carry the governing rule id. `NO_TRADE` decisions are logged too — the
+  paper log must show why nothing happened.
+- Invariants: idempotent order ids (retry-safe); no order path exists for
+  `LIVE_DISABLED`/`ANALYSIS_ONLY` — the live branch is a `NotImplemented`
+  hard stop, not a config flag away; every state transition appends to the
+  audit store (W7 schema).
+- Storage: `data/paper_orders.jsonl` (append-only), mirrors the trades
+  concept from the schema doc (paper_only = True by construction).
+- Acceptance: duplicate intent submission yields one order; a vetoed
+  decision produces an intent-shaped rejection, never a fill; live branch
+  raises unconditionally.
+
+**Implemented 2026-09-16** in `core/paper_engine.py` (`paper-engine-v1`,
+constants owned by `core/config.py`).
+
+- Numbering note: commit `540cb34` landed the survivorship-safe universe
+  (`core/universe.py`) under the "V6" label while this V6 — the paper
+  engine — stayed unbuilt. Both are now complete; the universe work is
+  tracked under **V6b** below to keep the commit history readable. Sprint V
+  ("Labels / Backtest / Paper") is complete only now that Paper exists.
+- Governance is upstream and absolute: `submit_order_intent` reads the
+  `OrchestrationDecision` it is handed and re-derives nothing, so it cannot
+  overturn a veto. Only `mode == "PAPER"` is ACCEPTED; ANALYSIS_ONLY and
+  NO_TRADE produce intent-shaped REJECTED records carrying
+  `governing_rule_ids` — the log shows why nothing happened.
+- Idempotency: `order_id` is a truncated SHA-256 over
+  (ticker, as_of, side, kind), so it is stable across processes and
+  crash-retries. A resubmission returns the stored record with
+  `duplicate: True` and appends nothing.
+- Fills price exclusively through the V3 cost table
+  (`execution_cost_record`) — no inline spread or slippage constant exists
+  in the engine. Fail-closed: unknown liquidity pays the widest (micro)
+  spread. A frozen `COST_TABLE_V1` replay is supported.
+- No live path: `submit_live_order` raises `NotImplementedError`
+  unconditionally, `EXECUTION_MODE` is permanently `LIVE_DISABLED` (guarded
+  at import by `_validate_paper_config`), and a test greps `core/` and
+  `agents/` to prove `LIVE_APPROVED` has no construction path.
+- Acceptance: 29 tests in `tests/test_paper_engine.py`. Full suite:
+  552/552 pass.
+
+### V6b. Survivorship-safe historical universe ✓ DONE
+
+Landed in commit `540cb34` as `core/universe.py` (`universe-ledger-v1`),
+originally mislabeled V6. Membership intervals `{ticker, listed_from,
+listed_to}` keep delisted members after they stop trading;
+`survivorship_problems` flags a candidate universe that is missing a member
+listed at `as_of`. Covered by `tests/test_universe.py`.
+
+### V7. Monitoring foundations ✓ DONE
+
+Implemented this sprint. Every backtest run now carries its own health
+evidence, computed by pure functions — no dashboard dependency.
+
+- Toolkit: `core/monitoring.py` (`monitoring-v1`) — pure, deterministic
+  run-health metrics: score-distribution drift (population stability
+  index over fixed 0-10 bins; `< 0.1` no change / `0.1-0.25` moderate /
+  `> 0.25` significant), confidence drift (mean delta), stale-data rate
+  (STALE agent-status fraction; missing status metadata is unknown, never
+  clean), veto rate by rule (over decisions with veto metadata), and label
+  coverage (fraction with a matured 20d label).
+- Engine wiring: `run_walk_forward_backtest` computes a monitoring block
+  from the run's own decisions and persists it append-only next to the
+  manifest (`data/monitoring.jsonl`, `monitoring_store_path` override,
+  idempotent per run hash — same discipline as V4's manifest store). The
+  block is exposed as `run["monitoring"]` and merged into the aggregate
+  metrics for a single-window read.
+- Fail-closed degradation: insufficient observations yield
+  `insufficient_data` (never a fabricated verdict); a missing/malformed
+  store line raises on load (loud, never skipped); a same-hash/
+  different-content record is an integrity violation.
+- Acceptance: drift detects a seeded distribution shift (PSI > 0.25 on
+  split distributions), identical windows show no change, small windows
+  degrade explicitly, corrupt scores raise, engine runs stamp + persist +
+  recompute idempotently (4 new engine-integration tests). Full suite:
+  389/389 pass.
+
+### V8. Framing — a backtest is historical evidence under explicit assumptions ✓ DONE
+
+Implemented 2026-09-14 (commit bcdec69). The interpretive contract that keeps
+validation honest: a backtest is evidence about historical behavior under the
+assumptions it actually used — never proof the future behaves the same way.
+
+- Evaluator: `core/framing.py` (pure, deterministic,
+  `FRAMING_VERSION = backtest-framing-v1` in `core/config.py`). Every
+  completed run carries a versioned framing block built by
+  `build_framing_block(manifest, aggregate)`.
+- Canonical statement (`FRAMING_STATEMENT`, test-pinned against upgrading
+  wording): "This backtest is evidence about historical behavior under the
+  explicit assumptions listed in this block. It is not proof that the future
+  will behave the same way."
+- Assumptions (`assumption_entries`) are sourced FROM THE MANIFEST —
+  cost_table, strategy, price_basis, universe, embargo/fold/holdout session
+  geometry, enter/exit scores, data_digest — so the framing can never
+  disagree with the run it frames. `framing_problems(manifest)` is
+  fail-closed: a missing assumption refuses the run. The engine merges
+  framing problems into the manifest validation and raises
+  `BacktestManifestError` BEFORE any fold is replayed (weak framing is
+  refused before replay, never after results exist).
+- Limitations (`FRAMING_LIMITATIONS`): the V3/V6-accepted simulation limits
+  (no intraday timing, no partial fills, no borrow/rebate costs, open-gap
+  risk, price-return basis, no exchange fees/taxes, PIT-only) as an
+  explicit, versioned list — never silently rediscovered.
+- Non-claims (`FRAMING_NON_CLAIMS`): not_proof_of_future, not_guarantee,
+  not_generalization, not_release_gate_waiver — the only framing vocabulary
+  a run may use about its own meaning. Strong historical results never
+  upgrade the framing (test-pinned): `evidence_status` is
+  `historical_evidence` or `historical_evidence_no_decisions`; the
+  aggregate decision count only informs the evidence note, never the status
+  or the statement.
+- Persistence: append-only `data/framing.jsonl`
+  (`persist_framing_snapshot`, idempotent per (run_type, run_hash);
+  byte-identical recompute appends nothing; same-key/different-content is
+  an integrity violation, never a silent revision; malformed lines raise on
+  load). The engine default mirrors the manifest store path;
+  `run["framing"]` exposes the block next to the manifest and monitoring
+  snapshot.
+- Binding documentation: `docs/validation.md` gains the "Backtest Framing
+  (V8)" section with the full contract.
+- Acceptance: canonical statement and non-claims pinned; superb and
+  terrible aggregates frame identically; a missing assumption refuses the
+  run before replay; idempotent store behavior; every engine run carries
+  the block. 17 tests in `tests/test_framing.py`. Full suite: 411/411 pass
+  at landing (508/508 as of N3 v2).
+
+## Sprint M — ML Layer, Calibration, Model Registry
+
+> **Numbering.** This board and `NEXT_STEPS_SPRINTS.md` (derived from the
+> master context) number Sprint M differently. This board is authoritative
+> for execution; the mapping is:
+>
+> | This board | Master context (`NEXT_STEPS_SPRINTS.md`) |
+> |---|---|
+> | M1 Feature registry | M1 Canonical Feature Registry |
+> | M2 Model registry and artifact tracking | M5 Model Artifact Registry |
+> | M3 Training pipeline | M2 Training Dataset Builder + M4 Baseline Suite |
+> | M4 Calibration and score mapping | M6 Calibration and Uncertainty |
+> | M5 Promotion gates and drift hooks | M7 Champion/Challenger + M8 Reproducibility Gate |
+>
+> The master context's **M3 Research Trial Registry** has no slot on this
+> board yet — it needs one before training runs begin, or experiments will
+> bypass the trial registry (a named failure mode, master context section 32).
+
+Preconditions: Sprint V complete (labels exist, harness exists, paper
+evidence accumulates). Dependency note: this sprint introduces the project's
+first training dependency (scikit-learn is the pragmatic choice) — that is a
+requirements.txt change requiring explicit review, plus pinning consistent
+with the existing style.
+
+### M1. Feature registry (single source of truth) ✓ DONE
+
+Implemented 2026-09-15 (completed the registry started in commits fe70627 /
+4a72757). The registry is the only door into a production model.
+
+- Evaluator: `core/feature_registry.py` (`feature-registry-v1`, owned by
+  `core/config.py::FEATURE_REGISTRY_VERSION`). Every feature is declared as a
+  `FeatureSpec` with complete, validated metadata — name, owner, domain,
+  formula, version, unit, frequency, lookback, minimum history, null policy,
+  PIT rule, source dependencies, feature family, model compatibility — with
+  closed vocabularies (unknown unit/family/domain/frequency/source/null
+  policy/model family is a rejection, never a silent default).
+- Default registry: 22 market-data features (owner `market_data_agent`,
+  version `MARKET_FEATURE_VERSION`) + the 5 fundamental factors that enter
+  the production ensemble via `_build_fundamental_score` (owner
+  `fundamental_agent`, version `FUNDAMENTAL_FEATURE_VERSION`); producers
+  without registered features are reported informationally by
+  `unwired_producers` and wired sprint by sprint.
+- Binding rule (three gates): `model_feature_problems` (a model's declared
+  feature set), `feature_contract_problems` (the contracts a producer
+  emitted — unregistered, PIT-violating, version-drifted, lookback-mismatched
+  or undeclared-source contracts are rejected), and the walk-forward engine
+  (refuses to start on a non-conformant declared model surface and refuses
+  mid-run on a non-conformant consumed surface).
+- Live score path: the W3 auditor gained the `feature_registry_conformance`
+  veto check (`core/audit_policy.py`) — the decision's market snapshot is
+  checked against the registry on every orchestration; an unregistered or
+  PIT-violating feature contract forces `auditor_veto` and blocks PAPER.
+  Fail-closed: a missing snapshot or empty feature surface vetoes.
+- Producer must exist: `PRODUCERS` maps each owner to a real module +
+  callable on disk (`producer_problems`); re-registering a definition without
+  a version bump is refused (`FeatureRegistry.register`).
+- Deterministic identity: spec, registry, named feature set, and consumed
+  surface each carry a canonical SHA-256; persistence is append-only at
+  `data/feature_registry.jsonl`, idempotent per registry hash, integrity
+  violations raise.
+- CI drift gate: `scripts/check_feature_registry.py` — registry validity,
+  producer resolution, live-snapshot conformance, emitted-vs-registered
+  surface drift (diff-precise), hash determinism, persistence round-trip;
+  exit 1 on any drift. Removing/renaming a snapshot feature breaks the gate
+  with a diff-precise message.
+- Acceptance: 95 tests in `tests/test_feature_registry.py` (spec validation,
+  hashes, PIT/rejection gates, producer wiring, persistence, engine +
+  contract-verifier + auditor + orchestrator integration, fundamental factor
+  registration). Full suite: 522/522 pass.
+
+### M1b. Contextual-agent registry coverage ✓ DONE
+
+Closed 2026-09-16. M1's rule was enforced, but only on the market feature
+surface: `news_intelligence` (0.10 ensemble weight) and `macroeconomic`
+(0.10, both horizons) reached the published score through their own snapshot
+shapes, which the registry did not describe. A news or macro input change was
+invisible to the drift gate.
+
+Both halves of the gap are now closed:
+
+- **Registration.** Four contextual signals registered in
+  `core/feature_registry.py` — `news_sentiment_score` (news-contract-v1),
+  `macro_regime_score` (macro-contract-v1), `regime_probability_proxy`
+  (regime-contract-v1) and `sentiment_score` (sentiment-contract-v1).
+  Exactly the values that reach the production path; no aspirational
+  entries. Registry: 22 market + 5 fundamental + 4 contextual = **31
+  features**. `unwired_producers` drops from 5 to 1 — only
+  `technical_agent`, legitimately, since W5 made it a pure delegator that
+  owns no features of its own.
+- **Enforcement.** Registration alone changes nothing if no surface is
+  built. `contract_verification.contextual_feature_surface` assembles the
+  live contextual contracts and `contextual_feature_problems` gates them;
+  the W3 auditor's `feature_registry_conformance` check now evaluates that
+  surface alongside the market one, so a live news or macro contribution
+  that is unregistered, PIT-violating, version-drifted or from an undeclared
+  source forces `auditor_veto`.
+- **Fail-closed.** `null_policy` is `exclude`, never `default`: a non-OK
+  agent yields no feature rather than a neutral substitute. An empty
+  contextual surface is conforming — it means no contextual agent is OK,
+  which the agent-status taxonomy already governs.
+- **The gate is proven non-vacuous.** `scripts/check_feature_registry.py`
+  plants a future-dated news contract and fails if it is NOT rejected, and
+  verifies every scoring producer owns a registered feature.
+- Acceptance: 104 tests in `tests/test_feature_registry.py` (7 new for
+  contextual enforcement). Full suite: 593/593 pass.
+
+Implementation note: the regime agent reports `lookback_period` as the
+sessions it actually consumed, which varies per run and can never equal a
+single registered value. The surface carries the registered lookback (the
+definition's window) while the observed count stays visible in the agent's
+own payload — caught by the auditor during implementation, not by review.
+
+### M2-DS. Official training dataset builder ✓ DONE
+
+> Master-context M2 ("Official Training Dataset Builder"). Tracked with a
+> `-DS` suffix because this board's M2 slot is the model/artifact registry —
+> see the numbering table above. Built ahead of the board's M2 because a
+> model registry with no dataset to register is premature.
+
+Implemented 2026-09-16 in `core/training_dataset.py` (`training-dataset-v1`,
+schema `training-row-v1`, constants owned by `core/config.py`).
+
+- **One door into a training set.** The builder CALLS the canonical
+  producers and reimplements nothing: features come from
+  `core.score_engine.build_score` replayed through the V2
+  `offline_replay_seam`, outcomes from the V1
+  `core.labels.build_outcome_labels`. A side extractor that pulls features
+  another way is the classic leakage route, so the same parallel-path rule
+  that governs research applies here.
+- **Row shape:** `prediction_time -> information available at
+  prediction_time -> features -> future outcome`. Features and outcome never
+  share a code path.
+- **Leakage is caught, not assumed absent.** `row_problems` re-verifies every
+  contract's `published_time <= prediction_time` independently of the
+  registry check, on freshly built rows and on rows loaded back from disk.
+  The CI gate plants a future-dated contract and fails if it is NOT rejected
+  — a guard that cannot fail is theatre.
+- **M1 gate reaches datasets.** An unregistered, PIT-violating,
+  version-drifted or undeclared-source feature cannot enter a dataset any
+  more than it can enter a production model (`model_feature_problems`).
+- **Nothing is imputed.** A missing feature, a null/NaN value, an
+  UNAVAILABLE label or an unmatured horizon excludes the row with a recorded
+  reason in `report()["exclusion_reasons"]`. Coverage is never silently
+  thinned and absence is never a zero.
+- **Deterministic `dataset_hash`:** canonical SHA-256 over every row's
+  identity (including feature *contracts*, not just values — the same number
+  from a different source is different training data) plus the feature-set
+  hash, target horizon and label version. Rows are sorted before hashing, so
+  build order cannot change identity. Verified by rebuild.
+- Append-only manifest at `data/training_datasets.jsonl`, idempotent per
+  dataset hash; the manifest carries provenance, not the row payload.
+- CI drift gate: `scripts/check_training_dataset.py` — builds from real
+  cached history, checks conformance and leakage, proves hash determinism,
+  proves both guards non-vacuous, checks persistence idempotency.
+- Acceptance: 32 tests in `tests/test_training_dataset.py`. Full suite:
+  584/584 pass.
+
+Dataset feature scope: the builder draws the technical scorers' declared
+inputs by default. Since M1b the contextual signals are registered too, so a
+caller may request them explicitly via `feature_names` once those agents have
+live providers connected (news/macro/sentiment are provider-gated and read
+UNAVAILABLE offline).
+
+### M2. Model registry and artifact tracking ✓ DONE
+
+Implemented 2026-09-16 in `core/model_registry.py` (`model-registry-v1`,
+constants owned by `core/config.py`), persisted at `models/manifest.json`.
+
+- **Entries** carry `{model_version, family, feature_set_version,
+  training_data_cutoff, artifact_uri, status, metrics, approved_by,
+  approved_at, parent_version}` plus `dataset_hash` (joins an M2-DS dataset
+  to the model trained on it), `oos_comparison` and `retired_at/reason`.
+  Closed vocabularies: an unknown family or status is a rejection.
+- **The live-path rule is enforced.** `require_live_model` resolves a version
+  or raises: unregistered, `candidate` and `retired` all refuse. The
+  orchestrator resolves `market-data-v1`, `technical-v1` and
+  `fundamental-v1` through the registry — the three hardcoded literals are
+  gone, and a test plus the CI gate assert they stay gone.
+- **The override is audited by construction.** The only way past the gate is
+  an explicit `override_reason`, and the returned resolution record names the
+  override. Those records flow into the W7 audit event (`model_resolutions`,
+  schema bumped to `audit-event-v3`), so a non-approved model can never back
+  a decision without leaving a permanent trace. This is the acceptance
+  criterion, literally.
+- **Promotion is gated.** `promote` refuses without an out-of-sample
+  comparison naming the pre-registered primary metric, both sides' values and
+  the sample size; refuses when the comparison does not name the real
+  incumbent; refuses a candidate that does not beat the incumbent (loss
+  metrics declare `higher_is_better: False`); and refuses an automated
+  `approved_by` — governance sign-off cannot be a CI job.
+- **Retirement never deletes.** `retire` flips status and records when/why;
+  the entry and its `artifact_uri` survive, because historical decisions must
+  stay explainable.
+- Seeded entries are the deterministic rule-based scorers backing today's
+  score path. They carry no dataset hash or artifact — the binding rule is
+  about governance, not about whether gradient descent was involved — and
+  any trained successor must beat them through `promote()`.
+- CI drift gate: `scripts/check_model_registry.py` — registry validity,
+  committed-manifest-vs-code drift, live-gate refusals proven non-vacuous,
+  override recording, all three promotion refusals, retirement preservation,
+  and the absence of hardcoded literals.
+- Acceptance: 44 tests in `tests/test_model_registry.py`. Full suite:
+  637/637 pass.
+
+### M3-TR. Research trial registry ✓ DONE
+
+> Master-context M3 ("Research Trial Registry"). Tracked with a `-TR` suffix
+> because this board's M3 slot is the training pipeline — see the numbering
+> table above. Built first because the board's M3 runs experiments, and an
+> experiment that is not pre-registered is not evidence.
+
+Implemented 2026-09-16 in `core/trial_registry.py` (`trial-registry-v1`,
+constants owned by `core/config.py`), ledger at `data/research_trials.jsonl`.
+
+- **Every M3 field recorded and validated:** trial_id, hypothesis,
+  feature_set_version, model_family, hyperparameters, label_version,
+  horizons, training_window, validation_scheme, costs, seed, dataset_hash,
+  metrics. Closed vocabularies for model family and validation scheme;
+  `costs` must name its `cost_table_version` (V3); `dataset_hash` ties a
+  trial to an exact M2-DS dataset; a stale `label_version` is refused.
+- **Pre-registration is structural.** A registered trial carries NO metrics —
+  validation refuses them — and `complete_trial` refuses metrics that omit
+  the pre-registered `primary_metric`. Choosing the metric after seeing the
+  results is the definition of cherry-picking, so the metric is locked at
+  registration.
+- **Results are immutable.** A completed or abandoned trial cannot be
+  re-completed, abandoned or edited. Editing a registered trial's
+  configuration breaks its `trial_id` and validation says so.
+- **An identical configuration is the SAME experiment.** `trial_id` is a
+  deterministic hash over the configuration — hypothesis included, metrics
+  and timestamps excluded — so re-running an experiment cannot masquerade as
+  a new independent result. This is what makes the X7 multiple-testing count
+  honest.
+- **Abandoned trials are recorded, never deleted**, and must state why.
+  `multiple_testing_report()` counts them alongside completed trials: the
+  number of things tried is the number people forget, and it is exactly the
+  number a significance correction needs.
+- Append-only ledger: registration and completion are separate lines, so the
+  file itself evidences that the hypothesis preceded the result.
+- CI drift gate: `scripts/check_trial_registry.py` — 19 guards, each
+  exercised and required to fire. Verified non-vacuous by sabotage: disabling
+  the primary-metric lock makes the gate exit 1.
+- Acceptance: 41 tests in `tests/test_trial_registry.py`. Full suite:
+  678/678 pass.
+
+### M3. Training pipeline (offline, reproducible) ✓ DONE
+
+Implemented 2026-09-16 in `core/training.py` (`training-pipeline-v1`) with
+the `scripts/train.py` entrypoint the board names.
+
+**Dependency:** this sprint added the project's first ML dependency,
+`scikit-learn==1.9.1`, reviewed and approved before landing. `joblib==1.6.0`
+is pinned alongside it rather than left transitive, because it serialises the
+artifacts M8 must hash.
+
+- **Splits come from the V2 harness, never sklearn.** `train_test_split`,
+  `KFold` and `cross_val_score` shuffle by default and leak the future into
+  training on panel data. The trainer calls `build_walk_forward_folds` — the
+  same anchored windows and embargo the backtest engine uses — and both a
+  test and the CI gate parse the module's AST to prove no sklearn splitter is
+  imported.
+- **The registry gates training.** Every dataset feature must be registered
+  and declare compatibility with the family being trained; an unregistered
+  feature aborts the run before the matrix is built.
+- **Baselines first.** Six estimators: `historical_mean` and `momentum`
+  (pure numpy, no dependency) plus ridge, elastic_net, random_forest and
+  gradient_boosting. Sequence/temporal models stay out of scope until these
+  survive validation.
+- **Determinism.** Same dataset hash + same seed + same configuration produce
+  identical metrics and an identical artifact hash, verified across separate
+  processes including RandomForest. The hash is taken over FITTED PARAMETERS,
+  not pickle bytes: joblib output embeds library versions and is not
+  byte-stable across environments, which would make the M8 guarantee
+  untestable in CI. The environment (python/numpy/sklearn/platform) is
+  recorded so M8 can say WHY two runs diverged.
+- **Metrics are out-of-sample by construction** — pooled observations equal
+  the sum of validation rows, and a test asserts it.
+- CI drift gate: `scripts/check_training_pipeline.py` (~26s). Verified
+  non-vacuous by sabotage: disabling the registry gate makes it fail, and it
+  distinguishes a clean refusal from an incidental crash.
+- Acceptance: 26 tests in `tests/test_training.py`. Full suite: 705/705 pass.
+
+Found during implementation: the 22 market features declared only
+`technical_analysis` compatibility, so the M1 gate correctly refused to let
+any ML family consume the very features the M2-DS builder emits. They now
+declare the ML families, matching what the fundamental and contextual
+features already did — an M1 oversight the gate caught rather than a
+deliberate restriction.
+
+First result, recorded honestly: on a 500-row NVDA dataset the pure
+`historical_mean` baseline beat every trained model on RMSE. No model has
+earned promotion, and `scripts/train.py` says so explicitly when a pure
+baseline wins. That is the point of establishing baselines first.
+
+### M4-BL. Baseline model suite ✓ DONE
+
+> Master-context M4 ("Baseline Model Suite"). Tracked with a `-BL` suffix
+> because this board's M4 slot is calibration — see the numbering table
+> above.
+
+Implemented 2026-09-17 in `core/baseline_suite.py` (`baseline-suite-v1`),
+with `mean_reversion` and `logistic` added to `core/training.py` to complete
+the family list.
+
+- **Eight baselines across all seven M4 families:** `historical_mean`
+  (baseline_mean), `momentum`, `mean_reversion`, `ridge` + `elastic_net`
+  (linear), `logistic`, `random_forest` (tree), `gradient_boosting`.
+  `mean_reversion` is the deliberate mirror of `momentum` — the opposing
+  hypothesis, so if momentum has an edge this must lose by a similar margin.
+  `logistic` classifies direction and maps back to a signed magnitude so it
+  is comparable with the regressors on the same metrics; a single-class
+  training window degrades to that class rather than raising, and records it.
+- **The incumbent is the best SIMPLE baseline, not the best model.** A
+  trained model must clear historical_mean / momentum / mean_reversion before
+  it is interesting at all. Comparing a boosted tree only against ridge would
+  let a whole family of complexity in through the side door.
+- **Comparisons must be like-for-like.** `comparison_problems` refuses runs
+  that differ in dataset hash, target horizon or feature set rather than
+  trusting the caller — comparing across different data is the most common
+  way a "win" turns out to be an artefact.
+- **A win must be real.** Three bars: beat the incumbent, beat it by at least
+  `BASELINE_PROMOTION_MARGIN` (0.02), and win at least
+  `BASELINE_MIN_WINNING_FOLD_RATIO` (0.6) of paired folds. A hair-thin margin
+  or one lucky fold is refused.
+- **The rule connects to M2.** `promotion_comparison` emits exactly the
+  `oos_comparison` shape `ModelRegistry.promote` demands, and REFUSES to emit
+  one for a losing verdict — so the measurement and the gate cannot disagree.
+  A test drives the whole path: measured win → comparison → approved model.
+- **"Nothing earned promotion" is a first-class result**, returned as a
+  populated report with per-candidate reasons — never an exception, never a
+  silently chosen best-of.
+- CI drift gate: `scripts/check_baseline_suite.py` (0.3s, synthetic runs).
+  Verified non-vacuous by sabotage: disabling the fold-consistency check
+  makes it fail with "a one-lucky-fold candidate was promoted".
+- Acceptance: 28 tests in `tests/test_baseline_suite.py`. Full suite:
+  733/733 pass.
+
+Current standing on real data (600-row NVDA, 5 folds): the incumbent is
+`historical_mean` at 0.6025 directional accuracy, and **no candidate beats
+it** — every trained model scores between 0.41 and 0.51. No model has earned
+promotion. That is the expected and correct outcome at this stage, and the
+reason M4 exists before M5-M8.
+
+### M5-AR. Model artifact registry ✓ DONE
+
+> Master-context M5 ("Model Artifact Registry"). Tracked with a `-AR` suffix;
+> this board's M5 slot is promotion gates and drift hooks — see the numbering
+> table above.
+
+Completed 2026-09-17 as an extension of the board's M2 registry rather than a
+second registry. Eight of the sixteen M5 fields already existed; this adds
+the rest plus the rules that make them mean something.
+
+- **New fields on `ModelEntry`:** `code_commit`, `hyperparameters`, `seed`,
+  `artifact_hash`, `calibration_version`, `forecast_target`, `horizon`,
+  `universe` (`model-artifact-v1`). All sixteen M5 fields are now recorded,
+  asserted by a test that names each one.
+- **Trained artifacts must be reproducible.** `is_trained()` distinguishes a
+  fitted artifact from a deterministic rule-based scorer. A trained entry
+  must carry code_commit, dataset_hash, horizon, universe, a seed and
+  hyperparameters — without them nobody can rebuild it or say what produced
+  it. The seeded scorers stay exempt because they genuinely have no artifact,
+  and a gate check asserts they never claim otherwise.
+- **`forecast_target` is a closed vocabulary** (`expected_return`,
+  `probability_up`, `expected_volatility`). Two models over the same features
+  predicting different things are not interchangeable, and the registry now
+  refuses to blur them.
+- **`calibration_version` is mandatory and defaults to `"uncalibrated"`** —
+  an honest value. A missing field is not, so a blank is refused. M6 will
+  build on this rather than having to infer calibration state.
+- **Provenance is captured, never retyped.** `entry_from_training_run()`
+  reads the dataset hash, feature-set version, artifact hash, seed,
+  hyperparameters and horizon off the M3 run that actually produced the
+  model, and `code_commit()` reuses the V4 manifest helper so a research run
+  and a model entry can never disagree about which commit they came from.
+  Hand-copying these is how a registry drifts from reality.
+- **Registering is not trusting.** An entry built from a training run is born
+  `candidate`, and the live gate refuses it until the M2 promotion gate
+  passes — an out-of-sample win against the incumbent (M4) plus a human
+  approver.
+- **Provenance is part of artifact identity:** the canonical hash now covers
+  code_commit, artifact_hash, seed, horizon, universe, forecast_target and
+  calibration_version, so two entries differing in any of them cannot share a
+  hash.
+- CI gate: extended `scripts/check_model_registry.py` rather than adding an
+  eighth gate. Verified non-vacuous by sabotage: disabling the trained-artifact
+  rule makes it fail with four precise messages.
+- Acceptance: 62 tests in `tests/test_model_registry.py` (18 new). Full
+  suite: 751/751 pass.
+
+`models/manifest.json` was regenerated — the committed-manifest drift test
+caught the hash change immediately, which is the check working as designed.
+
+### M4. Calibration and score mapping ✓ DONE
+
+> Board M4 and master-context M6 are the same task; this entry satisfies
+> both. Implemented 2026-09-17 in `core/calibration.py` (`calibration-v1`).
+
+The binding rule: **never expose arbitrary probability numbers as if they
+were calibrated.** A raw model score is not a probability — `0.7` out of a
+booster means nothing until mapped through a calibration fitted on held-out
+data and measured against what happened.
+
+- **Enforced in code, not in a comment.** `calibrated_probability(score,
+  None)` raises `UncalibratedProbabilityError`. There is no passthrough, so
+  an uncalibrated number cannot reach a caller by accident.
+- **Isotonic preferred, Platt below `CALIBRATION_MIN_ISOTONIC_SAMPLES`**
+  (100), because isotonic overfits thin samples. The substitution is
+  RECORDED in `fallback_reason` so a reader never guesses which ran. Below
+  `CALIBRATION_MIN_SAMPLES` (30), or on a single outcome class, calibration
+  is refused outright — a map nobody should trust is worse than a refusal.
+- **Measured out-of-fold.** This is the part that matters. Measuring a map on
+  the data it was fitted to reports in-sample calibration, which is
+  near-perfect by construction: the first real run returned ECE exactly
+  `0.0`, which was a red flag rather than a success. `_out_of_fold_probabilities`
+  now fits on the other folds and scores each held-out fold, so no
+  observation is scored by a map that saw it. Runs with fewer than three
+  folds fall back to in-sample and say so via `measurement_basis` rather
+  than reporting flattering numbers silently.
+- **Monotone by construction** in both methods — a higher raw score can never
+  yield a lower probability — and isotonic clamps outside its fitted range
+  rather than extrapolating into scores it never saw.
+- **Every M6 requirement:** `fit_calibration`/`apply` (probability
+  calibration), `reliability_curve`, `brier_score`, `log_loss`,
+  `expected_calibration_error` + `max_calibration_error`,
+  `prediction_interval`, `CalibrationReport.uncertainty`, `fold_dispersion`.
+  Empty reliability bins are omitted, not zeroed: no observations is not the
+  same as never happened.
+- **M3 change:** `FoldResult` now retains each fold's out-of-sample
+  predictions and actuals. Calibration cannot be fitted on validation folds
+  if the validation predictions were discarded.
+- CI drift gate: `scripts/check_calibration.py` (~3s). Verified non-vacuous
+  by two sabotages: letting an uncalibrated score pass through, and
+  switching the measurement back to in-sample. Both fail the gate with
+  precise messages.
+- Acceptance: 43 tests in `tests/test_calibration.py`. Full suite: 799/799
+  pass.
+
+Honest first numbers on a real gradient_boosting run (400 out-of-fold
+observations, 5 folds): Brier 0.351, log loss 6.14, ECE 0.233, MCE 0.748,
+fold directional accuracy 0.26-0.58 (std 0.107). The model is badly
+calibrated and highly dispersed across folds. That is the correct reading —
+no model has beaten the baseline (M4-BL), so there is nothing here that
+should be trusted yet, and the numbers now say so plainly.
+
+### M7-CC. Champion / challenger ✓ DONE
+
+> Master-context M7. Implemented 2026-09-17 as an extension of the M2/M5
+> registry (`champion-challenger-v1`), not a new module.
+
+**The gap it closed.** The registry had no role at all. `incumbent()`
+returned whichever approved model sorted last by version string, so with
+three approved models the most important question — *which model is actually
+serving?* — was an accident of naming. A model's role is now declared.
+
+- **Role is distinct from lifecycle status.** `approved` means governance
+  cleared it; `champion` means it serves. `is_live_eligible()` requires
+  BOTH, so an approved challenger is measured rather than trusted, and an
+  approved shadow model is not even consulted.
+- **Every model is born `shadow`** (`MODEL_DEFAULT_ROLE`, guarded at import).
+  No code path registers a model directly into a serving role.
+- **shadow → challenger requires evidence:** `SHADOW_MIN_OBSERVATIONS` (100)
+  recorded out-of-sample observations. An unmeasured model has earned
+  nothing.
+- **challenger → champion requires governance approval**, so crowning cannot
+  substitute for the M2 promotion gate (an OOS win plus a human approver).
+- **Crowning is a SWAP, not an addition.** `crown_champion` demotes the
+  incumbent in the same operation, which is what makes "exactly one
+  champion" impossible to violate halfway through. The outgoing champion
+  keeps its entry and artifact and becomes a challenger — nothing is
+  deleted.
+- **Championship is per forecast contract** `(target, horizon, universe)`. A
+  20d expected-return champion and a 5d direction champion are not rivals —
+  they answer different questions. `role_problems()` reports any contract
+  with more than one champion, and `champion()` raises rather than picking
+  one.
+- **The three seeded scorers are champions of their own contracts**
+  (`market_quality`, `technical_view`, `fundamental_view`). They are
+  complementary ensemble components, not competitors for one slot, so all
+  three serve simultaneously without violating the invariant.
+- CI: extended `scripts/check_model_registry.py` rather than adding a ninth
+  gate. Verified non-vacuous by sabotage — disabling the demotion makes it
+  fail with two messages, including the two-champion invariant breach.
+- Acceptance: 34 tests in `tests/test_champion_challenger.py`. Full suite:
+  833/833 pass.
+
+`models/manifest.json` was regenerated; the drift test caught the hash change
+immediately.
+
+### M8-RG. ML reproducibility gate ✓ DONE
+
+> Master-context M8. Implemented 2026-09-17 in `core/reproducibility.py`
+> (`reproducibility-v1`).
+
+The rule's last clause — "within explicitly defined reproducibility
+guarantees" — carries the weight. A blanket "bit-identical forever" claim
+would be false the moment numpy changes a summation order, and a guarantee
+that is quietly false is worse than none. So the promise is stated in
+config, verified, and its limits are published with every artifact.
+
+**GUARANTEED** (same environment, same inputs): identical fitted parameters
+and artifact hash, identical predictions/metrics/run hash, and the same
+across separate processes.
+
+**NOT GUARANTEED** (deliberately): bit-identical artifacts across library
+versions or platforms, or stability across a formula change. The environment
+block records python/numpy/sklearn/platform so such a divergence is
+*attributable* rather than mysterious, and `explanation()` reports it as
+expected rather than as a bug.
+
+- **Two identities, deliberately separate.** `artifact_hash` identifies the
+  FITTED MODEL (estimator + feature surface + parameters); `run_hash`
+  identifies the CONFIGURATION, seed included.
+- **Bug found and fixed:** the artifact hash previously included the seed, so
+  `historical_mean` and `ridge` — deterministic algorithms that never consult
+  it — reported a different artifact under a different seed. A false
+  difference on every deterministic estimator is exactly the noise that
+  trains people to ignore a gate. The seed now lives only in run identity.
+- **Zero tolerance.** Within one environment the same inputs must produce the
+  same floats, not merely close ones; a tolerance would hide the
+  nondeterminism the gate exists to catch. Guarded at import.
+- CI gate: `scripts/check_reproducibility.py` (~24s), including a
+  **cross-process** check that trains in a fresh interpreter — in-process
+  caching or a warm RNG cannot fake it.
+- Acceptance: 24 tests in `tests/test_reproducibility.py`. Full suite:
+  857/857 pass, nine CI gates green.
+
+**A hole the sabotage run found.** The first version of the gate ran the
+same-process check on `ridge` and `gradient_boosting` only, using
+`random_forest` purely for divergence checks. Removing RandomForest's seed
+therefore left the gate GREEN — the sabotage passed. Fixed by covering every
+stochastic estimator in the same-process check; re-sabotaging now fails with
+a precise message. Worth recording: the gate was wrong in a way that only an
+attempted break could reveal.
+
+### M5. Promotion gates and drift hooks ✓ DONE
+
+The checklist a candidate must pass before it can serve. `core/promotion.py`,
+`scripts/promote.py`, and the M5 block in `core/config.py`. Sprint L (the
+learning loop) names this as its precondition: "promotion requires
+out-of-sample comparison, drift checks, reproducibility, and a release gate."
+
+**The gap was NARROWER than this doc implied, and that was measured.**
+`ModelRegistry.promote()` already refused a candidate without an OOS
+comparison and without a named human approver. Three of the five checks were
+enforced nowhere:
+
+```
+[x] OOS beats the incumbent        already in promote()
+[x] human approval recorded        already in promote()
+[ ] no veto-rate regression
+[ ] drift check clean
+[ ] manifest complete
+```
+
+So M5 adds the three missing checks and the script that SEQUENCES all five,
+rather than reimplementing the two that already work. The checklist COMPOSES
+`oos_comparison_problems` and `approver_problems` — the very functions the
+registry enforces — so the script and the registry cannot judge a candidate
+differently (W5).
+
+**Every check is a refusal, not a score.** A checklist that produces a number
+invites "close enough". Each check returns PASS, FAIL or NOT_EVALUATED, and
+anything but PASS blocks.
+
+**NOT_EVALUATED is not PASS.** A drift check that could not run has not found
+the candidate clean — it has found nothing. This is the check most likely to
+be "simplified" into a pass, so the gate attacks it directly. Two real cases
+block today: no score distributions supplied, and fewer than
+`PROMOTION_MIN_DECISIONS_FOR_REGRESSION` decisions on either side.
+
+**The manifest check runs FIRST.** A candidate that cannot be reproduced is
+rejected before anyone evaluates its metrics.
+
+**A veto rate that FALLS is a regression too.** The obvious implementation
+catches only an increase. A candidate that vetoes far less has not
+necessarily improved — the W2 rules exist to refuse bad decisions, and one
+that stops refusing them has stopped checking. Both directions fail, at
+±`PROMOTION_MAX_VETO_RATE_DECREASE`.
+
+**Drift thresholds discriminate.** MEASURED over 400 synthetic scores: an
+unshifted distribution scores PSI 0.013, a +1.9-point shift scores 3.37,
+against a 0.25 fail floor.
+
+**History immutability is verified, not assumed.**
+`history_immutable_problems` catches a rewritten `model_version`, a changed
+score, and a vanished decision, while still allowing new rows — promotion is
+append-only, not frozen.
+
+**The script caught a defect in itself.** On the first real promotion the
+checklist passed and the registry then refused: `promote.py` was reading the
+OOS comparison back off a check row rather than reusing the one it evaluated.
+It now resolves the comparison ONCE and passes the same object to both, and
+the "checklist and registry disagree" branch that surfaced it is retained —
+that disagreement is a defect, never a reason to override.
+
+**Verified end to end** against the real registry: a candidate registered,
+evaluated (5/5 PASS), promoted to `approved`, and persisted. Each failure mode
+was confirmed to block naming exactly one check. The test fixture was then
+removed from the manifest.
+
+- Acceptance: 41 tests in `tests/test_promotion.py`; gate
+  `scripts/check_promotion.py`, verified to FAIL under ten reinjected
+  invariants — treating NOT_EVALUATED as PASS, turning missing drift data
+  into a pass, dropping the veto-DECREASE regression, raising the PSI floor
+  to 99, moving the manifest check off first, dropping a required manifest
+  field, dropping a check, disabling history immutability, forking the
+  registry's functions, and making `promote.py` ignore the verdict. Suite
+  1907 pass, 34 gates green.
+
+---
+
+## Sprint E — Event Intelligence & Market Reaction
+
+### E1. Canonical event object ✓ DONE
+
+Implemented 2026-09-17 in `core/event_contract.py` (`event-v1`).
+
+Sprint E learns how events move the chart, which requires ONE event shape
+every downstream stage agrees on — E4 (event study), E5 (attribution) and E6
+(event memory) must all read the same object, or they will quietly disagree
+about what an "event" is, and that surfaces as a mysterious modelling result
+rather than an error.
+
+- **All 16 E1 fields**, validated: event_id, published_time, effective_time,
+  entity, entities_affected, actor, actor_type, event_type, source,
+  source_quality, novelty, relevance, direction, magnitude, confidence,
+  evidence.
+- **Adapts N1; never re-classifies it.** `event_from_article` maps an
+  existing pipeline article onto the canonical shape. Re-deriving category,
+  tone or source quality here would create a second, divergent opinion about
+  the same article.
+- **`published_time` and `effective_time` are distinct**, and the PIT filter
+  keys on PUBLICATION. A Monday announcement of a Friday plant closure is
+  legitimate and common; collapsing the two is how a backtest silently uses
+  future information. `is_backdated()` makes the gap visible because an event
+  study anchored on the wrong timestamp measures the wrong window.
+- **`event_id` is deterministic** over defining content, excluding the
+  scores — rescoring an event does not make it a new event, so the same story
+  carried by two providers cannot be double-counted in event memory.
+- **CONTRADICTORY is a direction**, propagated into every event of a
+  contradictory snapshot rather than averaged to neutral.
+- **`magnitude` is a bounded unitless claim size, not an expected return** —
+  naming it a return would invite treating an unvalidated number as a
+  forecast before Sprint F exists to make real ones.
+- **Fail-closed:** a non-OK snapshot yields no events; an unsourced event is
+  a rumour and is refused; incomplete articles are skipped rather than
+  patched with a fabricated timestamp.
+- **Conservative actor typing.** Only company-issued event types claim a
+  company actor; everything else stays `unknown`. E2/E3 resolve actors
+  properly, and guessing now would put unearned confidence into the data
+  those sprints consume.
+- CI drift gate: `scripts/check_event_contract.py`. Verified non-vacuous by
+  sabotage — switching the PIT filter to `effective_time` fails it with the
+  leakage message.
+- Acceptance: 40 tests in `tests/test_event_contract.py`. Full suite:
+  913/913 pass, ten gates green.
+
+### E2. Entity resolution ✓ DONE
+
+Implemented 2026-09-17 in `core/entity_resolution.py` (`entity-resolver-v1`).
+
+**The defect it fixes.** The N1 relevance heuristic returned `0.0` for two
+very different situations: an article correctly identified as being about
+another company, and an article about the right company that the resolver
+simply could not attribute. Collapsing them made coverage gaps invisible —
+"we have no news about this company" was indistinguishable from "we have
+news we could not attribute".
+
+- **Five match methods with explicit confidence:** ticker (1.0), legal_name
+  (0.9), alias (0.8), executive (0.6), plus `ambiguous` and `none` at 0.0.
+  Every resolution records WHY it decided, not only what it decided.
+- **An executive mention now resolves** ("Jensen Huang announces a GPU" →
+  NVDA), but at 0.6 — deliberately weaker than a direct match, because a CEO
+  is frequently quoted about the industry, a rival or the economy rather
+  than their own company.
+- **Ambiguity is a resolution, not an error.** Text naming two registered
+  companies resolves to `ambiguous` with zero confidence and names the other
+  candidates, rather than being arbitrarily assigned.
+- **Short tickers require a name.** A bare "V" or "BE" is an ordinary
+  English word, so tickers at or below two characters must match by name or
+  alias — the same class of error that produced `QCOMCRWV` in the portfolio
+  list.
+- **Phrase matching respects word boundaries:** "Metaverse" is not "Meta",
+  and "Advanced Micro Devices" does not match those three words scattered
+  through a sentence.
+- **A registry, not a regex.** Aliases and executives are curated data with
+  a visible owner, so a wrong alias is a one-line fix rather than a buried
+  pattern. `registry_problems` refuses a shared alias, which would otherwise
+  make every mention of it ambiguous.
+- **Wired into E1.** Every event carries its `entity_resolution`, and
+  `events_from_news_snapshot(..., require_resolved_entity=True)` drops
+  unresolved events before they can become training rows. An event with NO
+  recorded resolution is treated as unresolved — an absent resolution is the
+  most silent failure of all.
+- **Rejections are recorded, not discarded.** `resolution_report` separates
+  `none` from `ambiguous` because they call for different fixes: a registry
+  gap versus genuinely hard source material.
+- CI drift gate: `scripts/check_entity_resolution.py`. Verified non-vacuous
+  by two sabotages — removing the short-ticker guard and removing the
+  ambiguity check both fail it.
+- Acceptance: 41 tests in `tests/test_entity_resolution.py`. Full suite:
+  954/954 pass, eleven gates green.
+
+### E3. Influential person intelligence ✓ DONE
+
+Implemented 2026-09-17 in `core/actor_intelligence.py` (`actor-registry-v1`).
+
+E3 tracks identity, role, organization, historical relevance, topic
+specialization, source credibility, statement frequency, novelty and
+historical market impact — the inputs for eventually learning
+`actor × topic × company → historical market response`.
+
+**The property that matters most is about NOT knowing things.** E3 exists
+before E4 measures any market reaction, so an actor's "historical impact" is
+the number the system is most tempted to invent.
+
+- **Impact is `unmeasured` below `ACTOR_MIN_OBSERVATIONS` (20), and reports
+  NO numbers there** — not a mean over three events that a consumer could
+  mistake for a finding. Statements with no measured reaction do not count
+  toward a track record at all.
+- **Credibility is labelled a PRIOR.** `credibility()` returns
+  `basis: "prior"` with a detail saying it is not a measurement. Presenting a
+  guessed number as measured is exactly the failure M6 exists to prevent.
+- **Measured impact disclaims causality** — an abnormal return following a
+  statement is association, not cause (master context §37).
+- **Insider standing is company-specific.** A CEO's guidance IS company
+  guidance, but that same CEO commenting on a rival is external there, and
+  drops from 0.75 to 0.50 credibility.
+- **Topic specialisation is bounded** (+0.15 on-topic, −0.20 off-topic). A
+  CEO on their own product line is stronger evidence than the same CEO on
+  macro policy, but specialisation informs rather than dominates.
+- **Statement frequency is recorded, not scored.** A daily commentator
+  plausibly carries less information per statement, but that is a hypothesis
+  for E6 to test with evidence rather than a weight to bake in now.
+- **Derived from E2, not maintained twice.** 67 actors built from the entity
+  registry's executives. Funds contribute none — no officer speaks for an
+  ETF, and listing one would be a false claim.
+- CI drift gate: `scripts/check_actor_intelligence.py`. Verified non-vacuous
+  by two sabotages: removing the impact threshold and removing the
+  company-specific insider check both fail it.
+- Acceptance: 35 tests in `tests/test_actor_intelligence.py`. Full suite:
+  994/994 pass, twelve gates green.
+
+### E4. Event study engine ✓ DONE
+
+Implemented 2026-09-17 in `core/event_study.py` (`event-study-v1`).
+
+The full chain per event — pre-event baseline → stock reaction → benchmark
+reaction → sector reaction → abnormal return → volatility response → volume
+response — across intraday / 1D / 5D / 20D / 60D. Horizons are drawn from
+`LABEL_HORIZON_SESSIONS`, so a study and a training label always describe the
+same window.
+
+- **The baseline ends BEFORE the event, with a 2-session gap.** Information
+  leaks into prices ahead of an announcement; including those sessions in
+  "normal" would fold part of the reaction into the baseline and shrink the
+  measured abnormal return toward zero. The study would quietly understate
+  exactly what it exists to measure.
+- **Anchored on PUBLICATION, not effective time** — the market reacts when it
+  is told, which is what E1 kept those timestamps distinct for.
+- **An unmatured window is ABSENT, never 0.0.** A zero would enter training
+  as a measured absence of reaction. A recent event honestly reports only
+  the horizons that elapsed.
+- **No benchmark means no abnormal return** — never a stock return
+  relabelled as abnormal. Benchmark and sector frames align by TIMESTAMP, so
+  a benchmark with different history length cannot shift the window.
+- **The model is named on every result** (`market_adjusted`, beta = 1). A
+  full market model estimating beta from the baseline is the natural v2;
+  calling this "the abnormal return" without naming the model would imply a
+  sophistication that is not there.
+- **Every result disclaims causality** (master context §37). E5 exists
+  precisely because this module cannot make that claim.
+- **Supplies E3 the returns it was refusing to invent.**
+  `observations_from_studies` joins studied events to actor observations
+  with real measured abnormal returns; anonymous events and unmeasured
+  studies are skipped rather than recorded with a fabricated reaction.
+  Verified end to end: 22 events → 22 studies → an actor track record
+  crossing the 20-observation threshold into `measured`.
+- CI drift gate: `scripts/check_event_study.py`. Verified non-vacuous by two
+  sabotages — removing the baseline gap, and zero-filling an unmeasurable
+  abnormal return — both fail with precise diagnoses.
+- Acceptance: 34 tests in `tests/test_event_study.py`. Full suite:
+  1028/1028 pass, thirteen gates green.
+
+### E5. Confounder / attribution engine ✓ DONE
+
+Implemented 2026-09-17 in `core/attribution.py` (`event-attribution-v1`).
+
+E4 measures what happened; E5 asks how much of it was the market, the sector
+or the company, and how much is left over near the event. That leftover is
+**event-associated, never event-caused** — a residual is a question, not an
+answer.
+
+- **Additive by construction:** `stock = market + sector_excess +
+  stock_specific`, asserted over 200 random shapes in the CI gate rather
+  than one hand-picked example.
+- **The sector component is EXCESS over market, not the raw sector return.**
+  A sector ETF already contains market beta, so subtracting the raw return
+  would count the market twice and push the surplus into the residual — the
+  one number nobody would notice was wrong.
+- **A residual must clear TWO bars:** a large share of the movement (common
+  factors did not explain it) AND a large magnitude in baseline sigma (not
+  noise on a quiet day). A residual that is 90% of a 0.1% move is refused as
+  `unexplained`.
+- **Overlapping events confound by default.** Another event for the same
+  entity inside the window means no single one can claim the residual — the
+  most common confounder in event studies and the easiest to forget.
+  Another company's news is correctly not a confounder.
+- **Missing market context is `inconclusive`, never `event_associated`.**
+  Without a benchmark the residual is just the raw return relabelled.
+- **No verdict claims causation.** Every result carries the note, and the
+  strongest verdict is still only an association.
+- CI drift gate: `scripts/check_attribution.py`. Verified non-vacuous by two
+  sabotages — using the raw sector return, and dropping the magnitude bar —
+  both fail with precise diagnoses.
+- Acceptance: 35 tests in `tests/test_attribution_engine.py`. Full suite:
+  1063/1063 pass, fourteen gates green.
+
+On real NVDA/QQQ data across 30 studied horizons: 11 confounded, 18
+unexplained, **1 event-associated**. That conservatism is the intended
+behaviour, not a defect — most apparent reactions really are common-factor
+moves.
+
+### E6. Event memory ✓ DONE
+
+Implemented 2026-09-17 in `core/event_memory.py` (`event-memory-v1`),
+append-only at `data/event_memory.jsonl`.
+
+Stores event, context, chart state, historical analogs and the
+1D/5D/20D/60D response. This is the store the forecasting sprints will
+retrieve from **without re-deriving anything**, so its value depends
+entirely on not remembering things that were never true.
+
+- **A memory is written only when complete.** Event, study and attribution
+  must all be present and measured. A half-recorded memory is worse than an
+  absent one, because it looks like evidence.
+- **An unmeasured event never enters memory** — it teaches nothing while
+  counting toward every analog total, silently shifting base rates.
+- **Chart state uses the SHARED snapshot fields** (13 of them), so a
+  remembered chart and a live one are described in identical terms.
+  Institutional memory that cannot be compared with the present is just a
+  log.
+- **Analogs match on chart state AND event type.** An earnings surprise into
+  an overbought chart is not a comparable for a regulatory action into the
+  same chart — similarity alone retrieves confident nonsense.
+- **A summary needs ≥5 analogs or it refuses**, returning
+  `insufficient_analogs` with no statistics at all. A "typical response"
+  from two examples is not typical of anything.
+- **The attribution verdict travels with every memory.** A remembered
+  response that was `confounded` is a different thing from one that was
+  `event_associated`, and forgetting which is how a memory store becomes a
+  source of false confidence. `event_associated_share` is reported in every
+  summary.
+- **Deduplicated by event id**, so a pipeline re-run cannot inflate the
+  analog count and make every historical base rate wrong.
+- Every summary disclaims being a forecast.
+- CI drift gate: `scripts/check_event_memory.py`. Verified non-vacuous by
+  two sabotages — removing deduplication and removing the analog floor —
+  both fail with precise diagnoses.
+- Acceptance: 36 tests in `tests/test_event_memory.py`. Full suite:
+  1099/1099 pass, fifteen gates green.
+
+### E7. Event revision / contradiction learning ✓ DONE
+
+Implemented 2026-09-17 in `core/event_chains.py` (`event-chain-v1`).
+**Sprint E is complete.**
+
+Stores event chains — initial claim → correction → confirmation → reversal —
+because the evolution itself is training information. A story reported,
+corrected, then reversed is a fundamentally different kind of evidence from
+one reported once that stood.
+
+- **A story counts ONCE.** Four reports of one claim would otherwise become
+  four events in every downstream base rate. `deduplicate_events` returns
+  one id per chain — the initial claim, the moment the story first became
+  knowable.
+- **A REVERSED claim weighs less than an unconfirmed one** (0.1 vs 0.7). A
+  reversal is positive evidence the source got it wrong, not an absence of
+  evidence. Treating it as neutral would lose the most useful signal in the
+  chain. Guarded at import.
+- **`contested` is a real state.** A claim both confirmed and reversed is
+  unresolved, not an average of the two — the same failure N1 already
+  refuses at the article level.
+- **Classification is conservative:** only an explicit directional flip is a
+  reversal; a new source in the same direction confirms; the same source
+  repeating is a duplicate carrying no new information; CONTRADICTORY is
+  never treated as the opposite of a direction, because it is already
+  unresolved.
+- **The 14-day window separates distinct stories**, so a year of earnings
+  reports does not collapse into one chain. Entity and event type are hard
+  filters. An unparseable timestamp is skipped rather than positioned by
+  guesswork.
+- `chain_report` exposes the **reversal rate** — how often a source's claims
+  turn out to be wrong, which is the training information E7 exists for.
+- CI drift gate: `scripts/check_event_chains.py`. Verified non-vacuous by
+  sabotage — collapsing `contested` into `confirmed` fails it with two
+  messages.
+- Acceptance: 39 tests in `tests/test_event_chains.py`. Full suite:
+  1138/1138 pass, sixteen gates green.
+
+---
+
+## Sprint C — Chart & Temporal Intelligence
+
+### C1. Multi-timeframe representation ✓ DONE
+
+Implemented 2026-09-18 in `core/timeframes.py` (`timeframe-contract-v1`).
+
+Intraday, daily, weekly, monthly and yearly state, all answering for the SAME
+`as_of`. The hard part is not fetching five series — it is that each runs on its
+own bar clock, and a coarse bar is dishonest about when its information existed.
+
+- **The bar-close rule (the defect C1 exists to prevent).** A provider labels a
+  bar at period START. Yahoo returns the week of Sep 14 as `2026-09-14`, so at
+  `as_of = 2026-09-15` a naive `index <= as_of` filter KEEPS it — and that bar's
+  Close is Friday's close, which had not happened yet. Future data wearing a past
+  timestamp, silently contaminating every feature C2 would build on top. A bar is
+  therefore eligible only once `bar_open + close_after <= as_of`. Verified
+  against live Yahoo data: weekly and monthly each excluded one unclosed bar plus
+  one partial trailing stub.
+- **Exclusions are counted, never silently dropped.** `excluded_unclosed_bars`
+  and `excluded_future_bars` are separate, because "not knowable yet" and "still
+  forming" are different failures. A timeframe that quietly shrinks is
+  indistinguishable from one with no data.
+- **Yearly is RESAMPLED from monthly bars, not fetched.** The provider has no 1y
+  interval; inventing one would fork price truth (W5, one canonical
+  implementation). Resampling happens after eligibility, so the aggregate cannot
+  contain information that did not exist at `as_of`.
+- **Fail-closed per timeframe.** Below `TIMEFRAME_MIN_BARS` is INCOMPLETE with
+  `trend` explicitly None — a slope fitted to two points is arithmetic, not
+  evidence. Failed fetch is UNAVAILABLE; malformed payload is INVALID. The
+  snapshot's own status is the WORST of its parts, because a multi-timeframe view
+  is only as trustworthy as its weakest clock.
+- **Alignment is descriptive, not a signal.** `build_alignment` reports whether
+  the clocks agree; it never claims the agreed story is correct. Only OK
+  timeframes vote — an INCOMPLETE clock has no trend to cast, so it cannot
+  manufacture false consensus.
+- **Not wired into scoring.** C1 is a representation: zero ensemble weight, no
+  veto, no decision path. C2 builds registered features on top of it.
+- Contract: `core.timeframes.build_timeframe_snapshot(ticker, as_of, fetcher=None)`
+  returns a `MultiTimeframeSnapshot` dict; the injectable `fetcher` lets the
+  contract be tested without a network round trip.
+- Acceptance: 36 tests in `tests/test_timeframes.py`; gate
+  `scripts/check_multi_timeframe.py`. The gate was verified to FAIL when the
+  naive filter is reinjected, so it can actually catch the regression it guards.
+  PIT monotonicity (an earlier `as_of` never reveals more bars) and determinism
+  are both pinned. Suite 1204 pass, seventeen gates green.
+
+### C2. Price/volume feature expansion ✓ DONE
+
+Implemented 2026-09-18 in `core/chart_features.py` (`chart-feature-v1`),
+registered against the new `chart_feature_agent` producer. Registry 31 → 40.
+
+**Only what was genuinely absent.** Returns, momentum, volatility, ATR, volume
+surprise and slope were ALREADY registered against `market_data_agent`
+(`change_*`, `rsi`, `volatility`, `atr_14`, `volume_ratio_20d`,
+`trend_slope_60d`). Re-implementing them here would have been the split-brain
+scoring the master context forbids (W5), so C2 adds the nine that were missing:
+`acceleration_10d`, `gap_pct`, `drawdown_60d`, `recovery_speed_60d`,
+`support_distance_60d`, `resistance_distance_60d`, `breakout_state_60d`,
+`volatility_regime_ratio`, `relative_strength_60d`. A gate test asserts the
+pre-existing nine were not re-owned.
+
+- **Insufficient history yields None, never zero.** A drawdown over three bars
+  is not a drawdown, and a neutral-looking 0.0 is indistinguishable from a real
+  one once it reaches a training row. Each feature declares its minimum in
+  `CHART_FEATURE_MIN_HISTORY`, registers `null_policy="exclude"`, and names the
+  shortfall in `insufficient_history` — so a consumer can tell "no data" from
+  "computed, and the answer is zero".
+- **The benchmark is INJECTED, never invented.** `relative_strength_60d`
+  returns None without a benchmark frame, because "+4% while the index did +4%"
+  and "+4% while the index did -2%" are different facts and a fabricated
+  benchmark cannot distinguish them. C2 does not select benchmarks — that is
+  C3's contract. Alignment is by TIMESTAMP, as E4 does, so a benchmark with a
+  different history length is not silently measured over a different calendar
+  window.
+- **Failed breakouts stay distinguishable from holding ones.** The range is
+  measured on bars BEFORE the confirmation window, so a breakout never
+  redefines the level it broke. Where a run pierces both sides, a break that is
+  still HOLDING wins over one that has reversed, so the label describes where
+  price now sits; that precedence is pinned by test.
+- **PIT by delegation.** The producer does no fetching and no as_of filtering —
+  it reads only BACKWARDS from the last row of a frame the caller already
+  filtered (for a multi-timeframe caller, `core.timeframes.eligible_bars`). One
+  filter, one notion of "now"; a feature cannot acquire its own divergent one.
+- Contract: `core.chart_features.compute_chart_features(frame, benchmark_frame=None)`
+  returns `{features, insufficient_history, bar_count, benchmark_supplied, versions}`.
+- Acceptance: 47 tests in `tests/test_chart_features.py`; gate
+  `scripts/check_chart_features.py`, verified to FAIL when zero-filling is
+  reinjected. Suite 1251 pass, eighteen gates green.
+
+### C3. Market context features ✓ DONE
+
+Implemented 2026-09-18 in `core/market_context.py` (`context-contract-v1`).
+
+A stock cannot be read in isolation: "+4% while the S&P did +4%" and "+4% while
+the S&P did -2%" are the same stock return and completely different evidence.
+C2 registered `relative_strength_60d` with an INJECTED benchmark and no way to
+obtain one — C3 is the producer that supplies it.
+
+- **VIX and the 10Y are REFERENCED, never re-fetched.** Both are already
+  registered macro series (FRED, vintage-aware, publication-time gated) from N3.
+  Pulling them again as Yahoo `^VIX`/`^TNX` bars would create a second source of
+  truth for a quantity the macro registry already owns — the split-brain the
+  master context forbids (W5). The context block reads them from the macro
+  snapshot, and a non-OK snapshot yields NO value rather than a neutral
+  substitute. The gate asserts no symbol containing VIX/TNX is ever fetched.
+- **ETF proxies, not raw index levels.** SPY / QQQ / IWM / UUP: an index level
+  has no volume and no tradable history, while an ETF shares the same provider
+  contract, split handling and cache path as every other ticker, so one price
+  truth covers the whole surface.
+- **Sector ETF = industry benchmark.** Eleven GICS sectors map to XLK/XLC/XLY/
+  XLP/XLE/XLF/XLV/XLI/XLB/XLRE/XLU. A finer industry classification needs a real
+  classification service and is explicitly NOT invented.
+- **An unmapped ticker gets no sector, not a guessed one.** `SYMBOL_TO_SECTOR`
+  covered only 15 of 76 holdings, so most of the portfolio would silently have
+  lost sector-relative context; expanded to 70. The seven still unmapped are
+  correct omissions — VOO/CIBR/SOXX/NASA are funds (an ETF is not a benchmark
+  for itself) and SPCX/CBRS/KEEL are unclassified. All report `sector: None`
+  with a reason, because a wrong sector benchmark produces confident, wrong
+  sector-relative strength — worse than none.
+- **PIT by delegation.** Like C2, no as_of filtering of its own: `frames` are raw
+  provider bars and the caller filters through `core.timeframes.eligible_bars`,
+  so one filter governs the system. `returns` are reporting-only and documented
+  as such.
+- Contract: `core.market_context.build_market_context(ticker, as_of, fetcher=None,
+  macro_snapshot=None, benchmark=...)`, with `benchmark_frame()` / `sector_frame()`
+  as the accessors C2 consumes.
+- Verified end-to-end on live data: NVDA relative strength resolves to **+5.7%
+  vs SPY** and **+7.5% vs XLK**, where before C3 it was None.
+- Acceptance: 32 tests in `tests/test_market_context.py`; gate
+  `scripts/check_market_context.py`, verified to FAIL when a `^VIX` price fetch
+  is reinjected. Suite 1283 pass, nineteen gates green.
+
+### C4. Deterministic chart structure ✓ DONE
+
+Implemented 2026-09-18 in `core/chart_structure.py` (`structure-contract-v1`).
+
+`describe_structure(frame)` composes swing pivots → swing structure →
+consolidation/reversal/trend → a single PHASE. Five of the nine items on the C4
+list were already C2 features (trend, breakout, failed breakout, gap, volatility
+expansion/contraction); C4 adds the swing structure (HH/HL, LH/LL, broadening,
+narrowing), consolidation and reversal, then composes everything into one
+reproducible description.
+
+- **Not pattern recognition.** No "head and shoulders", no screenshot
+  interpretation, no visual matching — the master context forbids exactly that.
+  Every label derives from measurable primitives with thresholds declared in
+  `core.config`, so the same bars always produce the same structure and a reader
+  can check the arithmetic by hand. A label nobody can recompute is not evidence.
+- **The PIT hazard: a fractal pivot needs bars AFTER it.** A swing high is the
+  maximum of a window CENTRED on the bar, so it cannot be confirmed until
+  `CHART_SWING_FRACTAL_K` further bars exist. Scanning to the final bar would let
+  future bars decide a past label — the C1 still-forming-bar leak in swing form.
+  The scan stops k bars short, and the unconfirmed tail is REPORTED
+  (`unconfirmed_tail_bars`) so a consumer can see the most recent action is not
+  yet structural. A confirmed pivot is settled: appending future bars cannot
+  revise it, and that is pinned by test and gate.
+- **Precedence is declared, not buried.** failed breakout > breakout > reversal
+  > consolidation > trending, with the rationale in `resolve_phase`'s docstring:
+  a failed breakout is the more specific statement about the same event; a
+  breakout is a range event rather than a swing event; trending is what remains.
+  A test asserts the resolution is total over `STRUCTURE_PHASES`.
+- **`undefined` is legitimate but must explain itself.** A broadening range is
+  genuinely neither trending nor consolidating. An unexplained `undefined` would
+  be indistinguishable from a failure to compute, so every path sets a reason —
+  a defect found during live verification, where NVDA returned `undefined` with a
+  valid `broadening` structure and no explanation.
+- **Composition, not duplication.** Breakout state, gaps and the volatility
+  regime are consumed from C2's `chart_feature_agent`, never recomputed (W5); the
+  gate greps the module for a second `def` of each.
+- Verified across ten live tickers: four distinct phases, with every `undefined`
+  carrying a real swing structure rather than a computation failure.
+- Acceptance: 43 tests in `tests/test_chart_structure.py`; gate
+  `scripts/check_chart_structure.py`, verified to FAIL when the pivot scan is
+  extended to the final bar. Suite 1326 pass, twenty gates green.
+
+### C5. Temporal sequence dataset ✓ DONE
+
+Implemented 2026-09-18 in `core/sequences.py` (`sequence-contract-v1`,
+`sequence-schema-v1`).
+
+`build_sequence(ticker, as_of, frame, ...)` assembles T-60 … T0 — 61 steps, each
+carrying the state knowable AT THAT STEP — plus as-of-T0 context and the V1
+outcome labels. This is the artifact C6 sequence models consume.
+
+- **C5 is NOT a second door into a training set.** M2 (`core.training_dataset`)
+  declares itself the only generator of supervised rows, and C5 honours that: it
+  emits no `TrainingRow`, and computes no forward return of its own. Labels are
+  PASSED IN from `core.labels.build_outcome_labels` — the same V1 builder M2
+  uses — so a sequence and a training row can never disagree about an outcome.
+  Both the test suite and the gate assert this by inspecting the module's CODE
+  with docstrings stripped (a naive grep matched the module's own explanation of
+  the rule).
+- **The step-truncation rule.** Step i is built from `frame.iloc[:i+1]` — its own
+  bar and every bar before it, nothing after. If step 5 could see bar 40, a model
+  would learn from information that did not exist and the features would look
+  perfectly ordinary. This is pinned DIRECTLY rather than by proxy: a step's
+  state must be identical to building it from a frame physically truncated there.
+  The gate injects `visible = frame` and confirms the check bites (it fails seven
+  ways, including the direct comparison).
+- **Per-step vs as-of-T0, stated honestly.** Price, volume, the C2 feature
+  surface and the C4 structure are recomputed at every step and genuinely vary —
+  a live NVDA window produced FIVE distinct structure phases across 61 steps.
+  Market, sector, macro, sentiment, event and fundamental state are attached ONCE
+  at T0 and labelled `context_scope: "as_of_t0"`, because back-projecting today's
+  macro reading across sixty past steps is the revised-data-in-history failure
+  the master context forbids. Tests assert no T0 channel ever appears inside a
+  step.
+- **Warm-up, so early steps are not thinner than late ones.** The frame must
+  cover the lookback PLUS `SEQUENCE_STEP_WARMUP_BARS`, since C2's widest window
+  is 61 bars and C4 needs 70. Without it the first step would be computed from
+  far less history than the last, and a model would read that as signal.
+- **A ragged sequence is not a sequence.** Below `SEQUENCE_MIN_STEP_COVERAGE`
+  the artifact is INCOMPLETE and carries NO steps — a model trained on a window
+  with holes learns the holes.
+- **An absent context channel reads UNAVAILABLE, not missing.** An absent key and
+  a failed provider are indistinguishable to a consumer otherwise.
+- Verified end-to-end: C1 `eligible_bars` → C3 context → C5 sequence with real
+  `outcome-label-v1` labels; 61 steps, deterministic hash, zero contract problems.
+- Acceptance: 35 tests in `tests/test_sequences.py`; gate
+  `scripts/check_sequences.py`. Suite 1361 pass, twenty-one gates green.
+
+### C6. Sequence model research ✓ DONE (gate built; no architecture implemented)
+
+Implemented 2026-09-18 in `core/sequence_research.py` (`sequence-research-v1`),
+plus `scripts/establish_baseline.py`.
+
+**C6's own precondition was not met, and fixing that was the sprint.** The
+repository had an M2 dataset builder, an M4 baseline suite (8 baselines, 7
+families, a working promotion rule) and an M3 trial registry — and ZERO recorded
+trials, ZERO persisted datasets. The three registered "champions" were rule-based
+scorers carrying `metrics: {}`, documented as approved for governance rather than
+by comparison. There was no number for a sequence model to beat, so any LSTM
+built in that state would have produced exactly the unfalsifiable result X10
+exists to prevent.
+
+`scripts/establish_baseline.py` produced the missing number:
+
+- **406 rows** admitted from a real M2 dataset over 14 holdings (14 excluded,
+  never imputed), dataset hash `d18d5e5e3cb62dd3365b`, horizon 20d.
+- All 8 baselines trained like-for-like on the same folds and seed.
+- **Incumbent: `momentum`, directional_accuracy 0.575.**
+- An M3 trial pre-registered and then completed. The registry REFUSED the first
+  attempt because it arrived carrying metrics — "a registered trial must not
+  carry metrics; pre-registration means the hypothesis is recorded before the
+  result exists". The ledger now shows both states (`registered` with no metrics,
+  then `completed` with 0.575), which is the anti-cherry-picking audit trail M3
+  was built for.
+
+The bar a sequence model must now clear is concrete: **≥ 0.595** directional
+accuracy (0.575 + the 0.02 promotion margin), winning **≥ 60% of folds**.
+
+`core/sequence_research.py` enforces it:
+
+- **One bar, not two.** `evaluate_candidate` delegates to
+  `core.baseline_suite.compare_runs` — the same margin and fold-consistency rules
+  every other candidate faces. A friendlier threshold for the fashionable
+  architecture is how complexity escapes its evidence, so there is no second
+  rule. The gate injects a free pass and confirms it fails four ways.
+- **Readiness is measured, not assumed.** `research_readiness()` reads the real
+  ledger. A registered-but-unfinished trial is not evidence; nor is a completed
+  trial that never reported its pre-registered metric.
+- **Declaring is not implementing.** All five architectures C6 names (temporal
+  convolution, LSTM, GRU, time-series transformer, temporal fusion) are declared
+  with a rationale and status `proposed`. The transformer entry records that it
+  needs a causal mask or it reads the future outright — the largest leakage risk
+  in the list.
+- **No deep-learning framework is imported.** Adding torch is a dependency
+  decision, not an implementation detail, and the gate asserts none was smuggled
+  in. This is the remaining blocker, and it is reported rather than hidden.
+- Acceptance: 25 tests in `tests/test_sequence_research.py`; gate
+  `scripts/check_sequence_research.py`. Suite 1386 pass, twenty-two gates green.
+
+**Honest status:** the gate is built and the baseline is real. No sequence model
+has been trained, because that needs a framework decision that has not been made.
+`research_readiness()` reports `ready_to_evaluate: false` with that single
+blocker named.
+
+### C7. Chart reaction memory ✓ DONE
+
+Implemented 2026-09-18 in `core/reaction_memory.py` (`reaction-memory-v1`).
+**Sprint C is complete.**
+
+Retains, for one significant event: the C4 STRUCTURAL picture of the chart going
+in, and the 1h / intraday / 1d / 5d / 20d / 60d reaction after — so a later setup
+can be matched against history rather than guessed at.
+
+- **Composition, not duplication.** E4 already measures intraday/1d/5d/20d/60d
+  against a pre-event baseline, and E6 already stores events and retrieves
+  analogs on a flat numeric snapshot. C7 CONSUMES E4's measurements rather than
+  recomputing them (W5 — the gate greps for a second `def` of the event study).
+  What C7 adds is the 1h reaction and a structural before-picture instead of a
+  bag of numbers.
+- **The 1h honesty rule.** Providers serve about a month of hourly bars while a
+  60d reaction needs sixty sessions AFTER the event — so for any event old enough
+  to have a 60d reaction, hourly data does not exist. `1h` is optional and reads
+  UNAVAILABLE; it is never interpolated from daily bars. A memory missing only
+  intraday horizons stays OK; missing a DAILY horizon is INCOMPLETE.
+- **A real bug found during live verification.** An event PREDATING the hourly
+  window matched every bar (`index >= target` is true throughout), so argmax
+  picked bar 0 and reported an unrelated hour six months later as the event's
+  reaction — fabricated data of exactly the kind this module exists to prevent.
+  Fixed with `REACTION_HOURLY_MAX_ENTRY_GAP_HOURS`; the gate was verified to fail
+  when that bound is removed.
+- **The before-picture excludes the event bar.** Including it would let the
+  reaction describe its own setup, which is how a memory learns to predict the
+  past.
+- **Retrieval matches STRUCTURE first.** Two charts with identical numbers but
+  different phases — one breaking out, one failing a breakout — are not analogs,
+  and averaging their outcomes yields a base rate for a situation that never
+  occurred. Similarity is `0.4 * phase agreement + 0.6 * numeric closeness`.
+- **A thin analog set is reported, not smoothed.** Below `REACTION_MIN_ANALOGS`
+  the summary carries the matches and refuses a median, because two observations
+  are an anecdote rather than a base rate.
+- Verified on live data: a March NVDA event produced an OK memory with a
+  `failed_breakout` before-picture from 70 bars, E4's five horizons carried
+  through, and 1h correctly UNAVAILABLE.
+- Acceptance: 40 tests in `tests/test_reaction_memory.py`; gate
+  `scripts/check_reaction_memory.py`. Suite 1426 pass, twenty-three gates green.
+
+---
+
+**Sprint C is complete.** C1 multi-timeframe, C2 price/volume features, C3 market
+context, C4 chart structure, C5 temporal sequences, C6 sequence-research gate
+(with the measured baseline it required), C7 reaction memory. The one honest gap
+is C6: no sequence architecture is implemented, because that needs a
+deep-learning framework decision, and `research_readiness()` reports that blocker
+rather than hiding it.
+
+---
+
+## Sprint F — Multi-Horizon Forecasting Engine
+
+### F1. Forecast targets ✓ DONE
+
+Implemented 2026-09-18 in `core/forecast_targets.py` (`forecast-target-v1`).
+
+The six things the engine may be asked to predict, each with a contract: what
+kind of quantity it is, its bounds, whether it must pass through a fitted
+calibration, and the realized label field it is scored against.
+
+| target | question | label field |
+|---|---|---|
+| `probability_up` | P(return > 0) | `label_up` |
+| `expected_return` | E(return) | `forward_return` |
+| `return_distribution` | P(return within a stated interval) | `forward_return` |
+| `adverse_excursion` | expected worst drawdown in the window | `adverse_excursion` |
+| `expected_volatility` | expected realized volatility | `realized_vol` |
+| `probability_outperform` | P(stock > benchmark) | `forward_return` |
+
+- **Three targets already existed**; F1 added `return_distribution`,
+  `adverse_excursion` and `probability_outperform` to the SAME
+  `FORECAST_TARGETS` tuple the M5 registry validates against, rather than
+  opening a second vocabulary. The three registered models still validate.
+- **Every target resolves to a realized V1 label.** A forecast that cannot be
+  compared to what happened is an opinion, so `target_contract` refuses a target
+  that names no label field. Verified against the live builder: all six are
+  scorable at 20d on real NVDA labels.
+- **A probability exists only through a fitted calibration.** Targets whose kind
+  is probability or distribution carry `requires_calibration: True`, and
+  `resolve_probability` routes them through M6's `calibrated_probability`, which
+  raises without a map. Calibrating a RETURN target is refused too — it would
+  present a return as a likelihood. An import-time guard makes probability-ness
+  and calibration-requirement impossible to disagree.
+- **Bounds are declared and checked.** An adverse excursion is the worst drawdown
+  INSIDE the window, so it is never positive; a volatility is a dispersion, so it
+  is never negative; a probability lives in [0, 1]. A value violating its own
+  contract is refused rather than rendered.
+- **The relative target refuses without a benchmark**, rather than silently
+  reducing to `probability_up`. A distribution refuses without an interval,
+  because "P(return within what?)" is not a question, and an empty interval is
+  refused because P(∅) is zero by construction.
+- **An unmatured horizon yields no realized value** — a forecast judged against
+  an unfinished window is judged against noise.
+- F1 defines and validates targets; it fits no models and makes no predictions.
+  Those are F2 onward, and they consume this contract.
+- Acceptance: 37 tests in `tests/test_forecast_targets.py`; gate
+  `scripts/check_forecast_targets.py`, verified to FAIL when an uncalibrated
+  score is allowed to pass through as a probability. Suite 1481 pass,
+  twenty-four gates green.
+
+### F2. Horizons ✓ DONE
+
+Implemented 2026-09-19 in `core/forecast_horizons.py` (`forecast-horizon-v1`).
+The set is 1d, 5d, 20d, 60d, 120d, 252d — F2's stated minimum — and every one
+resolves to a V1 label horizon, so a forecast at any of them can be scored.
+
+**The horizons ARE the label horizons.** `FORECAST_HORIZONS` derives from
+`LABEL_HORIZON_SESSIONS` rather than being a second table that could drift, and
+`FORECAST_REQUIRED_HORIZONS` pins the F2 minimum at import: a narrower product
+fails to start instead of shipping quietly.
+
+**Adding 252d moved two things nobody would have guessed.** Both are now derived:
+
+- `LABEL_CALENDAR_COVERAGE_DAYS` was a fixed 130, sized for the old 60-session
+  maximum. A 252-session window spans ~365 calendar days, so long labels would
+  have reported pending forever because their future bars were never fetched.
+  Now derived (410 days) with an import-time guard.
+- `BACKTEST_EMBARGO_SESSIONS` must cover the longest horizon or a validation
+  fold sees bars that shaped a training row's outcome. An existing import-time
+  guard caught this immediately — the config would not load. Embargo is now
+  derived (252), with folds and holdout scaling alongside it.
+
+**The embargo cost is real and stated.** A fold now spans embargo + fold +
+holdout, so a walk-forward run needs ~630 sessions (~2.5 years) per fold. That
+is the price of a one-year forecast horizon, not a bug.
+
+**Pending is not missing.** A 252d forecast made last month is unfinished, not
+wrong. `horizon_readiness` separates SCORABLE / PENDING / UNAVAILABLE so a young
+long-horizon forecast never looks like a failure. Verified live: at
+as_of=2024-06-15 all six horizons mature (120d +9.99%, 252d +10.31%); at
+as_of=2026-06-15, 120d and 252d are correctly pending.
+
+**Forty-eight test files' fixtures were sized for the old geometry** and are now
+derived from config — hardcoded `embargo_sessions=60`, 130-session frames, fold
+counts and `as_of` offsets pinned to literals. One of them was worth more than a
+resize: a leakage test injected labels for a single decision that, under the
+wider embargo, fell inside the embargo GAP and was never evaluated, so the
+tampered label proved nothing. It now reads the fold geometry.
+
+- Acceptance: 24 tests in `tests/test_forecast_horizons.py`; gate
+  `scripts/check_forecast_horizons.py`. Re-pinning coverage to 130 is rejected
+  by the config guard before the gate even loads. Suite 1505 pass, twenty-five
+  gates green.
+
+### F3. Joint forecast ✓ DONE
+
+Implemented 2026-09-19 in `core/forecast_joint.py` (`joint-forecast-v1`).
+Composes F1's six targets with F2's six horizons into one 36-cell object, each
+cell carrying its own status, uncertainty and reason.
+
+**F3 defines and validates the joint contract; it fits no models.** None exist
+— the measured incumbent is a momentum baseline at 0.575. Every cell needing a
+model refuses honestly, so the object is useful today as a contract.
+
+**The shape rule that carries the design.** A cell carries a `value` key IF AND
+ONLY IF its status is OK — the key is ABSENT otherwise, not `None`. The
+dashboard's existing idiom is `Number(x ?? 0)`, so a null P(up) would coalesce
+to `0.0%` and render as CERTAIN DOWN: the most dangerous possible misreading,
+produced by defensive-looking code. Same rule for `interval`/`dispersion` — an
+interval beside a withheld estimate is an estimate by another name.
+
+**Cell precedence is declared data and total**, OK last, so a refusal always
+names its specific obstacle: UNAVAILABLE → PENDING → LABEL_UNBACKED →
+NEEDS_BENCHMARK → DEGENERATE_INTERVAL → UNCALIBRATED → NO_MODEL → OK. On real
+NVDA labels the 36 cells split into four distinct refusals, not one blanket
+status.
+
+**Width guards uncertainty, not fold count.** MEASURED: an empirical interval
+NARROWS as folds decrease (0.089 wide at 2 folds vs 0.238 at 30 for the same
+true spread), and `prediction_interval([0.55]*3)` returns width 0.0 at
+`folds: 3`. A fold-count floor passes its own check while publishing perfect
+certainty.
+
+**Four coherence rules were REJECTED, each by measurement**, and the reasoning
+lives in `JOINT_REJECTED_RULES` so nobody re-adds one believing it was merely
+overlooked:
+
+| rejected rule | why |
+|---|---|
+| monotonic returns | real NVDA labels run `− − − − + +` across 1d..252d |
+| sign(E[r]) matches P(up)>0.5 | a skewed payoff gives P(up)=0.73 with E[r]=−0.0075 |
+| volatility grows with horizon | 1d `realized_vol` is structurally None (needs ≥2 sessions) |
+| `adverse_excursion ≤ min(0, E[r])` | a gap-up makes AE POSITIVE; 9 of 300 real 20d labels violate it |
+
+The last was the flagship invariant of all three design proposals, called
+"arithmetically impossible to violate". It is false, and a rule that calls
+ground truth malformed is the wrong rule.
+
+**Three pre-existing contract defects are REPORTED, not papered over**, as
+`findings` on every built forecast:
+
+- a realized `adverse_excursion` can violate its own F1 bound (gap-up; 3% of
+  real 20d labels) — either the bound or `labels.py` is wrong, and fixing
+  either is a deliberate separate change;
+- `probability_outperform` resolves to the same realized field as
+  `expected_return`, so the relative target is scored against the raw stock
+  return with no benchmark subtracted — it does not measure outperformance;
+- `build_target_request` does not validate its horizon against F2.
+
+**PIT correctness is structural**: the module never fetches, labels arrive as a
+parameter, so there is no provider to read past `as_of` with.
+
+- Design was produced by a 12-agent workflow (3 proposals, all REJECTED by
+  adversarial critique; 49 traps, 20 fatal). Every load-bearing claim was then
+  re-run against the live repo. NOTE: the workflow's "sklearn missing" claim
+  was recorded here as disproven; it was in fact CORRECT. `scikit-learn==1.9.1`
+  is pinned in `requirements.txt` but was absent from the local interpreter,
+  and 66 M4/M5/M6 tests errored because of it. Installing the pinned version
+  cleared all 66.
+- Acceptance: 43 tests in `tests/test_forecast_joint.py`; gate
+  `scripts/check_forecast_joint.py`, verified to FAIL when `value: None` is
+  reintroduced. Suite 1548 pass, twenty-six gates green.
+
+### F4. Conditional forecasting ✓ DONE
+
+`P(+5% in 20D | bullish regime)` beside `P(+5% in 20D | stress regime)`.
+`core/forecast_conditional.py` + the F4 block in `core/config.py`.
+
+**The problem conditioning creates.** Slicing history by regime does not give
+five datasets; it gives one dataset cut five ways, unevenly. MEASURED, 5y SPY,
+191 PIT-correct sessions:
+
+```
+bullish 143 | risk_off 32 | range 9 | bearish 5 | stress 2
+```
+
+The roadmap's own example condition — stress — has **two** observations, and
+reads `P(up)=1.00, P(+5%)=1.00, mean +13.64%`. It is the most
+confident-looking and least trustworthy cell in the grid. The point estimate
+is inversely informative to its reliability.
+
+**There is no single right method here, and that is the design.** Both global
+policies were measured against the real slices and both fail:
+
+- a floor at `N>=30` silences range, bearish AND stress — three of five
+  regimes. The grid then cannot answer the question F4 exists to answer. That
+  is a loss of **accuracy**, not a conservative default;
+- no floor publishes the stress cell as fact. That is a loss of
+  **reliability**.
+
+So the estimator and the STRENGTH OF CLAIM are selected **per cell**, from the
+evidence that cell actually holds (`select_claim`). Every cell says the
+strongest true thing it can support, and none says more.
+
+**The tier ladder** (floors MEASURED — 40k binomial draws per N, true rate
+0.20; the derivation re-runs inside the gate):
+
+| tier | floor | what it may say | why the floor sits there |
+|---|---|---|---|
+| POINT | N ≥ 40 | a number | \|err\|>0.15 in 1.6% of draws, vs 3.7% at N=30 and 22.7% at N=10 |
+| DIRECTIONAL | N ≥ 20 **and** the interval excludes the base rate | "higher/lower than unconditional", never a number | a large 15pt effect is detected 24% of the time at N=10, 40% at N=20 |
+| INTERVAL | N ≥ 8 | a range only | where mean Wilson width first drops below 0.50 |
+| INSUFFICIENT | otherwise | its own N, and why | at N=2 a rate of 1.00 and one of 0.50 are indistinguishable |
+
+**DIRECTIONAL sits ABOVE INTERVAL although it says less.** A too-wide interval
+advertises its own weakness on its face; a directional claim that merely
+failed to DETECT an effect is indistinguishable from one that found none. The
+import-time validator asserts the ordering and names the reason, because
+re-sorting these by apparent wording strength is the obvious "cleanup".
+
+**Wilson, not M6.** `core.calibration.prediction_interval` measures spread
+ACROSS CV FOLDS; MEASURED, it returns width 0.00 at *every* N on identical
+observations. A conditional rate needs uncertainty FROM SAMPLE SIZE — a
+different quantity that renders the same way. Reusing it here would be a W5
+violation in reverse: composing the wrong existing thing rather than building
+the right one. Wilson's coverage was verified to hold (0.92–1.00) down to N=2.
+
+**Width can never stand alone.** MEASURED: a unanimous 5/5 gives Wilson width
+0.434 — NARROWER than the well-sampled 9-observation `range` cell at 0.525.
+Width rewards unanimity, and unanimity is precisely what tiny samples
+manufacture. The sample floor gates the tier; width only constrains within it.
+
+**The shape rule, extended from F3.** A cell carries a `value` key IF AND ONLY
+IF its claim is POINT. An INTERVAL cell carries an interval and no value; a
+DIRECTIONAL cell carries a direction and no value; a refused cell carries
+neither. `value: None` would coalesce to 0.0 under the dashboard's
+`Number(x ?? 0)` idiom and render a withheld probability as CERTAIN DOWN.
+
+**EMPTY_SLICE is not INSUFFICIENT.** "this regime never occurred" and "it
+occurred 3 times" are different facts with different fixes (widen the window
+vs wait for data), so they are different statuses.
+
+**Multiplicity is reported, not silently corrected.** The full grid is
+6 targets × 6 horizons × 5 regimes = 180 cells from one history, ~9 spurious
+directional findings at a 5% false-signal rate. Every DIRECTIONAL claim
+carries its comparison count so a reader can weigh it; a blanket correction
+would also suppress true findings in a 5-cell regime row.
+
+**Governance untouched.** The W2 veto `market_regime_stress` (STRESS →
+NO_TRADE) is evaluated only in `core/risk_policy.py`. A favourable stress cell
+is a REPORT, never permission to trade, and the grid carries that note.
+
+**PIT by delegation.** The module never fetches. The caller supplies
+observations, each carrying the condition that held AT its own as_of and the
+outcome of a window that had ALREADY closed.
+
+**Verified on real data**, not just fixtures: 118 PIT observations of SPY
+(2021-01→2025-06), 0 contract problems, and three claim strengths in one
+five-row table — bullish (N=78) POINT 0.731; risk_off (N=30) INTERVAL
+[0.39,0.73]; bearish/range/stress refused. The risk_off row is the case that
+justifies the design: its naive point estimate of 0.533 against a 0.661 base
+rate reads as "risk_off is meaningfully worse", but 0.661 lies *inside* the
+interval, so no such claim is supportable. The tier system withheld a false
+finding a global point-estimate rule would have published.
+
+- Acceptance: 56 tests in `tests/test_forecast_conditional.py`; gate
+  `scripts/check_conditional_forecast.py`, verified to FAIL under all nine
+  reinjected invariants — including the two that matter most, collapsing the
+  per-cell selection into one global floor, and removing the floor entirely.
+  Suite 1621 pass, twenty-seven gates green.
+
+### E6 retrieval fix — analog similarity matched price level, not chart shape ✓ DONE
+
+Found while measuring F5's preconditions. `chart_similarity` compared `close`
+(scale 20.0) and `atr_14` (scale 2.0) across tickers trading at completely
+different prices, so a $180 stock scored ~0.0 against a $420 stock on those
+fields **forever**, regardless of what either chart was doing. The chart state
+also carries ANNUALIZED volatility while the scale was 0.01 — set for daily
+vol — so any 1pp gap scored zero.
+
+MEASURED, 1,608 real chart states across 12 tickers x 5y, at the unchanged
+0.70 bar with event-type matching required:
+
+| metric | before | after |
+|---|---|---|
+| share reaching the E6 floor of 5 analogs | **0.000** | **0.247** |
+| share reaching C7's floor of 3 | 0.053 | 0.373 |
+| probes retrieving ZERO analogs | 0.813 | 0.393 |
+
+Zero of 150 probes had ever reached the floor of 5. Worse, **84.5% of every
+pair that did clear 0.70 was the SAME TICKER** — adjacent sessions of one
+stock. An "analog set" built that way is one situation counted many times, a
+pseudo-replication that makes a base rate read far more confident than its
+evidence supports.
+
+The fix separates RECORDING from MATCHING: `EVENT_MEMORY_CHART_FIELDS` still
+records the levels (a memory should say what the stock cost), while a new
+`EVENT_MEMORY_SIMILARITY_FIELDS` excludes them from comparison. Every
+remaining field is already scale-free. Volatility's scale moved 0.01 → 0.15
+to match its actual unit.
+
+Discrimination IMPROVED rather than loosened — this was not a threshold
+relaxation:
+
+```
+identical shape, different price level:  0.846 -> 1.000
+OPPOSITE chart shape:                    0.230 -> 0.090
+two nearly-flat slopes (the property
+  the absolute scales exist to protect): 0.999 -> 0.999
+```
+
+`EVENT_MEMORY_MIN_SIMILARITY` is deliberately unchanged at 0.70. MEASURED, no
+threshold is both selective and productive — 0.55 yields 33 analogs at mean
+similarity 0.63 (weak matches), 0.80 yields 0. Moving the bar only slides
+along that curve, so the bar stays honest and F5 lets F4's `select_claim`
+decide what the retrieved set can actually support.
+
+- Import-time guard refuses `close`/`atr_14` in the similarity fields and any
+  field outside the recorded set. Gate extended with four guards, each
+  verified to FAIL when reverted: level fields re-added, volatility scale
+  reverted to 0.01, widened to 2.0, and similarity fields emptied.
+- Acceptance: 9 new tests (52 in `tests/test_event_memory.py`). Suite 1630
+  pass, 27 gates green.
+
+### F5. Event-conditioned forecast ✓ DONE
+
+`new event → representation → historical matches → chart → regime → forecast`.
+`core/forecast_event.py` + the F5 block in `core/config.py`.
+
+**F5 is a PIPELINE WITH PER-STAGE STATUS, not a function returning a number.**
+Every stage can fail independently and the object names which one did. "No
+forecast" tells a reader nothing; "retrieval found 1 analog and needs 5" tells
+them what is missing and what would fix it. The FIRST failure stops the
+pipeline — later stages read BLOCKED — so the reported obstacle is always the
+most upstream one rather than a downstream symptom of it.
+
+**Retrieval is the binding constraint, reported and never absorbed.** MEASURED
+on a fresh clone: `data/event_memory.jsonl` does not exist and holds zero
+memories, so stages 3–6 are unreachable. That is the honest terminal state of
+a system that has not yet observed anything. Even on a populated store of
+1,608 real chart states, and after the E6 similarity fix, **39.3% of events
+retrieve ZERO analogs** and only 24.7% reach E6's floor of five.
+
+**Composition, not a third retrieval (W5).** Two analog systems already exist
+— E6 (`find_analogs`: chart numbers **and event type**, floor 5) and C7
+(`find_reaction_analogs`: C4 structural phase, floor 3). F5 builds neither; it
+calls E6, the only one that filters by event type, which is what
+"event-conditioned" means. The gate verifies this by OBSERVING the call, not
+by trusting the declaration.
+
+**The claim strength is F4's, not a second answer.** An analog set *is* a
+conditional slice: N observations of what followed a comparable setup. F5
+calls `select_claim` rather than growing a second sample-size policy that
+would drift from the first. The gate asserts the two agree at every N.
+
+**Regime is reported, not filtered on.** `market_regime` is already an E6
+similarity field, so the roadmap's regime stage sits partly upstream of the
+match. Filtering again would weight the same evidence twice and shrink an
+already thin set for nothing, so F5 reports the retrieved set's regime
+AGREEMENT instead. An ungoverned label still fails the stage — a sixth regime
+would silently bypass the W2 stress veto.
+
+**Pseudo-replication caps the claim — found during implementation.** A first
+version published a POINT estimate from 45 analogs that were all the SAME
+ticker, flagging it DEGRADED two levels down where a dashboard would never
+show it. 45 analogs from one stock are 45 adjacent sessions of one situation,
+not 45 observations — the F4 stress cell in another costume. The fix computes
+an EFFECTIVE sample (`EVENT_FORECAST_EFFECTIVE_PER_TICKER = 5` per distinct
+ticker) and caps the claim by it:
+
+```
+45 analogs, ALL one ticker    -> effective  5 -> INSUFFICIENT, no value
+45 analogs, 12 distinct names -> effective 45 -> POINT, value 0.667
+```
+
+A caveat that does not reach the claim is not a caveat. The discount is
+deliberately crude — distinct tickers, not a correlation model — because a
+precise-looking adjustment would imply a precision retrieval cannot support.
+
+**One enforcement point, not two.** The shape rule (a `value` key exists IFF
+the claim is POINT; a refusal carries no interval) was originally guarded both
+at the call site and in `_assemble`. The gate could not break it — the
+upstream guard masked the downstream one, making the real guard untestable.
+The interval is now passed through unconditionally and `_assemble` alone
+decides, so there is exactly one place to attack and the attack lands.
+
+**Verified on REAL data**: 1,968 memories built from genuine 5y price history
+across 12 tickers, 18 probes, **0 contract problems**. Three reached OK with
+INTERVAL claims; MSFT/NVDA refused at `forecast` (retrieval worked, 2 analogs);
+AMD/INTC refused at `matches` (no analogs). Each names its own stage.
+
+- Acceptance: 46 tests in `tests/test_forecast_event.py`; gate
+  `scripts/check_forecast_event.py`, verified to FAIL under all eleven
+  reinjected invariants — including removing the independence cap, setting it
+  to 39 (just under the point floor), forking E6 retrieval, removing the
+  early return that withholds a refused interval, and running stages past the
+  first failure. Suite 1676 pass, 28 gates green.
+
+### Event-memory store — the producer F5 was missing ✓ DONE
+
+F5 retrieves from `data/event_memory.jsonl`. Nothing wrote it, so on a fresh
+clone F5 refused at its `matches` stage forever. `scripts/build_event_memory.py`
+is the producer: `news/price → event → E4 study → E5 attribution → E6 remember`.
+
+**No configured source supplies dated historical events.** MEASURED:
+
+| source | gives | reaches back |
+|---|---|---|
+| NewsAPI (`core/news_adapter`) | headlines, typed by the N1 taxonomy | **7 days** (`NEWS_LOOKBACK_DAYS`), and **no API key is configured** |
+| Alpha Vantage overview | the **NEXT** earnings date only | no history |
+| Yahoo price history | bars | 15y, but carries no event identity |
+
+`build_news_snapshot("NVDA", ...)` returns UNAVAILABLE. So a store reaching
+back years can only be built by INFERENCE, and that fact is what the design
+had to encode rather than hide.
+
+**Provenance, not confidence.** `EventMemory` gains `provenance`
+(`observed` | `inferred`) and `inference_method`. The field records WHAT
+PRODUCED the memory, deliberately not how confident we are — a confidence
+would imply a measurement that does not exist. It is REQUIRED at the door
+(`memory_problems` refuses a memory without it) and the dataclass default is
+`""`, never `"observed"`: defaulting to observed would silently launder every
+unlabelled memory into sourced evidence, and the requirement check could never
+fire.
+
+**Two modes, and the difference is the point.**
+
+- `--mode forward` records what the news provider actually reported, as
+  `observed`. Today it writes **zero** memories and says why, pointing at the
+  missing `NEWSAPI_KEY`. It is built to accrue going forward, not to fill a
+  store retroactively.
+- `--mode backfill` dates candidate earnings from price behaviour, as
+  `inferred`.
+
+**The backfill's precision was measured against published earnings dates**
+(AAPL/MSFT/NVDA/JPM), not asserted:
+
+```
+plain volume cadence                        precision 0.35
+  + exclude quarterly triple-witching       precision 0.51
+  + require a >2% opening gap               precision 0.65   <- shipped
+  + tighter volume floor                    precision 0.67, but only 3 picks
+```
+
+A plain cadence filter scores 0.35 because **31.7% of its picks land on
+quarterly TRIPLE-WITCHING dates** — options expiry, not earnings, sharing the
+same quarterly high-volume signature. Excluding those and requiring an opening
+gap closes most of the gap. In the shipped store, triple-witching
+contamination is **zero**.
+
+So **roughly one inferred "earnings" event in three is not an earnings
+event**. The price move is real and the E4 study measures it on real bars;
+what was never sourced is which event produced it, or whether a discrete event
+did at all. `EVENT_MEMORY_INFERENCE_PRECISION` records 0.65 as data, and a
+method with no measured precision is refused at import — nobody can weigh what
+was never measured.
+
+**Why it can never be laundered.** MEASURED: `fetch_fundamental_snapshot`
+returns `earnings_date=None` and no historical earnings calendar exists
+anywhere in the system, so an inferred date has nothing to be scored against.
+It can be FLAGGED, never VERIFIED. F5 therefore reports `observed_share`
+beside `same_ticker_share` and degrades a forecast that leans on inferred
+analogs.
+
+**One event type only.** The cadence supports `earnings`. Deriving ten
+taxonomy buckets from one volume signal would be fabrication wearing a
+classifier's clothes.
+
+**Store depth was chosen by measurement, not by default.** A first build at
+5y produced 801 memories, and MEASURED against it the median probe found
+**1 analog** — only 3% reached F4's INTERVAL floor of 8, so F5 still refused
+everywhere. At the 0.70 bar only 0.09% of real pairs qualify:
+
+```
+bar    pair rate    store needed for 8 analogs
+0.60      0.0089                          ~900
+0.65      0.0040                        ~2,000
+0.70      0.0009                        ~8,900   <- configured
+```
+
+Rebuilding at 15y (the deepest daily history the provider serves; `max`
+returns monthly bars and is useless here) gives **1,954 memories across 73
+tickers, 2012-2026**, and that is the shipped depth.
+
+**F5 now produces real forecasts.** MEASURED over 60 probes against the real
+store, 0 contract problems:
+
+```
+status   OK 17 | REFUSED 43        median analogs 3 (was 1), p75 11, max 41
+claims   INTERVAL 16 | POINT 1     share reaching the INTERVAL floor: 30% (was 3%)
+```
+
+```
+ ticker      claim    N  tkrs   same   value         interval
+   GLW       POINT   41    21   0.07   0.463      [0.32,0.61]
+ GOOGL    INTERVAL   37    17   0.11       -      [0.38,0.69]
+    KO    INTERVAL   23    15   0.09       -      [0.37,0.74]
+  AVGO    INTERVAL   20    17   0.05       -      [0.30,0.70]
+```
+
+Every OK forecast rests on 8-21 DISTINCT tickers with a same-ticker share of
+0.05-0.26, so the independence cap is doing its job rather than being bypassed
+by a bigger store. The 43 refusals fail at `forecast` — retrieval succeeded
+and the analog count was simply too thin — which is the honest answer, and a
+different one from the empty-store refusal F5 used to give.
+
+Lowering the similarity bar would raise the OK rate, and was already measured
+(in the E6 fix) to buy that volume only by admitting weak matches. The bar
+stays at 0.70 and the store grows instead.
+
+- Acceptance: 30 tests in `tests/test_event_store.py`, 4 new F5 provenance
+  tests; gate `scripts/check_event_store.py`, verified to FAIL under all
+  thirteen reinjected invariants — including defaulting provenance to
+  `observed`, dropping the triple-witching exclusion, removing the gap
+  filter, letting the backfill write OBSERVED, and shrinking the trailing
+  buffer below the longest recorded horizon.
+
+### Daily data collection — the capture step continuous learning depends on ✓ DONE
+
+Not a roadmap task. Checked before building: Sprint X2 is alerting (it reads
+stores rather than filling them), and `docs/sprints/sprint-3.md` lists
+"continuous learning from forecast outcomes" as a requirement to carry
+forward, with no implementing task anywhere. This was a genuine capability
+gap, so it was built immediately.
+
+**The gap, measured.** Nothing collected on a schedule. The W6 ledger accrued
+only when somebody happened to run a command:
+
+```
+alpha_vantage_overview: 13 of 15 business days captured, MISSING 2026-09-02, 09-04
+yahoo_finance_chart   : 12 of 15 business days captured, MISSING 09-02, 09-04, 09-10
+```
+
+**Why that matters, and for which data.** Most inputs lose nothing by waiting:
+
+```
+price bars         REBUILDABLE   15y of daily history, re-fetchable
+hourly bars        REBUILDABLE   MEASURED 2y available — the C7 docstring's
+                                 "roughly one month" is outdated for this provider
+macro series       REBUILDABLE   FRED/ALFRED serve vintages
+regime labels      REBUILDABLE   computed from bars
+inferred memories  REBUILDABLE   the backfill regenerates them
+
+NEWS ARTICLES      PERISHABLE    NEWS_LOOKBACK_DAYS = 7, then GONE
+sentiment          PERISHABLE    derived from news; dies with it
+observed memories  PERISHABLE    need the news that produced them
+fundamentals       PARTLY        values re-fetchable; the VINTAGE is not
+```
+
+So the argument for scheduling is **irreversibility, not convenience**. A day
+of news missed is a day that can never be learned from — and it is exactly
+what F5's `observed` memories require, which is why F5 currently retrieves
+only `inferred` analogs.
+
+**`scripts/daily_collect.py` triggers; it does not duplicate.** Every provider
+fetch already appends to the W6 ledger on its way past
+(`append_raw_records` lives inside `fetch_price_history`,
+`fetch_fundamental_snapshot`, `build_news_snapshot`, `build_macro_snapshot`).
+The collector's only job is to make those calls happen every business day.
+Writing records itself would be a second ledger path, which W5 forbids — and
+the gate enforces that by parsing the collector's AST, because the module
+docstring NAMES `append_raw_records` to explain that it does not call it, and
+a substring check cannot tell an explanation from a call.
+
+**Fail-soft per source, fail-loud in aggregate.** A dead macro provider must
+not cost the day's news, so each source reports its own status. The exit code
+reflects whether anything PERISHABLE was lost — not whether everything
+succeeded — because that is the distinction a scheduler can act on.
+
+Three status subtleties, each fixed after seeing the output rather than
+predicted:
+
+- a **dry run** reports SKIPPED, never FAILED, and never claims a lost day;
+- **events blocked by missing news** reports SKIPPED, not FAILED: news already
+  reports that lost day, and double-counting it would hide which stage broke;
+- an unattempted source is SKIPPED, distinct from one that tried and failed.
+
+**`scripts/check_data_coverage.py` makes a silent outage loud.** A scheduled
+task that stops firing produces no error — it produces nothing, which looks
+exactly like a quiet week. The gate fails on a ledger gap beyond the
+allowance, on a collection report that has gone stale (a dead scheduler leaves
+a tidy history), and on a report whose rows cannot be dated.
+
+It is deliberately TOLERANT of the gaps already in the ledger and of a missing
+`NEWSAPI_KEY`: it fails on a collector that stopped running, not on a provider
+that was never configured. Those have different fixes, and conflating them
+would make the gate noise.
+
+**Scheduled and verified running.** `scripts/install_daily_task.ps1` registers
+a Mon–Fri 22:00 task (after the US close), idempotently. Verified live:
+`State: Ready`, `NextRunTime: 2026-09-21 22:00`, `DaysOfWeek: 62` (Mon–Fri).
+`StartWhenAvailable` is set because a laptop shut at 22:00 is the likeliest
+way for this to stop silently, and that setting turns a missed run into a late
+run rather than a lost day.
+
+**`scripts/` became a real package.** MEASURED: as a namespace package it
+resolved to a path that also contained `site-packages/win32/scripts`, so a
+module added there could shadow one of ours. An explicit `__init__.py` binds
+the name to this directory alone.
+
+**The gate must not fail an innocent clone — fixed after testing it.** The W6
+ledger is TRACKED, so a clone made months from now carries records ending on
+the day they were committed; judging that against today's calendar reported
+"10 of 10 days missing" and failed CI on a machine that never collects. The
+gitignored collection report is the discriminator: its presence means THIS
+machine runs the collector. A second hole surfaced in the same test — a
+ledger stale beyond the entire window was classified "source appears retired"
+and skipped, so a collector dead for nine months passed silently. It now
+fails, loudly, but only where a report proves collection was expected.
+
+**Measured runtime:** a full 77-ticker run over all five sources takes
+**1m10s**, well inside the task's 2-hour limit.
+
+**Quota-aware batching — added after the free tier was exhausted.** MEASURED:
+the provider allows 100 requests/day and the collector makes ONE call per
+ticker, so 77 tickers plus ad-hoc testing exceeded it and every request
+returned HTTP 429.
+
+**The cost is per CALL, not per byte.** An ETF costs exactly the same one call
+as any stock, so excluding funds saves 3–4 calls of 77 — it is not a bandwidth
+measure. They are excluded for a better reason: MEASURED, C3 already gives
+VOO, SOXX, CIBR and NASA no sector ("a fund has no single sector, and a sector
+ETF is not a benchmark for itself"), and E6 matches analogs on event_type
+against a company's chart state. A fund-level headline is market commentary —
+exactly what E5 attribution calls CONFOUNDED — so the call buys a memory about
+the market rather than the holding. They keep their inferred memories from
+price history, which cost no quota. The exclusion is DERIVED from `sector_for`,
+so adding a fund needs no edit.
+
+**The remaining 73 rotate in batches of 40.** MEASURED: 40 covers all 73 in
+two runs and leaves 60 calls spare for retries and ad-hoc work — the margin
+whose absence produced the 429. A sequential cursor gives a visit spread of 1
+over 20 runs, where a date-derived stride left 2.
+
+**A 429 stops the run on the FIRST occurrence** rather than burning 40 doomed
+calls, and the cursor is NOT advanced, so the next run retries those tickers
+instead of skipping them.
+
+**The events stage reuses the same batch.** `forward()` fetches news itself,
+so passing the full list would have spent the quota a second time on tickers
+the news stage had already covered — caught before it shipped.
+
+- Acceptance: 31 tests in `tests/test_daily_collect.py` (including three
+  clone-safety cases run against a temporary repo copy); gate
+  `scripts/check_data_coverage.py`, verified to FAIL under six reinjected
+  faults — news reclassified as non-perishable, an allowance wide enough to
+  swallow the window, the collector writing the ledger directly, a declared
+  source with no collector, a 40-day-stale report, and a report with no
+  readable timestamp. A simulated dead scheduler (5 ledger days removed) fails
+  the gate naming the exact missing dates. Suite 1741 pass, 30 gates green.
+
+**The key is set, and OBSERVED memories now exist.** The first live news run
+immediately exposed a pre-existing bug no fixture had reached: `event_study`
+compared tz-aware news timestamps (`2026-09-16T21:33:00Z`) against a tz-naive
+price index and raised. Fixed by normalising through C1's converter, now
+public as `core.timeframes.as_naive_timestamp`. The store holds **130 observed
+memories** beside 1,954 inferred ones, across 9 real N1 event types. They
+carry the 1d horizon only — the events are days old and longer windows have
+not closed, so they fill in as time passes.
+
+**The news ledger is the one deliberate W6 exception.** MEASURED: news writes
+~208 KB per ticker per day, so the 77-ticker universe produces ~15.7 MB/day,
+~345 MB/month, **~3.9 GB/year**. Git never forgets, so committing that is
+irreversible. `data/raw/newsapi_news/` is therefore gitignored, and the
+consequence is stated rather than hidden: a fresh clone can still replay every
+price-, fundamentals- and macro-derived score from raw records, but NOT a
+news-derived sentiment or an observed event memory. Those raw articles live
+only on the collecting machine, which needs a backup that is not git.
+
+### F6. Forecast decomposition ✓ DONE
+
+Break the forecast into Technical / Fundamental / News-Event / Macro / Regime
+/ Sentiment / Historical-analog components. `core/forecast_decomposition.py`
+plus the F6 block in `core/config.py`.
+
+**"Contribution" is the trap, and it was measured rather than argued.** The
+obvious implementation gives each component a number that sums to the
+forecast. F5's value is a base rate over analogs retrieved by chart
+similarity, filtered by event type, within a regime — and those filters are
+not independent, because one historical day can satisfy all three. Over 4,000
+observations with a realistic regime/chart correlation:
+
+```
+all sessions          P(up) 0.546
+bullish regime        P(up) 0.611    "contribution" +0.064
+uptrend chart         P(up) 0.614    "contribution" +0.067
+bullish AND uptrend   P(up) 0.606    SUM +0.131, ACTUAL +0.060
+```
+
+The parts overlap and **double-count by more than 2x**. An additive
+decomposition would be arithmetically wrong, and calling the parts
+"contributions" would imply each factor independently *caused* its share.
+`DECOMPOSITION_ADDITIVE` is False, the import-time validator refuses to let it
+become True, and `CONTRIBUTION`/`CAUSED` are barred from the effect vocabulary.
+
+**There are no coefficients to attribute.** MEASURED: `build_joint_forecast`
+returns NO_MODEL — "no trained forecasting model is registered". So F6 is not
+feature attribution, not SHAP, not a weight table. What produces a forecast
+value today is F4 (a regime-conditioned base rate) and F5 (an analog base
+rate), both empirical slices of history, so F6 reports **which filters
+produced the slice** and how much each narrowed it.
+
+**NOT_WIRED is not a measured zero.** Only 4 of the 7 named components can
+supply forecast evidence today:
+
+| component | live | why |
+|---|---|---|
+| technical | YES | the chart state IS F5's retrieval key |
+| news_event | YES | F5 over 2,084 memories (130 observed) |
+| regime | YES | F4 conditions on it; F5 reports agreement |
+| historical_analog | YES | F4 slices and F5 analogs produce the value |
+| fundamental | NO | captured daily, but no forecast consumes it |
+| macro | NO | snapshot UNAVAILABLE (no FRED key), unconsumed |
+| sentiment | NO | ensemble weight 0.0, no verified provider |
+
+Reporting the absent three as `0.0` would say they were measured and found
+irrelevant. They were never measured — a different fact, and the one a
+decomposition must not blur. `_component` discards any detail passed to a
+non-PRESENT row, so an unmeasured component cannot be made to look measured.
+
+**Not a second ensemble breakdown (W5).** W1 already decomposes the SCORE
+across these same seven agent names. F6 decomposes the FORECAST, and every
+output carries `decomposed_object: "forecast"` so the two can never be
+confused.
+
+**Claim strength is F4's.** A component's marginal slice is just a smaller
+sample, so `select_claim` decides what it supports — a 2-observation slice
+publishes no rate and no interval.
+
+**A test of mine was wrong, and the code was right.** I asserted the chart
+filter would report NARROWED; it correctly reported NO_EFFECT, because every
+fixture memory matched and the filter excluded nothing. The test now covers
+both paths: 45-of-45 reports NO_EFFECT, and 45-of-65 reports NARROWED.
+
+- Acceptance: 41 tests in `tests/test_forecast_decomposition.py`; gate
+  `scripts/check_forecast_decomposition.py`, verified to FAIL under all ten
+  reinjected invariants — including making the decomposition additive,
+  removing the guard that strips detail from non-PRESENT rows, adding
+  CONTRIBUTION to the effect vocabulary, marking every component wired,
+  dropping a component, stripping the causal disclaimer, and letting a thin
+  slice publish a rate. Two of those guards were initially UNREACHABLE by the
+  gate (nothing exercised them), so the gate now calls `_component` with
+  smuggled detail on purpose. Suite 1785 pass, 31 gates green.
+
+### F7. Forecast confidence ✓ DONE
+
+Accounts for sample size, calibration, model agreement, feature completeness,
+source quality, regime similarity, event similarity, model drift and
+uncertainty. `core/forecast_confidence.py` plus the F7 block in
+`core/config.py`.
+
+**Confidence is not P(up), and that is MEASURED rather than asserted:**
+
+```
+case                        P(up)      N      interval   width
+coin flip, huge sample      0.500   1000   [0.47,0.53]   0.062
+near-certain, tiny sample   1.000      2   [0.34,1.00]   0.658
+```
+
+`P(up)=0.500` from a thousand observations is a HIGH-confidence statement;
+`P(up)=1.000` from two is a NEAR-ZERO-confidence one. They are orthogonal, so
+a dashboard rendering the probability as a confidence bar inverts the meaning
+exactly where it matters. Verified behaviourally: 1.00-from-2 scores **0.000**
+against 0.50-from-160 at **0.865**, and identical evidence with P(up)=0.05 vs
+0.95 yields identical confidence.
+
+**A weighted sum is the wrong shape, and that was the deciding measurement.**
+`score_engine._compute_confidence` averages six factors for the SCORE. Applied
+to forecast factors:
+
+```
+case                          weighted sum   MIN factor
+everything strong                    0.950        0.950
+N=2 fatal, rest strong               0.717        0.020
+uniformly mediocre                   0.550        0.550
+```
+
+**A forecast built on TWO observations scores 0.717 — higher than a uniformly
+mediocre one at 0.550.** N=2 is the F4 stress cell, the least trustworthy
+state in the system, and averaging buries it behind five strong factors.
+
+**The first fix was also wrong, and the gate caught it.** `min(cap, weighted)`
+made the cap dominate absolutely: one weak factor among two strong ones scored
+**identically** to three weak factors (both 0.300), leaving five of six
+factors decorative. Measured across four candidate shapes, only
+`cap x (0.5 + 0.5 x weighted)` satisfies all three requirements at once —
+weakness registers (0.196 < 0.248), the cap still dominates a fatal factor
+(N=2 -> 0.052), and a strong forecast is not penalised (0.926).
+
+**Three factors are UNMEASURABLE, not zero.** Calibration, model agreement and
+model drift all need a trained model, and `build_joint_forecast` reports
+NO_MODEL. Scoring them 1.0 ("nothing wrong") or 0.0 ("everything wrong") would
+both be false, so they carry no value, no weight, and their own per-factor
+reason. `_factor` discards any value passed to a non-MEASURED row.
+
+**A confidence never travels as a bare scalar.** The binding factor comes with
+it, because a lone number is what invites being read as a probability. On real
+data the design earns its keep immediately: an F5 forecast scored **0.194,
+bound by event_similarity**, where a weighted sum would have published 0.530 —
+the analogs barely cleared the 0.70 retrieval bar, and averaging would have
+hidden that behind perfect feature completeness and regime agreement.
+
+- Acceptance: 38 tests in `tests/test_forecast_confidence.py`; gate
+  `scripts/check_forecast_confidence.py`, verified to FAIL under eleven
+  reinjected invariants — aggregating by weighted sum, by pure MIN, declaring
+  a different aggregation, giving unmeasurable factors a value, marking every
+  factor measurable, dropping a factor, stripping the not-P(up) disclaimer,
+  dropping the binding factor, renaming the assessed object, flattening the
+  sample-size curve, and demoting sample_size from its top weight. Suite 1823
+  pass, 32 gates green.
+
+### F8. Forecast API contract ✓ DONE
+
+The versioned `ForecastSnapshot`: `core/forecast_snapshot.py` plus the F8
+block in `core/config.py`. Fifteen declared fields, every one always present
+as a key, with absence explicit rather than missing.
+
+**A snapshot is an identity, not just a record.** MEASURED: a forecast is
+deterministic — two runs of the same request digest identically
+(`6deb5e9815782497` both times). `snapshot_digest` makes that usable, so "did
+this forecast change?" is answerable rather than assumed, and the gate proves
+the digest is both stable and content-sensitive.
+
+**Three requested fields have no honest producer, and the contract says so
+per field:**
+
+| field | why |
+|---|---|
+| `model_versions` | NO_MODEL — nothing registered. An empty dict would claim a model ran and declared nothing |
+| `expected_return` | needs a trained model; F3 emits zero values |
+| `model_contributions` | a naming conflict with a measurement F6 already made |
+
+**ABSENT is not zero**, the same hazard every forecast sprint has guarded:
+`expected_return: None` would coalesce to 0.0 under the dashboard's
+`Number(x ?? 0)` idiom and render as "flat" — a confident claim about a
+quantity nobody computed. An absent field carries a STATUS and a REASON,
+never a placeholder, and `_field` discards any value passed to a non-PRESENT
+row.
+
+**The `model_contributions` conflict, resolved without undoing a
+measurement.** F6 MEASURED that contributions cannot be reported: regime
+alone +0.064, chart alone +0.067, sum +0.131, against an ACTUAL joint effect
+of +0.060 — the filters overlap and double-count by more than 2x, and F6's
+validator bars the word outright. Renaming F6's output to fit the field would
+undo that measurement; omitting the field would break the requested contract.
+So the field carries F6's decomposition **unchanged**, declares itself
+non-additive, and states that its name is not to be read literally.
+
+**Composition, not restatement (W5).** F4's interval, F5's event context,
+F6's decomposition, F7's confidence, M1's `feature_surface_digest`, N4's
+regime. The gate verifies `feature_digest` by recomputing M1's value
+independently and comparing — a hex-shaped constant passes every structural
+check, so the value itself is checked.
+
+**Warnings are surfaced at the top level**, because a consumer that renders
+only the headline must still see that there is no trained model, that the
+evidence was inferred, or that the sample was thin. On real data a snapshot
+carried `no_trained_model, fields_absent, low_confidence, inferred_evidence`.
+
+**Two blind spots in my own gate, found by attacking it.** The contributions
+note was checked against the built row, whose reason IS that constant —
+comparing a value to itself, so both moved together; it now checks the
+constant directly. And a faked `feature_digest` (64 hex zeros) passed every
+structural test, so the gate now recomputes M1's digest and compares.
+
+- Acceptance: 43 tests in `tests/test_forecast_snapshot.py`; gate
+  `scripts/check_forecast_snapshot.py`, verified to FAIL under ten reinjected
+  invariants — placeholder values on absent fields, removing the PRESENT-only
+  guard, dropping a contract field, declaring `model_versions` available,
+  claiming the contributions are additive, a content-blind digest, silencing
+  the absent-field warning, faking the feature digest, and unenforced required
+  fields. Suite 1866 pass, 33 gates green.
+
+**Sprint F is complete.** F1 targets, F2 horizons, F3 joint forecast, F4
+conditional, F5 event-conditioned, F6 decomposition, F7 confidence, F8 the
+snapshot contract.
+
+
+
+F7 forecast confidence, F8 the versioned `ForecastSnapshot` API contract.
+
+
+F6 forecast decomposition, F7 forecast confidence, F8 the versioned
+`ForecastSnapshot` API contract.
+
+---
+
+## Sprint L — Continuous Learning & Institutional Memory
+
+Goal: controlled learning, not uncontrolled self-modification.
+
+### L1. Outcome closure ✓ DONE
+
+`forecast → horizon expires → actual outcome → error → calibration`.
+`core/outcome_closure.py` plus the L1 block in `core/config.py`.
+
+**L1 could not assume a forecast existed to close.** MEASURED: nothing
+persisted a `ForecastSnapshot` — F8 builds one on demand and discards it, and
+the 3,301-row decision audit holds **zero** forecast-shaped rows. It stores
+SCORES, which have no horizon and therefore cannot expire. So L1 owns an
+append-only **forecast ledger**, written when the forecast is made.
+
+**Maturity is composed, not re-derived.** `build_outcome_labels` and
+`horizon_readiness` already answer "has this expired?" and "what actually
+happened?" — MEASURED, NVDA at 2024-06-15 has all six horizons matured while
+2026-09-10 has only 1d and 5d. The gate verifies the composition by
+OBSERVING the call, because a local re-implementation would satisfy a text
+search while being the second notion of maturity W5 forbids.
+
+**Error is scored per CLAIM TIER.** One universal function cannot serve four
+kinds of claim:
+
+| tier | claims | scored by |
+|---|---|---|
+| POINT | a number | Brier |
+| INTERVAL | a range | **coverage** — did the outcome fall inside? |
+| DIRECTIONAL | a side | hit / miss |
+| INSUFFICIENT | nothing | **NOT_SCORED** |
+
+Brier on an interval is undefined. MEASURED, a `[0.39, 0.73]` interval around
+a true rate of 0.55 contains the realised value in 93.8% of 2,000 draws —
+coverage is the quantity that interval claimed.
+
+**THE DECIDING MEASUREMENT: the scoreboard is gameable by refusing.** Over 200
+forecasts from a genuinely skilled forecaster, refusing the hardest cases
+(those nearest 0.5):
+
+```
+refuse   0%:  Brier 0.2206 over 200 scored
+refuse  50%:  Brier 0.2043 over 100 scored
+refuse  90%:  Brier 0.1379 over  19 scored
+refuse  99%:  Brier 0.0198 over   2 scored    <- 11x "better"
+```
+
+This system is *designed* to refuse often (F4 tiers, F5 stages, F7
+confidence), so the hazard is live. Every report publishes the scored /
+refused / pending counts beside the error, and below
+`CLOSURE_MIN_SCORED_SHARE` the figure is marked UNRELIABLE. A refusal itself
+is NOT_SCORED: zero error would reward silence, maximum error would punish
+honesty. Verified end to end — the gamed Brier still falls, but `reliable`
+flips to False with the refusal count beside it.
+
+**Closure is idempotent.** A CLOSED forecast is terminal; re-closing would
+double-count one observation and silently re-weight every metric derived from
+the ledger. `EXPIRED_NO_DATA` stays distinct from OPEN, because "we could not
+score it" and "it has not happened yet" have different fixes.
+
+**Verified on real data**: NVDA at 2024-06-15, a 0.62 bullish POINT forecast
+closed against a realised −4.19% — Brier 0.3844, correctly penalised;
+re-closing returned the same row unscored; an unmatured 252d stayed OPEN.
+
+**A layered guard was found untestable and split.** The shape rule (a refusal
+carries no value) lived only in validation, and the builder happily kept the
+number. It is now enforced at construction AND in validation, with the gate
+attacking each layer on its own — a guard sitting behind an effective one
+cannot be tested through it.
+
+- Acceptance: 43 tests in `tests/test_outcome_closure.py`; gate
+  `scripts/check_outcome_closure.py`, verified to FAIL under eleven reinjected
+  invariants — scoring refusals, Brier on intervals, dropping coverage,
+  marking a gamed report reliable, re-closing a CLOSED forecast, dropping
+  ledger dedup, both shape-rule layers, dropping EXPIRED_NO_DATA, re-deriving
+  maturity locally, and calibrating on any sample size. Suite 1961 pass,
+  35 gates green.
+
+### L1b. Wiring the loop ✓ DONE
+
+L1 built the ledger and the closure machinery; MEASURED, **nothing wrote to
+it** — `record_forecast` had no caller, and no production path built a
+forecast at all. The whole F3–F8 engine was exercised only by gates and
+tests. `scripts/run_forecasts.py` closes that gap: record, close, report.
+
+**Refusals ARE recorded, and that reverses my first instinct.** MEASURED over
+40 real probes, 75% of forecasts refuse (30 INSUFFICIENT, 10 INTERVAL), and
+recording only the 25% that make a claim looked like sensible economy. It is
+not: the report would then read `scored_share = 100%` while thirty refusals
+went unseen — precisely the gaming L1 exists to expose, arriving by the back
+door. Not refusing to SCORE, but refusing to RECORD. The ledger's job is the
+denominator. A refusal row costs ~325 bytes; the full portfolio over 252
+sessions is ~24 MB/year.
+
+**A real double-counting bug, found by running it twice.** The ledger is
+append-only (W6), so closing a forecast writes a NEW row rather than
+rewriting the original — that is what keeps "what did we believe at the
+time?" answerable. But the reader counted raw rows, so three passes over 12
+forecasts produced **36 rows and a scoreboard claiming 8 scored from 4**.
+Fixed with `current_ledger`, supersede-on-read — the same rule the raw store
+already applies. CLOSED supersedes OPEN regardless of file order, because a
+re-record after a close appends an OPEN row LAST and a naive "last row wins"
+reader would resurrect it.
+
+**Verified end to end**: 12 forecasts recorded over 3 tickers x 4 horizons,
+all 12 matured and closed, scoreboard `4 scored / 8 refused / coverage 33% /
+reliable=False`. A second run records and closes nothing. The 33% coverage
+correctly refuses to call that error figure trustworthy.
+
+- Acceptance: 5 new tests (48 in `tests/test_outcome_closure.py`); the L1 gate
+  gained a supersede-on-read guard, verified to FAIL when the collapse is
+  removed and when it degrades to "last row wins".
+
+### SOXX and CIBR: news tracking, by request ✓ DONE
+
+`COLLECT_NEWS_TRACK_ANYWAY` names sector-less tickers worth their call anyway.
+SOXX (semiconductors) and CIBR (cyber security) are NARROW THEMATIC funds:
+their news concerns one industry, so a headline is closer to a sector event
+than to market commentary, and the portfolio holds many of their
+constituents. This is an operator's judgement, recorded as such rather than
+dressed as a measurement.
+
+VOO stays skipped — it tracks the whole S&P 500, so its "news" is the market
+itself, which E5 attribution already calls confounded. NASA stays skipped
+because the repo carries no metadata saying what it is; skipping an unknown
+costs one call a day, while tracking one on a guess feeds the store memories
+nobody can interpret. **Worth resolving: NASA has a ticker and nothing else
+in `data/universe.jsonl`.**
+
+Eligible pool 73 → 75; still 2 runs to cover all at a batch of 40, 60 calls
+spare against the 100/day ceiling.
+
+### L2. Forecast performance ledger ✓ DONE
+
+Performance by ticker, sector, regime, horizon, event type, source, model,
+confidence bucket and volatility regime. `core/performance_ledger.py` plus the
+L2 block in `core/config.py`.
+
+**Only two of the nine dimensions existed on a ledger row** (ticker,
+horizon). Sector and the confidence bucket are safely derivable — their
+inputs are immutable. Four were missing entirely, and they are POINT-IN-TIME
+facts that cannot be recovered later:
+
+- **regime** and **volatility regime** can be recomputed from bars, but the
+  forecast was MADE under a specific classifier reading; recomputing later
+  risks a different answer if the classifier moved, silently re-attributing
+  past performance to a regime nobody forecast under;
+- **event type** depends on the event set at `as_of`, and news is gone after
+  `NEWS_LOOKBACK_DAYS`;
+- **source** depends on a retrieval against a store that grows. MEASURED
+  across 8 probes, comparing retrieval against half the store versus the full
+  store, **7 of 8 returned a different analog count** (14→19, 14→20, 16→24,
+  0→1, 3→4, 9→16, 0→1).
+
+So the ledger row gained all four, captured at RECORD time, and the runner
+now writes them.
+
+**THE DECIDING MEASUREMENT: nine dimensions cut the data to nothing.**
+
+```
+ticker 77 | sector 11 | regime 5 | horizon 4 | event_type 10
+source 2  | model 1   | confidence_bucket 4  | volatility_regime 3
+
+full cross-product : 4,065,600 cells
+forecasts per year :        77,616
+average per cell   :        0.0191
+```
+
+A cross-tab would be empty almost everywhere while looking thorough, so
+breakdowns are **marginal** — one dimension at a time — and every cell faces
+F4's INTERVAL floor of 8. Verified: a 3-forecast ticker with the WORST record
+in the table (Brier 0.90) publishes nothing, because three observations
+cannot rank a ticker.
+
+**A REAL DESIGN ERROR IN L1, CAUGHT BY RUNNING L2 OVER REAL DATA.** Interval
+coverage read **0% across all 42 scored forecasts** — not a display bug but
+structural: an interval on P(up) claims the RATE at which such setups rise,
+while a single outcome is 0 or 1. A binary outcome can NEVER fall inside a
+probability range, so per-forecast coverage was False by construction and
+measured nothing.
+
+Coverage is a GROUP property. An interval row now records what the cell needs
+(bounds plus the realised outcome) and is scored by the Brier of its midpoint
+— the usable point reading the interval implies — while the cell asks the
+answerable question: did the realised RATE across the cell land inside? The
+corrected view differentiates immediately:
+
+```
+performance by horizon [144 closed]
+  level       n  scored    brier   cover
+  1d         36       6        -       -   (thin)
+  20d        36      12   0.2299    100%
+  5d         36      12   0.2494    100%
+  60d        36      12   0.2402      0%
+```
+
+20d and 5d intervals contained the realised rate; 60d did not. The broken
+version could never have surfaced that.
+
+- Acceptance: 35 tests in `tests/test_performance_ledger.py`; gate
+  `scripts/check_performance_ledger.py`, verified to FAIL under nine
+  reinjected invariants — thin cells publishing metrics, the floor dropped to
+  1, cross-tabulation enabled, a recomputed regime, `unknown` replaced by a
+  plausible default, `source` dropped from the captured set, a dimension
+  dropped, metrics published as None, and per-cell refusal counts removed.
+
+### L3. Error memory ✓ DONE
+
+"Store forecast, actual, error, context; identify systematic errors."
+`core/error_memory.py` plus the L3 block in `core/config.py`.
+
+**The first clause was already done.** A closed L1 ledger row carries the
+forecast, the actual, the error and the context. L3 READS that store rather
+than duplicating it (W5) — the gate checks the module never writes one. The
+real work is the second clause.
+
+**A systematic error is a BIAS, not a large error.** MEASURED over 200
+forecasts:
+
+```
+case                          brier    bias      t
+noisy but unbiased           0.2466  -0.0459   -1.3
+systematically over-bullish  0.3300  +0.2850   +8.1
+```
+
+Brier barely separates them; the signed bias does. Systematic means a
+direction that *persists*, not an error that is big.
+
+**The worst cell in a table is not a finding.** L2 reports ~36 cells.
+MEASURED with no real effect anywhere, the true mean Brier is 0.2722 while
+the worst cell per report averages **0.3712** — 36% worse than the truth,
+every single time.
+
+**THE DECIDING MEASUREMENT: scanning many cells manufactures findings.**
+
+```
+threshold              false alarms/report   reports flagging something
+t>1.96 (p<0.05)                       2.77                        94%
+t>2.58 (p<0.01)                       1.15                        68%
+t>3.29 (p<0.001)                      0.39                        34%
+```
+
+At the conventional p<0.05 a **perfectly clean system reports ~2.8 systematic
+errors on 94% of runs**, which trains an operator to ignore the alert.
+
+**Threshold and floor were chosen together, and a first pass got it wrong.**
+Detection of a real 0.25 bias FALLS as the threshold rises (40% → 7% at
+n=12), so no threshold rescues a thin cell: the floor buys detection, the
+threshold buys silence.
+
+```
+    n   t>1.96   t>2.58   t>3.29
+   12      40%      19%       7%
+   30      80%      56%      31%
+  100     100%      99%      95%
+```
+
+Shipped: **t>3.29 with a floor of 30** — 0.26 false alarms per report, 78% of
+clean reports silent, 31% detection rising to 95% at n=100. Verified: 11 of
+12 clean systems produce NO finding, while a 0.35 regime bias is caught,
+named and directed.
+
+**A REAL INVERSION IN MY OWN TEST, caught by the gate.** `bias_test` returned
+`t=0.0` whenever every error was identical — treating the *most* consistent
+bias possible as the *weakest* evidence, while one part per million of jitter
+produced t=34,000,000. Both readings were wrong for the same reason: a
+degenerate standard error is not a measurement of uncertainty. Zero variance
+now yields an infinite t, and the magnitude floor still downgrades a tiny
+constant bias to NEGLIGIBLE.
+
+**Power is reported, not assumed.** At n=30 a real bias is found 31% of the
+time, so every report states that **absence of a finding is not evidence of
+no bias** — it is most often a statement about sample size.
+
+- Acceptance: 32 tests in `tests/test_error_memory.py`; gate
+  `scripts/check_error_memory.py`, verified to FAIL under nine reinjected
+  invariants — the threshold loosened to p<0.05, the floor dropped to 5, the
+  zero-variance inversion restored, untested cells carrying a bias,
+  NEGLIGIBLE collapsed into SYSTEMATIC, findings stripped of direction or of
+  their comparison count, and detection power overstated or removed.
+
+### L4. Source reliability learning ✓ DONE
+
+"Source quality may depend on source × event type × sector × horizon — one
+global source score is not assumed sufficient."
+`core/source_reliability.py` plus the L4 block in `core/config.py`.
+
+**The task states a hypothesis, so the first job was to test it.**
+
+**What exists today is not learned at all.** `fetch_data.SOURCE_REGISTRY`
+carries one *asserted* `base_confidence` per DOMAIN — news 0.75, fundamentals
+0.90, market data 0.80 — with no measurement behind any of them, and nothing
+ever updates them from outcomes. The news schema already has a
+`source_quality` field: MEASURED over 2650 stored articles it is populated
+**zero** times.
+
+**THE DECIDING MEASUREMENT: CONDITIONING IS NOT FREE.** Estimating a rate per
+cell costs variance. MEASURED against a source whose TRUE accuracy really does
+vary by cell:
+
+```
+true quality varies (sd=0.10)   global MSE   per-cell MSE   shrunk
+  5 observations per cell          0.01224        0.05935  0.01064
+ 25 observations per cell          0.01000        0.00950  0.00505
+100 observations per cell          0.00936        0.00234  0.00192
+```
+
+Per-cell estimation is **five times worse** than a single global rate on thin
+evidence, and only starts to pay from ~25 per cell. So "one global score is
+not sufficient" and "condition on everything" are *both* wrong: the evidence
+decides, per cell.
+
+**The shipped estimator is shrinkage** — a cell pulled toward the global rate
+by k pseudo-counts, so it *is* the global score when a cell is empty and
+becomes the cell's own score as evidence arrives. It never loses badly in
+either world.
+
+**k chosen by worst case, not by mean.** k=5 minimised the worst case overall,
+but only because of a regime with sd=0.20 — outlets ranging 0.2 to 0.95
+accuracy — which no news population plausibly shows. Over the plausible range
+(sd ≤ 0.10) **k=20** is the minimum, in a flat 15–30 basin.
+
+**A REAL FALSE-POSITIVE BUG, caught by my own measurement.** The first noise
+band used a flat 2.0× multiplier, which sits near the *mean* of the null range
+— so MEASURED it claimed "quality depends on event_type" on **7 of 30 clean
+runs** with no effect present. The multiplier that places the band at the 95th
+percentile grows with the number of cells (the same multiple-comparison effect
+L3 measured):
+
+```
+cells    multiplier needed for p95
+  2                          1.90
+  3                          2.35
+  5                          2.70
+  9                          3.11
+```
+
+Fitted `c = 1.4 + 0.8·ln(cells)`. After calibration: **2% false claims** at
+realistic sample sizes (from 23%), with 100% detection of a real 0.30 spread
+at n=300.
+
+**WHAT THIS CANNOT DO YET, AND WHY IT SHIPS ANYWAY.** The full scheme is
+50 sources × 9 event types × 11 sectors × 4 horizons = **19,800 cells**, which
+at the ~380 outcomes needed to separate a 0.65 source from a 0.55 one would
+require **~7.5 million source-linked outcomes**. MEASURED today: **zero** —
+not few, zero, structurally (see the join gap in
+[open-decisions.md](open-decisions.md)). Shrinkage is precisely the estimator
+that degrades to the global score under that condition, and every score
+reports its backing: NO_EVIDENCE / REGISTRY_PRIOR / GLOBAL / CONDITIONAL.
+
+**Absence is never zero.** An unmeasured outlet and an outlet measured to be
+useless are different facts; collapsing them would discard every new source the
+moment it appeared. An unmeasured source scores `None`, never 0.0 — the shape
+rule inherited from F3→L3.
+
+- Acceptance: 33 tests in `tests/test_source_reliability.py`; gate
+  `scripts/check_source_reliability.py`, verified to FAIL under nine
+  reinjected invariants — shrinkage removed (k=0), k raised to pin every cell
+  to global, the cell floor dropped, absence scored 0.0 in config and again in
+  code, the backing states collapsed, the noise band flattened, CONDITIONAL
+  claimed below the floor, and a CONDITIONAL score stripped of its cell.
+
+### L5. Controlled incremental learning ✓ DONE
+
+"New data → candidate update → shadow evaluation → drift testing → OOS
+validation → promotion gate → human approval → new champion. Never
+auto-replace the production champion daily."
+`core/controlled_learning.py` plus the L5 block in `core/config.py`.
+
+**MOST OF THIS CHAIN ALREADY EXISTED**, and L5 must not rebuild it (W5):
+
+| stage | owner |
+|---|---|
+| new data | `scripts/daily_collect.py` (L) |
+| candidate update | `core.training.train_baseline` (M) |
+| shadow evaluation | M7 roles, `SHADOW_MIN_OBSERVATIONS` |
+| drift testing | M5 `PROMO_CHECK_DRIFT` |
+| OOS validation | M5 `PROMO_CHECK_OOS` |
+| promotion gate | `core.promotion.evaluate_promotion` |
+| human approval | M5 `PROMO_CHECK_APPROVAL` |
+| new champion | `registry.crown_champion` (M7) |
+
+L5 owns exactly one stage — `champion_tenure` — and delegates the rest.
+
+**THE LAST SENTENCE HAD NO IMPLEMENTATION.** MEASURED, the words cooldown,
+last_promoted, min_days, interval, elapsed and cadence appear **zero** times
+across `core/promotion.py` and `core/model_registry.py`. `crown_champion`
+checks role, status and approval but never looks at how long the outgoing
+champion has served. **DEMONSTRATED: four champions crowned inside fifteen
+minutes, every crowning accepted.**
+
+**Why a bound is needed at all.** MEASURED, two models with IDENTICAL true
+skill: the challenger looks better **~48% of the time at any sample size**
+(43.6% at n=20, 49.5% at n=1000). So "promote whatever is better on the
+evidence so far" churns the champion roughly every other evaluation forever,
+on pure noise — while a real 3-point edge is detected only 64% of the time at
+n=100. Evidence separates them; no threshold does.
+
+**THE DECIDING MEASUREMENT.** Simulated over three years, a candidate
+appearing daily and a genuinely better (+4pt) model arriving on day 360:
+
+```
+min days   noise churn/3yr   mean adopt delay   median
+       0             433.5                1.9      1.0
+       7             127.2                7.8      5.5
+      14              70.0               16.7     12.0
+      30              34.8               35.6     19.0
+      60              18.0               47.7     11.0
+      90              12.0               64.5      8.0
+     180               6.0              150.2      6.0
+```
+
+Churn collapses **433 → 35 (92%)** by 30 days and then flattens, while the
+delay in adopting a real winner climbs steeply past 60. **30 days is the
+knee** — both costs acceptable, neither dominating.
+
+**The guard has three carve-outs, each for a reason.** A **rollback** is
+exempt, because trapping a failing champion in production would be worse than
+no guard. **No incumbent** passes, or the system could never crown its first
+champion. A **back-dated crowning** fails rather than passing — MEASURED, an
+`abs()` on the interval let a future-dated crowning *buy* 71 days of tenure.
+
+**A bug in my own delegation, caught by running it against the real gate.**
+`_from_checklist` assumed M5's `checks` was a LIST and its flag was
+`promoted`. M5 emits a DICT keyed by check name with the flag `approved`, so
+every real verdict would have surfaced as NOT_EVALUATED — a chain that looked
+healthy while reading nothing. Fixed and now gate-verified.
+
+**Proof it is the tenure bound deciding:** with a fully approved M5 verdict
+and identical evidence, an incumbent crowned 8 months ago gives
+`may_promote=True`, while one crowned yesterday blocks at `champion_tenure`.
+
+- Acceptance: 36 tests in `tests/test_controlled_learning.py`; gate
+  `scripts/check_controlled_learning.py`, verified to FAIL under ten
+  reinjected invariants — the bound removed, lowered to 1 day, raised to 10
+  years, measured from candidate readiness, the rollback exemption removed,
+  auto-promotion enabled, a stage dropped, NOT_EVALUATED treated as passing,
+  an `abs()` letting a future crowning buy tenure, and an M5 check
+  reimplemented instead of delegated.
+
+### L6. Concept drift detection ✓ DONE
+
+"Feature distribution drift, relationship drift, calibration drift,
+event-response drift."
+`core/drift_detection.py` plus the L6 block in `core/config.py`.
+
+**THE TASK NAMES FOUR THINGS, AND THEY REALLY ARE FOUR.** MEASURED over four
+scenarios each breaking exactly one thing, scored by the feature-distribution
+detector alone:
+
+```
+scenario                 feature PSI   caught?
+1 feature drift               1.2197   YES
+2 relationship drift          0.0360   no
+3 calibration drift           0.0133   no
+4 event-response drift        0.0274   no
+```
+
+It catches **one of four**. The other three are invisible to it because *the
+features did not move — the world did*. Verified each needs its own detector:
+a sign flip moves the correlation +0.368 → −0.315 with identical features;
+inflating probabilities 1.6× moves the calibration gap 0.000 → +0.251 while
+the correlation barely moves (0.448 → 0.430); an event response collapsing
++0.0404 → +0.0001 leaves all three others unchanged.
+
+**M5's `score_drift_psi` is not reusable, and that is a measurement.** It bins
+on a fixed [0,10] score scale and refuses anything outside it. On a feature
+ranged [−0.3, 0.3] shifted by **3.2 standard deviations**:
+
+```
+PSI with fixed [0,10] bins : 0.0000   <- every value in one bin
+PSI with quantile bins     : 6.9450
+```
+
+The formula is shared; the binning is the whole difference between seeing an
+enormous drift and reporting zero.
+
+**THE WINDOW FLOOR IS LOAD-BEARING.** PSI between two *identical*
+distributions is not zero — it grows as the window shrinks:
+
+```
+window   mean PSI     p95   share exceeding 0.25
+    50     0.5251  1.1898                  77.0%
+   100     0.1954  0.3719                  20.5%
+   250     0.0736  0.1317                   0.0%
+```
+
+The conventional "PSI > 0.25 means significant shift" rule fires on **77% of
+clean comparisons at window 50**, and a 13-feature scan flags something on
+**96%** of clean reports at window 100.
+
+**A FIRST READING OF THE DETECTION SWEEP WAS WRONG.** Detection of a real
+0.5-sd shift appeared to *fall* with window size (86.7% at 100 → 51.0% at
+1000), which would have argued for a small window. It is an artefact: at small
+windows PSI is inflated by noise, so crossing 0.25 is not detection — it is
+the same noise producing 96% false alarms. Separation (signal clear of the
+clean p95) is the honest measure, and it first holds at **250**. Shipped
+window floor 250, measured 0/40 clean comparisons alerting.
+
+**A REAL ASYMMETRY BUG, caught by my own gate.** Event-response drift was
+compared as a percentage ratio. A decline is bounded at −100% while an
+increase is unbounded, so a symmetric rule on |ratio| is not symmetric at all:
+an event type that had **stopped moving price entirely** (−99.1%) read WARN,
+while only a mathematically exact zero reached ALERT. Replaced with a log2
+factor — halving is −1, doubling is +1 — so the bound reads the same in both
+directions. A vanished response is named explicitly rather than left to a
+floor.
+
+**Drift is reported, never acted on.** `DRIFT_TRIGGERS_RETRAIN = False`: a
+model that retrains itself on an alert is the uncontrolled self-modification
+Sprint L exists to prevent. Drift is evidence *for* the L5 chain, not a
+substitute for it.
+
+- Acceptance: 36 tests in `tests/test_drift_detection.py`; gate
+  `scripts/check_drift_detection.py`, verified to FAIL under eight reinjected
+  invariants — the window floor lowered to 50, drift wired to retrain, a
+  drift type dropped, STABLE collapsed into NOT_EVALUATED, fixed binning
+  restored, the calibration detector replaced by a ranking measure, the
+  asymmetric percentage rule restored, and a coverage break letting a
+  three-of-four scan report as complete. A ninth attack proved a no-op — the
+  coverage guarantee has two independent implementations — and is recorded as
+  such rather than counted.
+
+### L7. Regime-specific learning ✓ DONE
+
+"Evaluate separate models per regime (bullish/bearish/range/risk-off/stress)
+**only if OOS evidence supports specialization**."
+`core/regime_specialization.py` plus the L7 block in `core/config.py`.
+
+**The last clause is the whole task.** Splitting the training data five ways is
+not free, and the default answer must be NO.
+
+**THE DECIDING MEASUREMENT: SPECIALIZATION LOSES ON THIN DATA EVEN WHEN THE
+SKILL GENUINELY DIFFERS.** Brier on held-out data:
+
+```
+skill is the SAME in every regime      pooled   specialized   winner
+   100 observations (20/regime)       0.25114       0.26521   POOLED
+  1000 observations                   0.24788       0.24906   POOLED
+ 10000 observations                   0.24753       0.24763   POOLED
+
+skill GENUINELY DIFFERS by regime      pooled   specialized   winner
+   100 observations (20/regime)       0.24913       0.25808   POOLED
+   300 observations (60/regime)       0.24504       0.24371   SPECIALIZED
+ 10000 observations                   0.24498       0.24175   SPECIALIZED
+```
+
+When skill does not differ, pooling wins at *every* sample size. When it does,
+specialization still loses until ~300 observations.
+
+**THE RARE-REGIME PROBLEM.** The regimes are not equally common — stress is
+~5% of observations, so at n=1000 overall it holds ~52. And a rate estimated
+from ~50 observations carries a typical error of **0.056**, comparable to the
+**0.08** difference being detected. The estimate *is* the noise. A stress
+model is refused until its own evidence exists, however much total data the
+system holds.
+
+**A BARE OOS WIN IS NOT EVIDENCE.** MEASURED with no real difference anywhere,
+specialization still "wins OOS" on **14–23%** of single comparisons. Adding a
+relative margin and a fold majority:
+
+```
+rule                        false adopt      true adopt
+bare OOS win                  14 - 23%        30 - 100%
+win by >= 0.5% relative         0 -  1%        75 - 100%
+win by >= 2.0% relative              0%         0 -  10%
+
+folds/need              real effect found   worst noise regime
+   1 of 1                    85 - 96%            19 - 26%
+   4 of 5                    36 - 68%             2 -  4%
+   5 of 5                    10 - 33%                  0%
+```
+
+Shipped **0.5% margin, 4 of 5 folds**: measured 0/200 noise adoptions while
+real specialization is still found. Demanding all five folds rejects a real
+effect two thirds of the time — that is blindness, not caution.
+
+**Decided per regime, never all-or-nothing.** MEASURED, a common regime with a
+real difference adopts at 63% while a rare one adopts at 1% on the same data;
+an all-or-nothing rule holds the first hostage to the second. And a regime
+that does not earn its own model **falls back to pooled**, never going
+unserved — no model for stress because stress is rare would remove coverage
+exactly when it matters most.
+
+**TWO BLIND SPOTS IN MY OWN GATE, both found by reinjection.** The noise check
+compared a pooled and a specialized prediction that were *identical*
+(0.55 vs 0.55), so the gain was exactly zero and no fold could ever be won
+whatever the rule was — it passed against a gate with the margin removed AND
+against one where a single fold sufficed. Replaced with a specialized model
+fitted on its own finite sample. Then the check still missed the margin
+attack at 40 trials: MEASURED, dropping the margin at 4-of-5 folds takes noise
+adoption from 0/400 to 23/400 (5.75%), which 40 trials miss most of the time.
+Raised to 200 trials, and both attacks are now caught.
+
+- Acceptance: 31 tests in `tests/test_regime_specialization.py`; gate
+  `scripts/check_regime_specialization.py`, verified to FAIL under twelve
+  reinjected invariants — the default flipped to specialized, the margin
+  removed in config and again in code, the margin raised past the knee, the
+  cell floor dropped in config and again in code, the fold majority reduced to
+  a minority in config and again in code, INSUFFICIENT collapsed into POOLED,
+  the pooled fallback removed, a regime left unserved, and a report covering
+  only the regimes it was handed.
+
+### L8. Champion evolution ✓ DONE
+
+"Replacement requires credible OOS improvement, acceptable calibration, no
+unacceptable false-positive degradation, acceptable risk, regime robustness,
+reproducibility, governance approval. Historical forecasts remain immutable."
+`core/champion_evolution.py` plus the L8 block in `core/config.py`.
+
+**Seven conditions and an invariant.** Most have an owner, and L8 sequences
+rather than rebuilds them (W5) — it owns three, because three gaps were real:
+
+| condition | owner |
+|---|---|
+| credible OOS improvement | M5 comparison **+ L8 credibility** |
+| acceptable calibration | L6 `calibration_drift` |
+| no false-positive degradation | **L8 (new)** |
+| acceptable risk | **L8 (new)** |
+| regime robustness | L7 |
+| reproducibility | M8 |
+| governance approval | M5 |
+
+**GAP 1 — "CREDIBLE" WAS UNQUALIFIED.** M5 requires the candidate to beat the
+incumbent out of sample, but not by how much relative to noise. MEASURED, two
+models of **identical** skill:
+
+```
+    n     mean gap   p90 gap   p99 gap
+  250      -0.0014   +0.0560   +0.1040
+ 1000      -0.0004   +0.0280   +0.0500
+ 2000      -0.0003   +0.0195   +0.0365
+```
+
+At n=250 a challenger with **no real edge** beats the champion by 5.6 points on
+10% of comparisons and 10.4 points on 1%. So the improvement is compared
+against its own standard error and the bar **scales with the evidence** — a
+fixed percentage would be far too lax at small n and too strict at large n.
+Floor of 500, because detection of a real 3-point edge at the p<0.01 bar is
+only 6.3% at n=250.
+
+**GAP 2 — RISK WAS NEVER MEASURED AT PROMOTION.** MEASURED with the hit rate
+held **fixed** and only the *size* of losing moves changed:
+
+```
+model                              hit rate   mean ret    max DD
+champion                              0.580   +0.00160   -0.1244
+challenger: same acc, big losses      0.580   -0.00681   -3.4496
+challenger: better acc + big losses   0.620   -0.00520   -2.6626
+```
+
+The second has the **same hit rate and a 28× worse drawdown**; the third has a
+*better* hit rate and still loses money. An accuracy-only gate promotes both.
+L8 bounds drawdown and left tail as ratios of the incumbent's.
+
+**GAP 3 — FALSE POSITIVES ARE NOT THE VETO RATE.** M5's regression check
+watches how often the *policy* vetoes; L8 needs how often an **acted-on** call
+was wrong. MEASURED:
+
+```
+model                             overall acc   BUY false-positive rate
+champion                                0.594                     0.349
+challenger: same acc, worse BUYs        0.597                     0.551
+```
+
+The challenger matches the champion on overall accuracy while every acted-on
+call got worse — accuracy cannot see it.
+
+**Historical forecasts remain immutable** — the one clause that is an
+invariant, not a threshold. Checked by comparison, not assumed: a rewritten
+value, a forecast **re-attributed to a different model**, and a **deleted**
+row are all detected, because deletion rewrites the record as surely as an
+edit does. Appending new forecasts is allowed.
+
+**Two failures in my own tests, both percentile arithmetic.** I asserted that
+one bad day in 100 is the 5th percentile (it is the 6th worst that counts),
+then that 10 worsened days in 500 would move the tail (2% is inside it). The
+code was right both times; the assertions were wrong and were corrected rather
+than the behaviour.
+
+- Acceptance: 43 tests in `tests/test_champion_evolution.py`; gate
+  `scripts/check_champion_evolution.py`, verified to FAIL under thirteen
+  reinjected invariants — a condition dropped, the credibility bar removed in
+  config and again in code, the OOS floor lowered, the drawdown bound widened,
+  the risk condition neutered, the false-positive bound widened,
+  NOT_EVALUATED treated as passing, L8 claiming governance, a delegated
+  verdict overridden to PASS, history made mutable, and deletion or
+  re-attribution of a past forecast going undetected.
+
+### L-blocker. Live chart state ✓ DONE
+
+`scripts/run_forecasts.py` derived each ticker's chart state from that
+ticker's most recent EVENT MEMORY. That is correct for a backfill — there the
+memory *is* the point in time being forecast from — and wrong for a live run,
+where the forecast gets anchored to whenever that ticker last happened to
+produce a memory.
+
+**MEASURED across the 73 tickers holding a memory, against 2026-09-21:**
+
+```
+staleness   min 3 days   median 144   mean 166   max 535
+```
+
+**THE STALENESS IS NOT THE HARM — WHAT IT RETRIEVES IS.** The chart state is
+the *retrieval key* for analogs, so a stale key does not return a slightly
+stale forecast; it looks up a different history:
+
+```
+tkr    memory as_of   close then   close now   regime then   regime now
+VOO    2025-04-04         465.52      701.78   bearish       bullish
+CIBR   2025-04-07          57.71       99.87   bearish       bullish
+CAT    2025-10-29         585.49      808.99   bullish       bullish
+AAPL   2026-09-18         337.00      336.13   bullish       bullish
+```
+
+The retrieved analog **sets** overlapped by a mean Jaccard of **0.205** — four
+fifths of the evidence differed — and the stale key called VOO and CIBR
+**bearish while both were in fact bullish**. VOO retrieved 22 analogs from its
+April-2025 chart and 6 from today's. That is not a stale-but-reasonable
+forecast; it answers a question about a different market.
+
+**One builder, not two (W5).** The calculation lived in
+`scripts/build_event_memory._chart_snapshot`. It is now canonical in
+`core.chart_features.chart_state(frame, position=None)`: the backfill calls it
+at a historical position, the live run at the last bar. Verified identical to
+the original on 15 real probes before the duplicate was deleted — had they
+diverged, every similarity score would compare two definitions of the same
+thing.
+
+**A live run REFUSES; it never falls back.** A fallback would reinstate the
+stale anchor while reporting success. Bars are truncated to `as_of` *before*
+the state is built, so a replayed date cannot read its own future — MEASURED
+with the truncation removed, a replay of 2025-11-03 returned AAPL at 336.13
+(today's close) instead of 270.37. Refusals carry their reason, because a
+short history is a permanent property of a young listing while a stale last
+bar means the feed stopped and someone has to look.
+
+**A REAL BLIND SPOT IN MY OWN GATE.** The no-fallback check searched the
+source for the string `memory.chart_state`. Reinjecting the fallback under any
+other variable name (`_m.chart_state`) walked straight past it — a guard that
+matches one *spelling* of a bug does not guard against the bug. Replaced with
+a behavioural probe: the price feed is killed and the run must produce
+nothing. A second pass showed that probe only covered `live_chart_states`,
+while the attack sat downstream in `record_run`; both are now starved and both
+must forecast zero.
+
+- Acceptance: 16 tests in `tests/test_live_chart_state.py`; gate
+  `scripts/check_live_chart_state.py`, verified to FAIL under ten reinjected
+  invariants — the builder duplicated, the fallback restored under three
+  different spellings and call sites, the staleness bound widened, the bar
+  minimum lowered, `as_of` truncation removed, the position argument ignored,
+  and a refusal stripped of its reason.
+
+### Sprint L open items — to close before the sprint ends
+
+> Superseded: the live register is **[docs/open-decisions.md](open-decisions.md)**.
+> The items below are kept for the sprint record.
+
+1. ~~**Live runs must use TODAY's chart state.**~~ ✓ FIXED — see below.
+2. **VOO news tracking is an open decision.** It is currently skipped as a
+   broad-market fund whose news E5 would call confounded — but the S&P 500 is
+   one of the most important series the system follows, and the operator has
+   asked to revisit. Not a defect; a judgement to re-make deliberately.
+3. **NASA has no metadata.** `data/universe.jsonl` carries its ticker and
+   nothing else, so it cannot be classified as a fund or a company. Skipped
+   for news until resolved.
+
+### L2–L? — pending
+
+---
+
+## Sprint R — Portfolio Risk Context (completing the fail-closed system)
+
+> Retitled in practice to **Portfolio-Aware Forecasting**: the goal is moving
+> from "is this ticker attractive?" to "does acting on this forecast improve
+> the current portfolio without violating risk constraints?"
+
+### R2. Correlation-aware sizing ✓ DONE
+
+`core/correlation_sizing.py` plus the R2 block in `core/config.py`.
+
+R1 established that weight is not exposure. R2 asks the next question: **how
+big should a position be, given what is already held?**
+
+**EQUAL-WEIGHT SIZING IGNORES CORRELATION, and the cost is large.** MEASURED
+on 498 aligned sessions, a 40% budget spent four ways beside 60% VOO:
+
+```
+4 correlated semis (NVDA/AMD/AVGO/SOXX)   vol 1.587%
+4 diverse names (NVDA/MSFT/JPM/XOM)       vol 1.054%
+```
+
+The **same total weight** carries **50.5% more risk**.
+
+**A NEGATIVE RESULT THAT SHAPES THE WHOLE TASK.** Reweighting *inside* a
+correlated basket barely helps:
+
+```
+rule                   NVDA    AMD   AVGO   SOXX       vol
+equal weight          0.100  0.100  0.100  0.100    1.587%
+inverse volatility    0.111  0.078  0.094  0.116    1.570%
+equal risk contrib    0.114  0.081  0.098  0.106    1.572%
+```
+
+All three land within 1%. The excess came from **composition**, not weights:
+
+```
+allocation of the 40% budget          vol    vs equal-weight semis
+4 semis, equal weight              1.587%                    +0.0%
+4 semis, inverse-vol weighted      1.568%                    -1.2%
+3 semis + 1 diversifier            1.429%                   -10.0%
+1 semi  + 3 diversifiers           1.054%                   -33.6%
+```
+
+Reweighting buys ~1%; changing what is held buys 10–34%. **Sizing cannot fix
+selection**, and a module implying otherwise would sell a false remedy — so
+the docstring, the config and the gate all say so.
+
+**SO SIZING IS DONE AGAINST THE WHOLE PORTFOLIO.** MEASURED against a held
+portfolio of 25% NVDA / 15% AMD / 30% MSFT / 30% VOO (vol 1.690%), a **fixed**
+10% purchase:
+
+```
+add 10% AVGO  ->  +3.07% portfolio vol
+add 10% SOXX  ->  +2.75%
+add 10% VOO   ->  -4.89%
+add 10% XOM   ->  -9.24%
+```
+
+The same nominal size means something different for every ticker. Sizing to a
+**risk budget** makes "position size" a comparable unit for the first time.
+
+**TWO INDEPENDENT BOUNDS, because one is not enough.** MEASURED, an
+uncorrelated name reached 50%+ inside a 5% volatility budget *because it
+reduces volatility* — the risk budget alone does not bound concentration, and
+R1 showed weight and risk are different scales. Every proposal reports **which
+bound applied**: "the portfolio cannot absorb more of this" and "policy stops
+here" are different answers.
+
+**THREE FAILED ATTEMPTS AT A REFUSAL SCENARIO, each a real correction.** To
+test that an unfittable position is REFUSED I first added a near-identical
+twin to a 100%-single-name portfolio — MEASURED, that *reduces* volatility
+(−0.10% at 5%) because idiosyncratic noise averages out. Then a more volatile
+but *uncorrelated* name — that diversifies too (−5.3%). A genuine refusal
+needs a candidate correlated with the holding **and** more volatile: a levered
+version of it. The code was right all three times; my scenario was wrong.
+
+**A REAL BLIND SPOT IN MY OWN GATE.** The ordering check compared `INDY_B`
+against `SEMI_B` — but the diversifier also sorts first *alphabetically*, so
+replacing the risk-ordering with `sorted(by name)` passed. Renamed to
+`ZZZ_DIVERSIFIER` and `AAA_SEMI` so the names disagree with the answer; the
+attack is now caught.
+
+- Acceptance: 27 tests in `tests/test_correlation_sizing.py`; gate
+  `scripts/check_correlation_sizing.py`, verified to FAIL under ten reinjected
+  invariants — the risk budget widened, the weight cap removed in config and
+  again in code, sizing declared non-advisory, the binding constraint
+  suppressed, the session floor lowered, correlation ignored so every ticker
+  gets one size, the minimum-fit check dropped, a trade funded from nowhere,
+  and candidates ordered alphabetically. An eleventh attack proved a no-op
+  (`(x) and 0 or (y)` still returns `y`) and is recorded as such.
+
+### R1. Position exposure ✓ DONE
+
+`core/position_exposure.py` plus the R1 block in `core/config.py`.
+
+**THERE WAS NO PORTFOLIO STATE AT ALL.** `fetch_data.PORTFOLIO_TICKERS` is a
+77-name **watchlist** — symbols with no share counts, no cost basis, no
+weights. The backtest engine tracks shares internally but nothing persists
+live holdings. The Sprint R question could not previously be asked, because
+there was nothing to improve.
+
+**THE DECIDING MEASUREMENT: POSITION WEIGHT IS NOT EXPOSURE.** Two portfolios
+on real daily returns (498 date-aligned sessions to 2026-09-18):
+
+```
+portfolio                       daily vol   max weight   variance in semis
+A: 40% NVDA + 20/20/20             1.741%          40%               58.6%
+B: 10% each NVDA/AMD/AVGO/SOXX     1.760%          10%               56.9%
+```
+
+B looks **four times more diversified** by weight and is slightly *more*
+volatile — the same bet, spread thinner. The watchlist's real mean pairwise
+correlation is 0.484, with SOXX/AMD at 0.78.
+
+**A WEIGHT CAP IS GAMEABLE IN THE WRONG DIRECTION.** "Comply with a 10% cap"
+was satisfied by splitting 40% NVDA across four correlated semiconductors,
+which **raised** volatility 1.741% → 1.760%. A rule that can be satisfied by
+making risk worse is not merely incomplete.
+
+**AND NO NAIVE MEASURE ORDERS PORTFOLIOS CORRECTLY:**
+
+```
+portfolio         vol   max weight   effective bets   max risk share
+all VOO        1.006%         100%             1.00           100.0%
+diversified    1.449%          30%             3.66            32.3%
+40% NVDA       1.741%          40%             2.49            58.6%
+4x10% semis    1.760%          10%             6.80            17.9%
+```
+
+**100% VOO is the least volatile portfolio tested** while scoring worst on
+every weight-based concentration measure. A single diversified fund is not a
+concentrated position. So exposure is reported on **both** scales — weight and
+risk contribution — and a weight-only report is refused.
+
+**MARGINAL EXPOSURE IS THE QUESTION SPRINT R ASKS.** Against a held portfolio
+of 30% NVDA / 20% AMD / 25% MSFT / 25% CAT (vol 1.984%), the same 5% purchase:
+
+```
+add 5% SOXX  -> 2.000%  (+0.016%)  ADDS risk
+add 5% MSFT  -> 1.936%  (-0.048%)  REDUCES risk
+add 5% VOO   -> 1.927%  (-0.057%)  REDUCES risk
+```
+
+The same trade helps or hurts depending entirely on what is already held, and
+no per-ticker forecast can answer that.
+
+**A REAL DATA HAZARD, found while measuring.** My first correlation matrix
+reported MSFT as ~0.00 correlated with **everything**, including VOO. That was
+not a finding — MSFT's series had 501 rows ending 2026-09-18 while NVDA and
+VOO had 500 ending 2026-09-21, and slicing by POSITION rather than joining by
+DATE shifted the series out of step. Date-aligned, MSFT/VOO is 0.53. A
+position-offset join does not fail loudly; it **silently reports
+independence**, so date alignment is mandatory and gate-verified.
+
+**A missing return history is NOT_EVALUATED, never zero risk** — scored as
+zero it would render the least-understood holding as the safest (the shape
+rule, inherited F3→L3).
+
+**Exposure is described, not enforced.** Whether a trade is permitted is a
+later task with its own evidence.
+
+**Known limit, recorded rather than guessed at:** R1 flags POSITIONS, so a
+cluster of correlated holdings is invisible to it — the 4×10% semi portfolio
+raises **zero flags** while holding 56.9% of its variance in one bet.
+Registered as item 5 in [open-decisions.md](open-decisions.md); defining a
+cluster needs its own measurement.
+
+- Acceptance: 35 tests in `tests/test_position_exposure.py`; gate
+  `scripts/check_position_exposure.py`, verified to FAIL under ten reinjected
+  invariants — date alignment disabled in config and again in code (which
+  reproduced the real bug, correlation collapsing 0.96 → 0.07), the session
+  floor lowered, trade blocking enabled, risk contribution dropped, a
+  watchlist entry accepted in config and again in code, a missing history
+  scored as zero risk, risk shares that ignore covariance, and the risk-scale
+  flags removed.
+
+
+The W2 policy table gates single-decision quality; this sprint adds the
+portfolio dimension the design docs require before any paper posture can be
+trusted as more than theater.
+
+### R1. Portfolio state input
+
+- `data/portfolio.json` (versioned schema): holdings
+  `{ticker, quantity, average_cost, currency, as_of}`; loaded through a typed
+  `PortfolioState` dataclass in `core/schemas.py`; absent file ⇒ empty
+  portfolio with `INCOMPLETE` flag on risk payload (analysis proceeds, risk
+  context marked degraded).
+- All risk computations consume this state through the orchestrator — agents
+  never read the file directly.
+
+### R2. Risk checks (each a W2 policy rule with rule_id)
+
+- Per-position cap: proposed/paper exposure vs portfolio notional > 1% → veto
+  (`position_cap_exceeded`), per `docs/validation.md` hard limits.
+- Total exposure cap 20%; daily loss 1%, weekly 3%, monthly drawdown 8% —
+  breach of any halts order generation and reverts mode to `ANALYSIS_ONLY`
+  (the doc-specified behavior), surfaced as `risk_halt_active` until a manual
+  reset event is appended to the audit log.
+- Concentration by correlation proxy: top-3 holdings' pairwise return
+  correlation (60d, from cached bars) > 0.8 → warning severity; liquidity
+  floor: position notional > X% of 20d ADV → veto.
+- All thresholds live in `RISK_POLICY_V2` — no magic numbers in code paths.
+- Acceptance: synthetic portfolio fixtures trip each rule exactly at its
+  boundary; halt-state persists across decisions until the reset event.
+
+### R3. Kill switches and mode separation hardening
+
+- `KILL_SWITCH` env flag checked at the orchestrator entry — when set, every
+  decision returns `NO_TRADE` with reason `kill_switch` regardless of inputs
+  (fail-closed by construction, not by policy evaluation).
+- Mode lattice enforced in one place: `ANALYSIS_ONLY`/`PAPER` reachable by
+  evaluation; `LIVE_DISABLED` is the permanent default state constant;
+  `LIVE_APPROVED` exists only as a schema value with no construction path —
+  a deliberate absent-code guarantee, documented as such.
+
+---
+
+## Sprint D — Operator Dashboard and Explanation Surface
+
+### D1. Per-agent contribution panel
+
+- Render `ensemble_breakdown` (W1) as the primary panel: agent, weight
+  (pre/post renormalization), contribution, status, model version; hover
+  detail mirrors the existing confidence-tooltip pattern.
+- Acceptance: the panel's sum reconciles with the headline score within
+  rounding; a renormalized agent is visually distinguished.
+
+### D2. Historical timeline and confidence drift
+
+- `GET /api/history?ticker=&limit=` served from the enriched audit store
+  (W7) — decision score, confidence, mode, veto reasons over time; UI renders
+  a sparkline/timeline with drift band from the V4 metrics.
+- Acceptance: timeline reflects decisions in strict as_of order regardless of
+  insertion order; gaps (missing days) render as gaps, not zeros.
+
+### D3. Veto and data-quality explanation surface
+
+- Veto panel: structured rule id + severity + human text per W2; the
+  decision-state card links each veto to the issuing agent.
+- Data-quality panel: per-source freshness, quality flags, confidence factor
+  values (from the existing breakdown) — stale/missing sources visually
+  degrade the card, satisfying the design rule that degraded confidence can
+  never hide.
+
+### D4. API completeness contract
+
+- `/api/score` response documented against a schema snapshot test: agent
+  outputs, evidence references, model versions, source metadata, risk and
+  audit results, ensemble breakdown, confidence breakdown — the full JSON
+  contract from `docs/validation.md`, versioned via a top-level
+  `api_schema_version`.
+- Acceptance: a golden-file test fails on any undeclared response-shape
+  change, forcing a deliberate version bump.
+
+---
+
+## Sprint X — Release Readiness and Operational Guardrails
+
+### X1. Reproducible release snapshots
+
+- `scripts/export_snapshot.py`: bundles a decision with its complete input
+  state — raw records (W6), feature versions, ensemble/model versions, config
+  snapshot, code commit — into a single verifiable archive (sha256 manifest
+  inside). Any released score must be replayable from its archive alone.
+- Acceptance: archive created on machine A replays bit-identically on
+  machine B with only the repo + venv + archive.
+
+### X2. Alerting rules (evaluate-locally, no infrastructure)
+
+- Rule functions over audit/outcome stores: stale critical source > N hours,
+  veto-rate spike, score-distribution drift beyond PSI threshold, limit
+  breach (R2), audit-write failure. Output: structured alert records to
+  `data/alerts.jsonl` + stderr; no external pager dependency at this stage.
+- Acceptance: each rule has a positive and negative synthetic test; alerts
+  carry the evidence ids that triggered them.
+
+### X3. Human approval workflow
+
+- Approval events are audit-log entries (`event_type: approval`) with actor,
+  scope (model promotion / mode change / halt reset), and rationale — no
+  separate approval system until one is justified.
+- The 6-month/500-trade paper gate (validation doc) is a queried report
+  (`scripts/gate_report.py`), not a dashboard claim: it computes the evidence
+  or states plainly that it does not exist yet.
+- Acceptance: gate report on today's data returns "gate not met" with the
+  exact unmet criteria listed — honesty as a tested behavior.
+
+### X4. Final hard gates
+
+- Execution path: remains nonexistent. The release checklist asserts the
+  absent-code guarantees (no order construction outside paper engine, no
+  broker credentials in config surface, `LIVE_APPROVED` unreachable).
+- Every gate from `docs/validation.md` mapped to a test or a script check,
+  indexed in a single `RELEASE_GATES.md` with pass/fail provenance.
+
+---
+
+## Cross-Cutting Engineering Standards (bind every sprint above)
+
+- Determinism: the score path contains no wall-clock reads, no randomness,
+  no dict-order dependence; all timestamps attached at the orchestration
+  boundary. Replay tests enforce per sprint, not once.
+- Versioning discipline: any change to a formula, weight, threshold table,
+  label definition, or classifier bumps its `*_VERSION` constant in the same
+  commit; the old version's behavior stays documented in the audit trail.
+- Fail-closed default: every new input, provider, or factor starts in the
+  most restrictive posture; loosening requires a test that names the risk
+  being accepted.
+- No silent defaults: neutral values (e.g., RSI 50, base 4.0) are allowed
+  only where the design doc states the neutral semantics; everywhere else,
+  absence is a status, not a zero.
+- Test conventions: provider adapters are hermetically mocked (recorded
+  fixtures); network-touching integration tests are marked and kept few;
+  every bug fix lands with the regression test that would have caught it
+  (house rule proven by `4fbb92c`).
+- Documentation-in-motion: each sprint updates its board section and the
+  relevant design doc in the same PR as the code; `docs/sprint-board.md`
+  checkboxes reflect reality, not aspiration.
+- Performance guardrail: interactive score path stays within the 10s p95
+  budget from `docs/architecture.md`; backtest/paper paths have no budget
+  but must be offline-replayable.
+
+---
+
+## Recommended Execution Order
+
+1. **Sprint W** (governance wiring) — unblocks and de-risks everything;
+   small, fully testable increments.
+2. **Sprint N** (news/sentiment/macro/regime) — context layer, agents born
+   wired into the now-real ensemble.
+3. **Sprint V** (labels → backtest → paper) — evidence engine; independent
+   of N3/N4 depth, can start after W.
+4. **Sprint M** (ML/calibration/registry) — strictly after V; the first
+   dependency addition of the project happens here.
+5. **Sprint R + D** (portfolio risk, operator surface) — R rides on W2's
+   policy table; D rides on W7's enriched audit store.
+6. **Sprint X** (release gates) — last, and mostly verification of what the
+   earlier sprints should have made true.
+
+Standing rule between sprints: stop, review actual behavior against the
+acceptance criteria, and only then advance — per the working method already
+established in `docs/sprint-board.md`.
+
+
+
+
+
+
+
