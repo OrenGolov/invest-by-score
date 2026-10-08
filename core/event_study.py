@@ -45,6 +45,7 @@ timestamps come from the caller and all prices from supplied frames.
 
 from __future__ import annotations
 
+import math
 import statistics
 from dataclasses import asdict, dataclass, field
 from typing import Any
@@ -168,15 +169,60 @@ def _baseline_window(frame: pd.DataFrame, entry: int) -> tuple[int, int] | None:
     return start, end
 
 
+def _session_returns(frame: pd.DataFrame, start: int, end: int) -> list[float]:
+    """Close-to-close returns over a slice, with non-finite values dropped.
+
+    **Why the finiteness check is not paranoia.** A provider may serve NaN for
+    a halted session, a missing bar or a bad split adjustment, and pandas
+    carries it through arithmetic silently. The old guard tested only the
+    DENOMINATOR (`closes[i - 1] > 0`), which NaN fails — so a NaN there was
+    caught, while a NaN in the NUMERATOR produced a NaN return and passed.
+
+    That is not a cosmetic difference, because `statistics.pstdev` converts its
+    inputs to exact fractions and NaN has no `.numerator`:
+
+        AttributeError: 'float' object has no attribute 'numerator'
+
+    MEASURED 2026-10-08: that exception, raised from this module, aborted the
+    entire `events` stage of a collection run on a fresh checkout -- where
+    prices are pulled live rather than read from an aged local cache. Nothing
+    was written, and the error named a type rather than the data, so it read
+    like a code fault rather than a bad bar.
+
+    Infinities are dropped for the same reason: `pstdev` rejects them
+    identically, and a return of inf means the previous close was effectively
+    zero, which is not a price move anybody can study.
+    """
+    closes = [float(v) for v in frame["Close"].iloc[start:end + 1]]
+    returns: list[float] = []
+    for index in range(1, len(closes)):
+        previous, current = closes[index - 1], closes[index]
+        if not (math.isfinite(previous) and math.isfinite(current)):
+            continue
+        if previous <= 0:
+            continue
+        returns.append(current / previous - 1.0)
+    return returns
+
+
+def _finite_volumes(frame: pd.DataFrame, start: int, end: int) -> list[float]:
+    """Positive, finite volumes over a slice.
+
+    `statistics.fmean` tolerates a NaN by returning NaN rather than raising, so
+    this one degrades to a silently wrong number instead of a crash -- the
+    worse failure of the two, since nothing downstream would question it.
+    """
+    return [
+        value
+        for value in (float(v) for v in frame["Volume"].iloc[start:end + 1])
+        if math.isfinite(value) and value > 0
+    ]
+
+
 def _baseline_stats(frame: pd.DataFrame, start: int, end: int) -> dict[str, Any]:
     """Normal behaviour: mean daily return, volatility and mean volume."""
-    closes = [float(v) for v in frame["Close"].iloc[start:end + 1]]
-    returns = [
-        closes[index] / closes[index - 1] - 1.0
-        for index in range(1, len(closes))
-        if closes[index - 1] > 0
-    ]
-    volumes = [float(v) for v in frame["Volume"].iloc[start:end + 1] if float(v) > 0]
+    returns = _session_returns(frame, start, end)
+    volumes = _finite_volumes(frame, start, end)
     return {
         "sessions": end - start,
         "start_bar": frame.index[start].strftime("%Y-%m-%d %H:%M:%S"),
@@ -195,17 +241,12 @@ def _baseline_stats(frame: pd.DataFrame, start: int, end: int) -> dict[str, Any]
 
 
 def _realized_volatility(frame: pd.DataFrame, start: int, end: int) -> float | None:
-    closes = [float(v) for v in frame["Close"].iloc[start:end + 1]]
-    returns = [
-        closes[index] / closes[index - 1] - 1.0
-        for index in range(1, len(closes))
-        if closes[index - 1] > 0
-    ]
+    returns = _session_returns(frame, start, end)
     return round(statistics.pstdev(returns), 8) if len(returns) > 1 else None
 
 
 def _mean_volume(frame: pd.DataFrame, start: int, end: int) -> float | None:
-    volumes = [float(v) for v in frame["Volume"].iloc[start + 1:end + 1] if float(v) > 0]
+    volumes = _finite_volumes(frame, start + 1, end)
     return round(statistics.fmean(volumes), 2) if volumes else None
 
 

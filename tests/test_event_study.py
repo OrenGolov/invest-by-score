@@ -16,6 +16,8 @@ Three properties decide whether the measurements can be trusted:
 
 from __future__ import annotations
 
+import math
+import statistics
 import unittest
 
 import numpy as np
@@ -32,6 +34,9 @@ from core.config import (
 from core.event_contract import Event
 from core.event_study import (
     EventStudyError,
+    _baseline_stats,
+    _mean_volume,
+    _realized_volatility,
     observations_from_studies,
     run_event_study,
     study_event,
@@ -361,6 +366,90 @@ class TimezoneAwareEventTimeTests(unittest.TestCase):
             "NVDA", middle.strftime("%Y-%m-%dT16:00:00+03:00"), frame, event_id="o"
         )
         self.assertIsNotNone(result.status)
+
+
+class NonFinitePricesTests(unittest.TestCase):
+    """A NaN bar must not abort the study.
+
+    MEASURED 2026-10-08 on a GitHub Actions runner: a NaN close reached
+    `statistics.pstdev`, which converts inputs to exact fractions, and raised
+
+        AttributeError: 'float' object has no attribute 'numerator'
+
+    That aborted the whole `events` stage of a collection run and wrote
+    nothing. It surfaced in the cloud rather than locally because a fresh
+    checkout pulls prices live instead of reading an aged local cache.
+
+    The old guard checked only the denominator (`closes[i - 1] > 0`), which a
+    NaN fails -- so a NaN there was dropped while a NaN in the numerator
+    produced a NaN return and passed straight through.
+    """
+
+    def _frame(self, closes: list[float], volumes: list[float] | None = None):
+        index = pd.date_range("2026-01-01", periods=len(closes), freq="D")
+        return pd.DataFrame(
+            {
+                "Close": closes,
+                "Volume": volumes if volumes is not None else [1e6] * len(closes),
+            },
+            index=index,
+        )
+
+    def test_nan_close_does_not_raise(self) -> None:
+        frame = self._frame([100.0, 101.0, float("nan"), 103.0, 104.0])
+        self.assertIsNotNone(_realized_volatility(frame, 0, 4))
+
+    def test_nan_is_dropped_not_propagated(self) -> None:
+        # The surrounding bars still produce a real number; a NaN that merely
+        # survived into the result would be worse than the crash, since
+        # nothing downstream questions a float.
+        with_nan = self._frame([100.0, 101.0, float("nan"), 103.0, 104.0])
+        value = _realized_volatility(with_nan, 0, 4)
+        self.assertIsNotNone(value)
+        self.assertFalse(math.isnan(value))
+
+    def test_infinity_is_dropped(self) -> None:
+        frame = self._frame([100.0, float("inf"), 102.0, 103.0, 104.0])
+        value = _realized_volatility(frame, 0, 4)
+        self.assertIsNotNone(value)
+        self.assertTrue(math.isfinite(value))
+
+    def test_all_nan_returns_none_rather_than_raising(self) -> None:
+        frame = self._frame([float("nan")] * 5, [float("nan")] * 5)
+        self.assertIsNone(_realized_volatility(frame, 0, 4))
+        self.assertIsNone(_mean_volume(frame, 0, 4))
+
+    def test_zero_close_still_guarded(self) -> None:
+        # The original denominator guard must survive the rewrite: dividing by
+        # a zero close is what it was there for.
+        frame = self._frame([100.0, 0.0, 102.0, 103.0, 104.0])
+        value = _realized_volatility(frame, 0, 4)
+        self.assertIsNotNone(value)
+        self.assertTrue(math.isfinite(value))
+
+    def test_nan_volume_does_not_silently_skew_the_mean(self) -> None:
+        # fmean returns NaN rather than raising, so this one degrades to a
+        # wrong number instead of a crash -- the worse of the two failures.
+        frame = self._frame([100.0] * 5, [1e6, float("nan"), 1e6, 1e6, 1e6])
+        value = _mean_volume(frame, 0, 4)
+        self.assertIsNotNone(value)
+        self.assertFalse(math.isnan(value))
+
+    def test_clean_prices_are_unchanged(self) -> None:
+        frame = self._frame([100.0, 101.0, 102.0, 103.0, 104.0])
+        returns = [101 / 100 - 1, 102 / 101 - 1, 103 / 102 - 1, 104 / 103 - 1]
+        self.assertAlmostEqual(
+            _realized_volatility(frame, 0, 4),
+            round(statistics.pstdev(returns), 8),
+            places=8,
+        )
+
+    def test_baseline_stats_survive_a_nan(self) -> None:
+        frame = self._frame([100.0, 101.0, float("nan"), 103.0, 104.0, 105.0])
+        stats = _baseline_stats(frame, 0, 5)
+        self.assertIsNotNone(stats["daily_volatility"])
+        self.assertFalse(math.isnan(stats["daily_volatility"]))
+        self.assertFalse(math.isnan(stats["mean_volume"]))
 
 
 if __name__ == "__main__":
