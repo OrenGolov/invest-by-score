@@ -157,8 +157,14 @@ jobs:
       # Runs last and is allowed to fail the job: this is the signal that a
       # human is needed (an auth failure, or sustained silence). A quota day
       # stays silent by design -- see COLLECTION_ALERT_ON_QUOTA.
+      # A DRY RUN IS EXCLUDED, and the reason is not cosmetic. `--dry-run`
+      # writes no collection report by design, so this monitor finds no run for
+      # today and correctly reports "the collector did not run" -- exit 1.
+      # MEASURED 2026-10-08: that made the dry run ALWAYS fail, which destroys
+      # the only safe way to test this workflow. A check that cannot pass tells
+      # you nothing about the thing you wanted to check.
       - name: Alert on collection failure
-        if: always()
+        if: always() && inputs.dry_run != true
         env:
           # These names are the ones core.config actually reads
           # (ALERT_EMAIL_PASSWORD_ENV, TELEGRAM_BOT_TOKEN_ENV, ...), not the
